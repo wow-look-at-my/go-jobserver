@@ -144,13 +144,15 @@ When the running jobs together exceed the budget, the daemon applies the control
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
-| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | not available |
-| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | not available |
-| `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | not available |
+| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | no such call |
+| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | no such call |
+| `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | not attempted |
 
-A mechanism that this host cannot perform reports `not-applicable` with the reason rather than claiming to have done something. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
+`affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` is attempted everywhere except Windows, where the signal this host reaches terminates the process instead of stopping it. Asking will kill the job rather than pause it. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
 
 macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy: the same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
+
+Windows is the one host where none of the three is available today. The gap is not in this program. This binary is one fat APE, so on Windows it reaches Win32 through the cosmo Go runtime's syscall emulation, and that layer has no case. This holds for `sched_setaffinity` or `setpriority` (it answers ENOSYS), while its `kill` terminates rather than suspends. Cosmopolitan's own C library does implement `sched_setaffinity` for Windows on top of `SetProcessAffinityMask`. The emulation case, and the toolchain release that ships it, are what is missing.
 
 ### Picking processes
 

@@ -65,61 +65,76 @@ func revertMechanism(m Mechanism, pid, cpus int) (Outcome, string) {
 // applyAffinity pins a process to a CPU set. Linux has a real per-process CPU
 // mask. Darwin's kernel keeps no such mask, so its CPU placement control is
 // the background policy, which moves a process's work onto the efficiency
-// cores. Anywhere else the call is reported as not applicable rather than
-// attempted and refused.
+// cores.
 func applyAffinity(pid int, cpus []int) (Outcome, string) {
-	switch hostOS() {
-	case "linux":
-		if err := setAffinitySyscall(pid, cpus); err != nil {
-			return refused(err)
-		}
-		return OutcomeApplied, "cpus " + joinInts(cpus)
-	case "darwin":
+	if hostOS() == "darwin" {
 		out, detail := setDarwinBackground(pid)
 		if out == OutcomeApplied {
 			return out, detail + " (cpus " + joinInts(cpus) + ")"
 		}
 		return out, detail
-	default:
-		return OutcomeNotApplicable, "this binary's " + hostOS() + " syscall layer has no CPU-affinity call"
 	}
+	return controlCall(func() error { return setAffinitySyscall(pid, cpus) },
+		OutcomeApplied, "cpus "+joinInts(cpus))
 }
 
 // revertAffinity restores a process's full CPU set.
 func revertAffinity(pid, cpus int) (Outcome, string) {
-	switch hostOS() {
-	case "linux":
-		if err := clearAffinitySyscall(pid, cpus); err != nil {
-			return refused(err)
-		}
-		return OutcomeReverted, "every CPU"
-	case "darwin":
+	if hostOS() == "darwin" {
 		return clearDarwinBackground(pid)
-	default:
-		return OutcomeNotApplicable, "this binary's " + hostOS() + " syscall layer has no CPU-affinity call"
 	}
+	return controlCall(func() error { return clearAffinitySyscall(pid, cpus) },
+		OutcomeReverted, "every CPU")
+}
+
+// controlCall runs one process-control call.
+func controlCall(call func() error, applied Outcome, detail string) (Outcome, string) {
+	if err := call(); err != nil {
+		return callFailure(err)
+	}
+	return applied, detail
 }
 
 // applyNice raises a process's nice value.
 func applyNice(pid, nice int) (Outcome, string) {
-	if hostOS() == "windows" {
-		return OutcomeNotApplicable, "this binary's Windows syscall layer has no setpriority call"
-	}
-	return setNice(pid, nice)
+	out, detail := setNice(pid, nice)
+	return outcomeFor(hostOS(), out, detail)
 }
 
 // revertNice restores a process's nice value.
 func revertNice(pid int) (Outcome, string) {
-	if hostOS() == "windows" {
-		return OutcomeNotApplicable, "this binary's Windows syscall layer has no setpriority call"
+	out, detail := clearNice(pid)
+	return outcomeFor(hostOS(), out, detail)
+}
+
+// callFailure classifies a failed process-control call.
+func callFailure(err error) (Outcome, string) {
+	out, detail := refused(err)
+	return outcomeFor(hostOS(), out, detail)
+}
+
+// outcomeFor reports what a call did.
+func outcomeFor(host string, out Outcome, detail string) (Outcome, string) {
+	if out == OutcomeRefused && !schedulable(host) {
+		return OutcomeNotApplicable, detail
 	}
-	return clearNice(pid)
+	return out, detail
+}
+
+// schedulable reports whether a host's syscall layer is the one these calls
+// are spelled for.
+func schedulable(host string) bool {
+	switch host {
+	case "linux", "darwin", "freebsd", "netbsd", "openbsd":
+		return true
+	}
+	return false
 }
 
 // applyFreeze suspends a process.
 func applyFreeze(pid int) (Outcome, string) {
 	if hostOS() == "windows" {
-		return OutcomeNotApplicable, "this binary's Windows syscall layer has no process-suspend call"
+		return OutcomeNotApplicable, "the Windows syscall layer turns this signal into termination"
 	}
 	return freeze(pid)
 }

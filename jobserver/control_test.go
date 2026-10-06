@@ -132,6 +132,17 @@ func TestAffinityPinsTheLinuxCPUMask(t *testing.T) {
 	require.Equal(t, OutcomeReverted, outcome, detail)
 }
 
+func TestACallAMissingHostCarriesIsNotARefusal(t *testing.T) {
+	out, detail := outcomeFor("windows", OutcomeRefused, "function not implemented")
+	assert.Equal(t, OutcomeNotApplicable, out, "%s on a host without the call", detail)
+
+	out, detail = outcomeFor("linux", OutcomeRefused, "operation not permitted")
+	assert.Equal(t, OutcomeRefused, out, "a call the host has and declined stays a refusal")
+
+	out, _ = outcomeFor("windows", OutcomeApplied, "cpus 0")
+	assert.Equal(t, OutcomeApplied, out, "a call that worked is reported as applied")
+}
+
 func TestControllingAProcessThatIsGoneIsNotARefusal(t *testing.T) {
 	if hostOS() == "windows" {
 		return
