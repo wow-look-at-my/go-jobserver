@@ -34,7 +34,7 @@ commands:
   pause                stop starting new jobs
   resume               start scheduling again
   interrupt <id|all>   stop running jobs
-  policy <id>          replace a job's CPU cost and process-control settings
+  policy [flags] <id>  replace a job's CPU cost and process-control settings
   stats                show server counters, CPU use and active controls
   version              print the version
 

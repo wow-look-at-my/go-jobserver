@@ -180,7 +180,7 @@ Per-mechanism selectors are also part of the job spec, so the JSON transports ca
 }
 ```
 
-`go-jobserver policy <id> -freeze -exempt ffmpeg` replaces a job's policy, which is how a mechanism is turned off again. `-no-cpu` turns sampling off entirely.
+`go-jobserver policy -freeze -exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `-no-cpu` turns sampling off entirely.
 
 ## Durability
 
