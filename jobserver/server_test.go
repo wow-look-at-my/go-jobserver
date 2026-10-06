@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -38,6 +39,10 @@ func (f *fakeRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error
 		io.WriteString(out, text)
 	}
 	for path, body := range writes {
+		if j.Dir == "" {
+			// Writing without a job directory would land in the package directory, which is the repository during a test run.
+			return -1, errors.New("the fake runner needs a job directory to write an output")
+		}
 		if err := os.WriteFile(resolvePath(j.Dir, path), []byte(body), 0o644); err != nil {
 			return -1, err
 		}
@@ -204,16 +209,17 @@ func TestServerFailsADependentWhenItsDependencyFails(t *testing.T) {
 
 func TestServerFailsAJobWhoseDeclaredOutputIsMissing(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.Runner = &fakeRunner{} })
-	j, _, err := srv.Enqueue(Spec{Command: []string{"x"}, Outputs: []string{"never-written.txt"}})
+	j, _, err := srv.Enqueue(Spec{Command: []string{"x"}, Dir: t.TempDir(), Outputs: []string{"never-written.txt"}})
 	require.NoError(t, err)
 	done := waitState(t, srv, j.ID, StateFailed)
 	assert.Contains(t, done.Error, "never-written.txt")
 }
 
 func TestServerRecordsArtifacts(t *testing.T) {
+	dir := t.TempDir()
 	runner := &fakeRunner{writes: map[string]string{"out.bin": "payload"}}
 	srv := newTestServer(t, func(c *Config) { c.Runner = runner })
-	j, _, err := srv.Enqueue(Spec{Command: []string{"x"}, Outputs: []string{"out.bin"}})
+	j, _, err := srv.Enqueue(Spec{Command: []string{"x"}, Dir: dir, Outputs: []string{"out.bin"}})
 	require.NoError(t, err)
 	done := waitState(t, srv, j.ID, StateCompleted)
 	require.Len(t, done.Artifacts, 1)
