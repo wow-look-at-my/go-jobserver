@@ -111,9 +111,8 @@ func waitState(t *testing.T, srv *Server, id string, want State) *Job {
 		if j.State == want {
 			return j
 		}
-		if j.State.Terminal() && want != j.State {
-			t.Fatalf("job %s reached %s (%s), want %s", id, j.State, j.Error, want)
-		}
+		require.False(t, j.State.Terminal() && want != j.State)
+
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("job %s never reached %s", id, want)

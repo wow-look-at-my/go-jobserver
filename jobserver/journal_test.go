@@ -2,10 +2,12 @@ package jobserver
 
 import (
 	"bytes"
+	"io"
 	"os"
-	"reflect"
 	"testing"
-	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRecordRoundTrip(t *testing.T) {
@@ -31,13 +33,10 @@ func TestRecordRoundTrip(t *testing.T) {
 	for _, want := range recs {
 		payload := want.encode()
 		got, err := decodeRecord(payload)
-		if err != nil {
-			t.Fatalf("kind %d: decodeRecord: %v", want.kind, err)
-		}
+		require.Nil(t, err)
+
 		want.state = stateOrDefault(want.state, want.kind)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("kind %d round trip:\n got %+v\nwant %+v", want.kind, got, want)
-		}
+		assert.Equal(t, want, got)
 	}
 }
 
@@ -57,96 +56,94 @@ func TestDecodeRecordRejectsGarbage(t *testing.T) {
 		"short string":  {recState, 10, 'a'},
 		"trailing data": append(record{kind: recControl}.encode(), 0xff),
 	}
-	for name, payload := range cases {
-		if _, err := decodeRecord(payload); err == nil {
-			t.Errorf("%s: decodeRecord accepted a malformed record", name)
-		}
+	for _, payload := range cases {
+		_, err := decodeRecord(payload)
+		assert.NotNil(t, err)
+
 	}
 }
 
 func TestFrameDetectsCorruption(t *testing.T) {
 	f := frame(record{kind: recControl}.encode())
-	if _, err := readFrame(bytes.NewReader(f)); err != nil {
-		t.Fatalf("readFrame on an intact frame: %v", err)
-	}
+	_, err := readFrame(bytes.NewReader(f))
+	require.NoError(t, err)
+
 	f[len(f)-1] ^= 0xff
-	if _, err := readFrame(bytes.NewReader(f)); err == nil {
-		t.Fatal("readFrame accepted a frame with a flipped payload byte")
-	}
+	_, err = readFrame(bytes.NewReader(f))
+	require.ErrorIs(t, err, errTornFrame)
 }
 
 func TestReadFrameReportsTornTail(t *testing.T) {
 	f := frame(record{kind: recControl}.encode())
 	for _, cut := range []int{1, frameHeaderSize - 1, len(f) - 1} {
-		if _, err := readFrame(bytes.NewReader(f[:cut])); err == nil {
-			t.Errorf("readFrame accepted a frame cut at %d of %d bytes", cut, len(f))
-		}
+		_, err := readFrame(bytes.NewReader(f[:cut]))
+		assert.ErrorIs(t, err, errTornFrame, "a frame cut at %d of %d bytes was accepted", cut, len(f))
 	}
-	if _, err := readFrame(bytes.NewReader(nil)); err != os.ErrClosed && err.Error() != "EOF" {
-		t.Errorf("readFrame on an empty reader = %v, want EOF", err)
-	}
+	_, err := readFrame(bytes.NewReader(nil))
+	assert.ErrorIs(t, err, io.EOF)
+}
+
+func TestReadFrameRejectsAnOversizedLength(t *testing.T) {
+	f := frame(record{kind: recControl}.encode())
+	f[0], f[1], f[2], f[3] = 0xff, 0xff, 0xff, 0xff
+	_, err := readFrame(bytes.NewReader(f))
+	assert.ErrorIs(t, err, errTornFrame)
+}
+
+func TestStoreOpenOnAnEmptyDirectory(t *testing.T) {
+	st, err := OpenStore(t.TempDir())
+	require.NoError(t, err)
+	defer st.Close()
+	assert.Empty(t, st.Jobs())
+	assert.NoFileExists(t, st.LogPath("nobody"))
 }
 
 func TestOpenStoreCutsATornTail(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	j, err := st.Create(&Spec{Command: []string{"true"}, ID: "j-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Finish(j.ID, StateCompleted, 0, "", nil, 0); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	require.NoError(t, st.Finish(j.ID, StateCompleted, 0, "", nil, 0))
+
 	path := st.journalPath()
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, st.Close())
+
 	// The daemon dies in the middle of an append.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write(frame(record{kind: recState, id: "j-1", state: StateRunning}.encode())[:6]); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	_, err = f.Write(frame(record{kind: recState, id: "j-1", state: StateRunning}.encode())[:6])
+	require.Nil(t, err)
+
 	f.Close()
 
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatalf("OpenStore after a torn tail: %v", err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
 	got, ok := st2.Job("j-1")
-	if !ok {
-		t.Fatal("the job did not survive the reopen")
-	}
-	if got.State != StateCompleted {
-		t.Fatalf("state = %s, want %s", got.State, StateCompleted)
-	}
+	require.True(t, ok)
+
+	require.Equal(t, StateCompleted, got.State)
+
 	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() <= 0 {
-		t.Fatal("the journal is empty after the cut")
-	}
-	if err := st2.SetPaused(true); err != nil {
-		t.Fatalf("appending after the cut: %v", err)
-	}
-	if err := st2.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	require.Greater(t, info.Size(), 0)
+
+	require.NoError(t, st2.SetPaused(true))
+
+	require.NoError(t, st2.Close())
+
 	st3, err := OpenStore(dir)
-	if err != nil {
-		t.Fatalf("OpenStore after appending past the cut: %v", err)
-	}
+	require.Nil(t, err)
+
 	defer st3.Close()
-	if !st3.Paused() {
-		t.Fatal("the record appended after the cut was lost")
-	}
+	require.True(t, st3.Paused())
+
 }
 
 // journalRecordSize measures the records the torn-tail test writes before the
@@ -160,280 +157,227 @@ func journalRecordSize() int {
 func TestOpenStoreKeepsJobs(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	j, err := st.Create(&Spec{
 		ID: "j-a", Name: "build", Command: []string{"make"},
 		Deps: []string{}, Inputs: []string{"in"}, Outputs: []string{"out"},
 		Env: []string{"A=1"}, Dir: "/work", Key: "k", Force: true, Draft: true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if j.State != StateDraft {
-		t.Fatalf("state = %s, want draft", j.State)
-	}
-	if err := st.Activate("j-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Start("j-a"); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	require.Equal(t, StateDraft, j.State)
+
+	require.NoError(t, st.Activate("j-a"))
+
+	require.NoError(t, st.Start("j-a"))
+
 	arts := []Artifact{{Path: "out", Size: 3, SHA256: "sha256:x"}}
-	if err := st.Finish("j-a", StateCompleted, 0, "", arts, 12); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetIdentity("j-a", "sha256:id", "j-0"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, st.Finish("j-a", StateCompleted, 0, "", arts, 12))
+
+	require.NoError(t, st.SetIdentity("j-a", "sha256:id", "j-0"))
+
+	require.NoError(t, st.Close())
 
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
 	got, ok := st2.Job("j-a")
-	if !ok {
-		t.Fatal("the job did not survive the reopen")
-	}
-	if got.Name != "build" || got.Key != "k" || !got.Force || got.Dir != "/work" {
-		t.Fatalf("job fields did not survive: %+v", got)
-	}
-	if len(got.Outputs) != 1 || got.Outputs[0] != "out" {
-		t.Fatalf("outputs = %v", got.Outputs)
-	}
-	if got.State != StateCompleted || got.Attempts != 1 {
-		t.Fatalf("state = %s attempts = %d", got.State, got.Attempts)
-	}
-	if len(got.Artifacts) != 1 || got.Artifacts[0].SHA256 != "sha256:x" {
-		t.Fatalf("artifacts = %+v", got.Artifacts)
-	}
-	if got.Identity != "sha256:id" || got.CacheOf != "j-0" {
-		t.Fatalf("identity = %q cacheOf = %q", got.Identity, got.CacheOf)
-	}
-	if got.LogBytes != 12 {
-		t.Fatalf("log bytes = %d, want 12", got.LogBytes)
-	}
+	require.True(t, ok)
+
+	require.False(t, got.Name != "build" || got.Key != "k" || !got.Force || got.Dir != "/work")
+
+	require.False(t, len(got.Outputs) != 1 || got.Outputs[0] != "out")
+
+	require.False(t, got.State != StateCompleted || got.Attempts != 1)
+
+	require.False(t, len(got.Artifacts) != 1 || got.Artifacts[0].SHA256 != "sha256:x")
+
+	require.False(t, got.Identity != "sha256:id" || got.CacheOf != "j-0")
+
+	require.Equal(t, int64(12), got.LogBytes)
+
 }
 
 func TestOpenStoreFailsAJobThatWasRunning(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Create(&Spec{ID: "j-r", Command: []string{"sleep", "100"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Start("j-r"); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	_, err = st.Create(&Spec{ID: "j-r", Command: []string{"sleep", "100"}})
+	require.Nil(t, err)
+
+	require.NoError(t, st.Start("j-r"))
+
 	w, err := st.LogWriter("j-r")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("half a line")); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	_, err = w.Write([]byte("half a line"))
+	require.Nil(t, err)
+
 	w.Sync()
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, st.Close())
 
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
 	got, _ := st2.Job("j-r")
-	if got.State != StateFailed {
-		t.Fatalf("state = %s, want failed after a restart", got.State)
-	}
-	if got.Error == "" {
-		t.Fatal("the failed job carries no reason")
-	}
+	require.Equal(t, StateFailed, got.State)
+
+	require.NotEqual(t, "", got.Error)
+
 	out, err := st2.ReadLog("j-r", 0, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != "half a line" {
-		t.Fatalf("log = %q, want the bytes written before the restart", out)
-	}
+	require.Nil(t, err)
+
+	require.Equal(t, "half a line", string(out))
+
 }
 
 func TestOpenStoreTruncatesALogPastTheJournal(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Create(&Spec{ID: "j-l", Command: []string{"true"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Finish("j-l", StateCompleted, 0, "", nil, 5); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	_, err = st.Create(&Spec{ID: "j-l", Command: []string{"true"}})
+	require.Nil(t, err)
+
+	require.NoError(t, st.Finish("j-l", StateCompleted, 0, "", nil, 5))
+
 	w, err := st.LogWriter("j-l")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("0123456789")); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	_, err = w.Write([]byte("0123456789"))
+	require.Nil(t, err)
+
+	require.NoError(t, st.Close())
+
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
 	got, _ := st2.Job("j-l")
-	if got.LogBytes != 5 {
-		t.Fatalf("log bytes = %d, want the 5 the journal recorded", got.LogBytes)
-	}
+	require.Equal(t, int64(5), got.LogBytes)
+
 	out, err := st2.ReadLog("j-l", 0, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != "01234" {
-		t.Fatalf("log = %q, want it cut to the recorded length", out)
-	}
+	require.Nil(t, err)
+
+	require.Equal(t, "01234", string(out))
+
 }
 
 func TestStoreRejectsBadInput(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
-	if _, err := st.Create(&Spec{ID: "j-1"}); err != ErrNoCommand {
-		t.Fatalf("create with no command = %v, want %v", err, ErrNoCommand)
-	}
-	if _, err := st.Create(&Spec{ID: "j-1", Command: []string{"true"}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Create(&Spec{ID: "j-1", Command: []string{"true"}}); err == nil {
-		t.Fatal("create accepted a duplicate id")
-	}
-	if _, err := st.Create(&Spec{ID: "j-2", Command: []string{"true"}, Deps: []string{"nope"}}); err == nil {
-		t.Fatal("create accepted a missing dependency")
-	}
-	if err := st.AddDep("j-1", "j-1"); err == nil {
-		t.Fatal("AddDep accepted a self dependency")
-	}
-	if err := st.Activate("nope"); err == nil {
-		t.Fatal("activate accepted an unknown id")
-	}
+	_, err = st.Create(&Spec{ID: "j-1"})
+	require.Equal(t, ErrNoCommand, err)
+
+	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	require.Nil(t, err)
+
+	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	require.NotNil(t, err)
+
+	_, err = st.Create(&Spec{ID: "j-2", Command: []string{"true"}, Deps: []string{"nope"}})
+	require.NotNil(t, err)
+
+	err = st.AddDep("j-1", "j-1")
+	require.NotNil(t, err)
+
+	err = st.Activate("nope")
+	require.NotNil(t, err)
+
 }
 
 func TestStoreRejectsCycles(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
 	for _, id := range []string{"a", "b", "c"} {
-		if _, err := st.Create(&Spec{ID: id, Command: []string{"true"}, Draft: true}); err != nil {
-			t.Fatal(err)
-		}
+		_, err = st.Create(&Spec{ID: id, Command: []string{"true"}, Draft: true})
+		require.Nil(t, err)
+
 	}
-	if err := st.AddDep("b", "a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AddDep("c", "b"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AddDep("a", "c"); err == nil {
-		t.Fatal("AddDep accepted a cycle across three jobs")
-	}
-	if err := st.SetDeps("b", []string{"c"}); err == nil {
-		t.Fatal("SetDeps accepted a cycle across three jobs")
-	}
-	if err := st.AddDep("b", "a"); err != nil {
-		t.Fatalf("adding a dependency a job already has: %v", err)
-	}
+	require.NoError(t, st.AddDep("b", "a"))
+
+	require.NoError(t, st.AddDep("c", "b"))
+
+	err = st.AddDep("a", "c")
+	require.NotNil(t, err)
+
+	err = st.SetDeps("b", []string{"c"})
+	require.NotNil(t, err)
+
+	require.NoError(t, st.AddDep("b", "a"))
+
 }
 
 func TestStoreAddDepKeepsOrderAndRejectsFinished(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
 	for _, id := range []string{"a", "b", "c"} {
-		if _, err := st.Create(&Spec{ID: id, Command: []string{"true"}, Draft: true}); err != nil {
-			t.Fatal(err)
-		}
+		_, err = st.Create(&Spec{ID: id, Command: []string{"true"}, Draft: true})
+		require.Nil(t, err)
+
 	}
-	if err := st.AddDep("c", "b"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AddDep("c", "a"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, st.AddDep("c", "b"))
+
+	require.NoError(t, st.AddDep("c", "a"))
+
 	j, _ := st.Job("c")
-	if got := j.Deps; len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Fatalf("deps = %v, want them sorted", got)
-	}
+	got := j.Deps
+	require.False(t, len(got) != 2 || got[0] != "a" || got[1] != "b")
+
 	if err := st.Close(); err == nil {
 	}
 	st2, err := OpenStore(st.Dir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
 	j2, _ := st2.Job("c")
-	if len(j2.Deps) != 2 {
-		t.Fatalf("deps did not survive a reopen: %v", j2.Deps)
-	}
-	if err := st2.Finish("c", StateCompleted, 0, "", nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := st2.AddDep("c", "a"); err == nil {
-		t.Fatal("AddDep accepted a dependency on a finished job")
-	}
+	require.Equal(t, 2, len(j2.Deps))
+
+	require.NoError(t, st2.Finish("c", StateCompleted, 0, "", nil, 0))
+
+	err = st2.AddDep("c", "a")
+	require.NotNil(t, err)
+
 }
 
 func TestStorePauseRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Paused() {
-		t.Fatal("a fresh store reports paused")
-	}
-	if err := st.SetPaused(true); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
+	require.False(t, st.Paused())
+
+	require.NoError(t, st.SetPaused(true))
+
+	require.NoError(t, st.Close())
+
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
-	if !st2.Paused() {
-		t.Fatal("the paused flag did not survive a reopen")
-	}
+	require.True(t, st2.Paused())
+
 }
 
 func TestIdentityIndexPrefersTheLatestSuccess(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
 	for _, id := range []string{"j-1", "j-2", "j-3"} {
-		if _, err := st.Create(&Spec{ID: id, Command: []string{"true"}}); err != nil {
-			t.Fatal(err)
-		}
+		_, err = st.Create(&Spec{ID: id, Command: []string{"true"}})
+		require.Nil(t, err)
+
 	}
 	st.SetIdentity("j-1", "sha256:x", "")
 	st.Finish("j-1", StateCompleted, 0, "", nil, 0)
@@ -442,106 +386,87 @@ func TestIdentityIndexPrefersTheLatestSuccess(t *testing.T) {
 	st.SetIdentity("j-3", "sha256:y", "")
 	st.Finish("j-3", StateCompleted, 0, "", nil, 0)
 	idx := st.IdentityIndex()
-	if idx["sha256:x"] != "j-1" {
-		t.Fatalf("sha256:x maps to %q, want the successful j-1", idx["sha256:x"])
-	}
-	if idx["sha256:y"] != "j-3" {
-		t.Fatalf("sha256:y maps to %q, want j-3", idx["sha256:y"])
-	}
+	require.Equal(t, "j-1", idx["sha256:x"])
+
+	require.Equal(t, "j-3", idx["sha256:y"])
+
 }
 
 func TestStoreJobsReturnsCopies(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
-	if _, err := st.Create(&Spec{ID: "j-1", Command: []string{"true"}}); err != nil {
-		t.Fatal(err)
-	}
+	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	require.Nil(t, err)
+
 	jobs := st.Jobs()
 	jobs[0].Command[0] = "mutated"
 	again, _ := st.Job("j-1")
-	if again.Command[0] != "true" {
-		t.Fatal("a caller mutated the stored job through the returned slice")
-	}
+	require.Equal(t, "true", again.Command[0])
+
 }
 
 func TestLogWriterAppendsAndSyncs(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
 	w, err := st.LogWriter("j-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("one\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("two\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if w.N() != 8 {
-		t.Fatalf("N() = %d, want 8", w.N())
-	}
-	if st.LogBytes("j-1") != 8 {
-		t.Fatalf("LogBytes = %d, want 8", st.LogBytes("j-1"))
-	}
+	require.Nil(t, err)
+
+	_, err = w.Write([]byte("one\n"))
+	require.Nil(t, err)
+
+	_, err = w.Write([]byte("two\n"))
+	require.Nil(t, err)
+
+	require.NoError(t, w.Sync())
+
+	require.Equal(t, int64(8), w.N())
+
+	require.Equal(t, int64(8), st.LogBytes("j-1"))
+
 	out, err := st.ReadLog("j-1", 4, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != "two\n" {
-		t.Fatalf("ReadLog at an offset = %q", out)
-	}
-	if err := st.RemoveLog("j-1"); err != nil {
-		t.Fatal(err)
-	}
-	if st.LogBytes("j-1") != 0 {
-		t.Fatal("RemoveLog left the file behind")
-	}
+	require.Nil(t, err)
+
+	require.Equal(t, "two\n", string(out))
+
+	require.NoError(t, st.RemoveLog("j-1"))
+
+	require.Equal(t, int64(0), st.LogBytes("j-1"))
+
 }
 
 func TestJournalRecordsSurviveManyJobs(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	const n = 50
 	for i := 0; i < n; i++ {
 		id := NewID(func(string) bool { return false })
-		if _, err := st.Create(&Spec{ID: id, Command: []string{"true"}, Inputs: []string{"a"}, Outputs: []string{"b"}}); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.Start(id); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.Finish(id, StateCompleted, 0, "", []Artifact{{Path: "b", Size: 1, SHA256: "sha256:z"}}, 7); err != nil {
-			t.Fatal(err)
-		}
+		_, err = st.Create(&Spec{ID: id, Command: []string{"true"}, Inputs: []string{"a"}, Outputs: []string{"b"}})
+		require.Nil(t, err)
+
+		require.NoError(t, st.Start(id))
+
+		require.NoError(t, st.Finish(id, StateCompleted, 0, "", []Artifact{{Path: "b", Size: 1, SHA256: "sha256:z"}}, 7))
+
 	}
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, st.Close())
+
 	st2, err := OpenStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st2.Close()
-	if got := len(st2.Jobs()); got != n {
-		t.Fatalf("replayed %d jobs, want %d", got, n)
-	}
+	got := len(st2.Jobs())
+	require.Equal(t, n, got)
+
 	for _, j := range st2.Jobs() {
-		if j.State != StateCompleted || j.Attempts != 1 || j.LogBytes != 7 {
-			t.Fatalf("job %s replayed as %+v", j.ID, j)
-		}
+		require.False(t, j.State != StateCompleted || j.Attempts != 1 || j.LogBytes != 7)
+
 	}
 }
 
@@ -552,37 +477,24 @@ func TestApplyIgnoresRecordsForUnknownJobs(t *testing.T) {
 	st.apply(record{kind: recIdentity, id: "ghost"})
 	st.apply(record{kind: recState, id: "ghost", state: StateFailed})
 	st.apply(record{kind: recDeps, id: "ghost"})
-	if len(st.jobs) != 0 {
-		t.Fatalf("a record for an unknown job created %d entries", len(st.jobs))
-	}
+	require.Equal(t, 0, len(st.jobs))
+
 	st.apply(record{kind: recControl, paused: true})
-	if !st.Paused() {
-		t.Fatal("the control record did not set the paused flag")
-	}
+	require.True(t, st.Paused())
+
 }
 
 func TestStoreOrderTracksCreation(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.Nil(t, err)
+
 	defer st.Close()
 	for _, id := range []string{"c", "a", "b"} {
-		if _, err := st.Create(&Spec{ID: id, Command: []string{"true"}}); err != nil {
-			t.Fatal(err)
-		}
+		_, err = st.Create(&Spec{ID: id, Command: []string{"true"}})
+		require.Nil(t, err)
+
 	}
 	got := st.Order()
 	want := []string{"c", "a", "b"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Order = %v, want %v", got, want)
-		}
-	}
-	if _, err := st.LogWriter("j-x"); err != nil {
-		t.Fatal(err)
-	}
-	if got := time.Now(); got.IsZero() {
-		t.Fatal("unreachable")
-	}
+	require.Equal(t, want, got)
 }
