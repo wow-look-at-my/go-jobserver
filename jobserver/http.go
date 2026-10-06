@@ -120,7 +120,10 @@ type httpServer struct {
 
 func (h *httpServer) Close() error {
 	_ = h.srv.Close()
-	return h.ln.Close()
+	if err := h.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // unixServer closes a file socket, its server and the socket file.
@@ -132,8 +135,11 @@ type unixServer struct {
 
 func (u *unixServer) Close() error {
 	_ = u.srv.Close()
-	err := u.ln.Close()
-	if rerr := os.Remove(u.path); err == nil && !errors.Is(rerr, os.ErrNotExist) {
+	var err error
+	if cerr := u.ln.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		err = cerr
+	}
+	if rerr := os.Remove(u.path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) && err == nil {
 		err = rerr
 	}
 	return err
@@ -332,21 +338,13 @@ func statusFor(resp Response) int {
 	if resp.OK {
 		return http.StatusOK
 	}
-	switch {
-	case errors.Is(errText(resp.Error), ErrNotFound):
+	switch resp.Code {
+	case CodeNotFound:
 		return http.StatusNotFound
-	case errors.Is(errText(resp.Error), ErrDuplicate), errors.Is(errText(resp.Error), ErrCycle), errors.Is(errText(resp.Error), ErrMissingDep), errors.Is(errText(resp.Error), ErrBadState), errors.Is(errText(resp.Error), ErrNoCommand):
+	case CodeBadRequest:
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
-}
-
-// errText is the error a Response carries, for status mapping.
-func errText(msg string) error {
-	if msg == "" {
-		return nil
-	}
-	return errors.New(msg)
 }
 
 func writeJSON(w http.ResponseWriter, resp Response) {

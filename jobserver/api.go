@@ -1,6 +1,9 @@
 package jobserver
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // The wire API is one request shape and one response shape, carried by every
 // transport. The go-ipc service, the file socket, the HTTP server and the
@@ -32,21 +35,49 @@ type Request struct {
 	Max    int      `json:"max,omitempty"`
 }
 
+// ErrorCode classifies a failed call, so a transport can map it to a status without matching on the message text.
+type ErrorCode string
+
+const (
+	// CodeNotFound means no job has that ID.
+	CodeNotFound ErrorCode = "not_found"
+	// CodeBadRequest means the request or the job it names is wrong.
+	CodeBadRequest ErrorCode = "bad_request"
+	// CodeInternal means the server failed on its own.
+	CodeInternal ErrorCode = "internal"
+)
+
 // Response is the answer to one API call.
 type Response struct {
-	OK       bool   `json:"ok"`
-	Error    string `json:"error,omitempty"`
-	Job      *Job   `json:"job,omitempty"`
-	Jobs     []*Job `json:"jobs,omitempty"`
-	Stats    *Stats `json:"stats,omitempty"`
-	Output   string `json:"output,omitempty"`
-	Existing bool   `json:"existing,omitempty"`
-	Count    int    `json:"count,omitempty"`
+	OK       bool      `json:"ok"`
+	Error    string    `json:"error,omitempty"`
+	Code     ErrorCode `json:"code,omitempty"`
+	Job      *Job      `json:"job,omitempty"`
+	Jobs     []*Job    `json:"jobs,omitempty"`
+	Stats    *Stats    `json:"stats,omitempty"`
+	Output   string    `json:"output,omitempty"`
+	Existing bool      `json:"existing,omitempty"`
+	Count    int       `json:"count,omitempty"`
 }
 
 // Failure returns a response carrying an error.
 func Failure(err error) Response {
-	return Response{OK: false, Error: err.Error()}
+	return Response{OK: false, Error: err.Error(), Code: codeFor(err)}
+}
+
+// codeFor classifies an error by the sentinel it wraps.
+func codeFor(err error) ErrorCode {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNotFound):
+		return CodeNotFound
+	case errors.Is(err, ErrDuplicate), errors.Is(err, ErrCycle), errors.Is(err, ErrMissingDep),
+		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand):
+		return CodeBadRequest
+	default:
+		return CodeInternal
+	}
 }
 
 // Handle runs one API call against the server.

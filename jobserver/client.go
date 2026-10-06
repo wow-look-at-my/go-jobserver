@@ -20,6 +20,9 @@ import (
 // ErrNoDaemon is returned when no daemon answers for the given directory.
 var ErrNoDaemon = errors.New("go-jobserver: no daemon is running")
 
+// connectTimeout bounds how long a client waits for a go-ipc service.
+const connectTimeout = 2 * time.Second
+
 // A Client is a connection to a running daemon, over its file socket or over
 // its go-ipc service.
 type Client struct {
@@ -56,7 +59,9 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	if name == "" {
 		name = IPCName(cfg.Dir)
 	}
-	c, err := ipc.Connect(ctx, name)
+	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	c, err := ipc.Connect(connectCtx, name)
 	if err != nil {
 		return nil, fmt.Errorf("%w for %s: %v", ErrNoDaemon, cfg.Dir, err)
 	}

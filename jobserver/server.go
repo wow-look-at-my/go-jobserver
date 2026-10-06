@@ -100,6 +100,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.SyncInterval <= 0 {
 		cfg.SyncInterval = time.Second
 	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
 	st, err := OpenStore(cfg.Dir)
 	if err != nil {
 		return nil, err
@@ -112,9 +115,6 @@ func New(cfg Config) (*Server, error) {
 		wake:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		start:   time.Now(),
-	}
-	if cfg.Logf == nil {
-		cfg.Logf = func(string, ...any) {}
 	}
 	return s, nil
 }
@@ -276,7 +276,7 @@ func (s *Server) tick() {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
 			if !j.Force {
-				if src := CacheHit(j, s.store.IdentityIndex(), byID); src != "" {
+				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" {
 					s.reuse(j, src, identity)
 					continue
 				}

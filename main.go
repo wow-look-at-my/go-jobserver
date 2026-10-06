@@ -82,16 +82,18 @@ type globals struct {
 	noSpool  bool
 }
 
+// bind adds the global flags, defaulting each to the value it already holds so
+// a subcommand can bind them again after the command. Line parsed them.
 func (g *globals) bind(fs *flag.FlagSet) {
-	fs.StringVar(&g.dir, "dir", "", "server directory")
-	fs.StringVar(&g.http, "http", "", "dashboard address")
-	fs.StringVar(&g.socket, "socket", "", "file socket path")
-	fs.StringVar(&g.spool, "spool", "", "spool directory")
-	fs.BoolVar(&g.ipc, "ipc", true, "serve the go-ipc service")
-	fs.IntVar(&g.jobs, "j", 0, "max concurrent jobs")
-	fs.BoolVar(&g.noHTTP, "no-http", false, "do not serve the dashboard")
-	fs.BoolVar(&g.noSocket, "no-socket", false, "do not serve the file socket")
-	fs.BoolVar(&g.noSpool, "no-spool", false, "do not watch a spool directory")
+	fs.StringVar(&g.dir, "dir", g.dir, "server directory")
+	fs.StringVar(&g.http, "http", g.http, "dashboard address")
+	fs.StringVar(&g.socket, "socket", g.socket, "file socket path")
+	fs.StringVar(&g.spool, "spool", g.spool, "spool directory")
+	fs.BoolVar(&g.ipc, "ipc", g.ipc, "serve the go-ipc service")
+	fs.IntVar(&g.jobs, "j", g.jobs, "max concurrent jobs")
+	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
+	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
+	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")
 }
 
 // config turns the flags into a server configuration.

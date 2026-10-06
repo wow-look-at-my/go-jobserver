@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -107,11 +108,13 @@ func waitState(t *testing.T, srv *Server, id string, want State) *Job {
 		if j.State == want {
 			return j
 		}
-		require.False(t, j.State.Terminal() && want != j.State)
-
+		if j.State.Terminal() {
+			require.FailNow(t, "job reached the wrong terminal state",
+				"job %s is %s (%s), want %s", id, j.State, j.Error, want)
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("job %s never reached %s", id, want)
+	require.FailNow(t, "job never reached the wanted state", "job %s never reached %s", id, want)
 	return nil
 }
 
@@ -406,7 +409,7 @@ func TestServerRunsJobsConcurrentlyUpToTheLimit(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.Runner = runner; c.MaxConcurrent = 1 })
 	ids := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
-		j, _, err := srv.Enqueue(Spec{Command: []string{"x"}})
+		j, _, err := srv.Enqueue(Spec{Command: []string{"x", strconv.Itoa(i)}})
 		require.NoError(t, err)
 		ids = append(ids, j.ID)
 	}

@@ -129,7 +129,8 @@ func (s *Store) recoverLogs() error {
 		case err == nil:
 			j.LogBytes = info.Size()
 		case errors.Is(err, os.ErrNotExist):
-			j.LogBytes = 0
+			// The journal is the record of how much output a finished job
+			// wrote; a missing file is not evidence that it wrote none.
 		default:
 			return err
 		}

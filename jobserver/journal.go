@@ -156,7 +156,9 @@ func decodeRecord(payload []byte) (record, error) {
 		if n < 0 {
 			return record{}, errors.New("jobserver: negative artifact count")
 		}
-		r.artifacts = make([]Artifact, 0, n)
+		if n > 0 {
+			r.artifacts = make([]Artifact, 0, n)
+		}
 		for i := 0; i < n; i++ {
 			var a Artifact
 			a.Path = d.str()
@@ -313,7 +315,7 @@ func (d *decoder) str() string {
 
 func (d *decoder) list() []string {
 	n := d.uvarint()
-	if d.err != nil {
+	if d.err != nil || n == 0 {
 		return nil
 	}
 	if n > uint64(len(d.b)) {

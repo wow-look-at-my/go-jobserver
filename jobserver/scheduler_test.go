@@ -176,25 +176,31 @@ func TestCacheHit(t *testing.T) {
 	}
 	a := mk("a", StateCompleted, "echo hi")
 	a.Identity = JobIdentity(a, Index([]*Job{a}))
+	require.NotEmpty(t, a.Identity)
 	b := mk("b", StateActive, "echo hi")
 	b.Identity = a.Identity
-	idx := IdentityIndex{"a": a.Identity}
+	idx := IdentityIndex{a.Identity: "a"}
 
 	t.Run("an identical finished job is a hit", func(t *testing.T) {
-		assert.Equal(t, "a", CacheHit(b, idx, Index([]*Job{a, b})))
+		assert.Equal(t, a.Identity, JobIdentity(b, Index([]*Job{a, b})))
+		assert.Equal(t, "a", CacheHit(a.Identity, idx, b.ID))
 	})
 	t.Run("a different command is a miss", func(t *testing.T) {
 		c := mk("c", StateActive, "echo bye")
-		assert.Empty(t, CacheHit(c, idx, Index([]*Job{a, c})))
+		assert.Empty(t, CacheHit(JobIdentity(c, Index([]*Job{c})), idx, c.ID))
 	})
 	t.Run("a job is not its own cache", func(t *testing.T) {
-		assert.Empty(t, CacheHit(a, idx, Index([]*Job{a})))
+		assert.Empty(t, CacheHit(a.Identity, idx, a.ID))
+	})
+	t.Run("an empty identity is a miss", func(t *testing.T) {
+		assert.Empty(t, CacheHit("", idx, "b"))
 	})
 	t.Run("a job whose dependencies have no identity is a miss", func(t *testing.T) {
 		dep := job("dep", StateRunning)
 		d := mk("d", StateActive, "echo hi")
 		d.Deps = []string{"dep"}
-		assert.Empty(t, CacheHit(d, idx, Index([]*Job{dep, d})))
+		assert.Empty(t, JobIdentity(d, Index([]*Job{dep, d})))
+		assert.Empty(t, CacheHit(JobIdentity(d, Index([]*Job{dep, d})), idx, d.ID))
 	})
 	t.Run("a dependency identity change is a miss", func(t *testing.T) {
 		dep := job("dep", StateCompleted)
