@@ -15,7 +15,7 @@ import (
 func TestExecRunnerReportsTheExitCodeAndOutput(t *testing.T) {
 	var out bytes.Buffer
 	j := &Job{Command: []string{"sh", "-c", "echo hi; exit 3"}}
-	code, err := ExecRunner{}.Run(context.Background(), j, &out)
+	code, err := ExecRunner{}.Run(context.Background(), j, &out, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 3, code)
 	assert.Equal(t, "hi\n", out.String())
@@ -24,7 +24,7 @@ func TestExecRunnerReportsTheExitCodeAndOutput(t *testing.T) {
 func TestExecRunnerCapturesStdoutAndStderr(t *testing.T) {
 	var out bytes.Buffer
 	j := &Job{Command: []string{"sh", "-c", "echo to-out; echo to-err >&2"}}
-	code, err := ExecRunner{}.Run(context.Background(), j, &out)
+	code, err := ExecRunner{}.Run(context.Background(), j, &out, nil)
 	require.NoError(t, err)
 	assert.Zero(t, code)
 	assert.Contains(t, out.String(), "to-out")
@@ -39,7 +39,7 @@ func TestExecRunnerUsesTheJobDirectoryAndEnvironment(t *testing.T) {
 		Dir:     dir,
 		Env:     []string{"JOBSERVER_TEST=yes"},
 	}
-	code, err := ExecRunner{}.Run(context.Background(), j, &out)
+	code, err := ExecRunner{}.Run(context.Background(), j, &out, nil)
 	require.NoError(t, err)
 	assert.Zero(t, code)
 	lines := bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n"))
@@ -55,7 +55,7 @@ func TestExecRunnerStopsOnContextCancel(t *testing.T) {
 	var out bytes.Buffer
 	j := &Job{Command: []string{"sh", "-c", "sleep 30"}}
 	start := time.Now()
-	_, err := ExecRunner{}.Run(ctx, j, &out)
+	_, err := ExecRunner{}.Run(ctx, j, &out, nil)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 20*time.Second)
 }
@@ -69,7 +69,7 @@ func TestExecRunnerStopsAJobThatLeavesAChildOnThePipe(t *testing.T) {
 		_, err := ExecRunner{}.Run(ctx, &Job{
 			Command: []string{"sh", "-c", "mkfifo -m 600 hold; cat hold"},
 			Dir:     dir,
-		}, &bytes.Buffer{})
+		}, &bytes.Buffer{}, nil)
 		done <- err
 	}()
 	require.Eventually(t, func() bool {
@@ -88,12 +88,12 @@ func TestExecRunnerStopsAJobThatLeavesAChildOnThePipe(t *testing.T) {
 
 func TestExecRunnerReportsAMissingBinary(t *testing.T) {
 	var out bytes.Buffer
-	_, err := ExecRunner{}.Run(context.Background(), &Job{Command: []string{"definitely-not-a-real-binary-xyz"}}, &out)
+	_, err := ExecRunner{}.Run(context.Background(), &Job{Command: []string{"definitely-not-a-real-binary-xyz"}}, &out, nil)
 	assert.Error(t, err)
 }
 
 func TestExecRunnerRejectsAnEmptyCommand(t *testing.T) {
-	_, err := ExecRunner{}.Run(context.Background(), &Job{}, &bytes.Buffer{})
+	_, err := ExecRunner{}.Run(context.Background(), &Job{}, &bytes.Buffer{}, nil)
 	assert.ErrorIs(t, err, ErrNoCommand)
 }
 

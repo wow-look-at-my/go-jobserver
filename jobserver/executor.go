@@ -19,9 +19,10 @@ import (
 const waitDelay = 5 * time.Second
 
 // A Runner runs one job's command, writing its output to out, and reports the
-// process exit code.
+// process exit code. started, when not nil, is handed the process id of the
+// child as soon as it is running. The daemon can measure it and control it.
 type Runner interface {
-	Run(ctx context.Context, j *Job, out io.Writer) (int, error)
+	Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error)
 }
 
 // ExecRunner runs the job's command as a child process.
@@ -29,7 +30,7 @@ type ExecRunner struct{}
 
 // Run starts the command, streams both of its output streams into out, and
 // kills it when ctx ends.
-func (ExecRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error) {
+func (ExecRunner) Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error) {
 	if len(j.Command) == 0 {
 		return -1, ErrNoCommand
 	}
@@ -43,7 +44,13 @@ func (ExecRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error) {
 	// Cancellation kills the job's whole process group.
 	prepareProcess(cmd)
 	cmd.WaitDelay = waitDelay
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return -1, err
+	}
+	if started != nil {
+		started(cmd.Process.Pid)
+	}
+	err := cmd.Wait()
 	if err == nil {
 		return 0, nil
 	}

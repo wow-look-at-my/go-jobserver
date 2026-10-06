@@ -34,7 +34,8 @@ commands:
   pause                stop starting new jobs
   resume               start scheduling again
   interrupt <id|all>   stop running jobs
-  stats                show server counters
+  policy <id>          replace a job's CPU cost and process-control settings
+  stats                show server counters, CPU use and active controls
   version              print the version
 
 global flags (also accepted after the command):
@@ -44,11 +45,15 @@ global flags (also accepted after the command):
   -spool DIR     spool directory to watch (default DIR/spool)
   -ipc BOOL      serve the go-ipc service (default true)
   -j N           how many jobs may run at once (default one per CPU)
+  -budget N      how many CPUs the running jobs may use together (default one per CPU)
+  -cost N        CPU cost assumed for a job that declares none (default 1)
+  -sample DUR    how often CPU use is sampled (default 1s)
+  -no-cpu        do not sample CPU use or throttle anything
   -no-http       do not serve the dashboard
   -no-socket     do not serve the file socket
   -no-spool      do not watch a spool directory
 
-queue flags:
+queue and policy flags:
   -name NAME     a label for the job
   -dep ID        add a dependency (repeatable)
   -input PATH    a file whose content decides the job's cache identity (repeatable)
@@ -60,6 +65,18 @@ queue flags:
   -force         run even when an identical job already finished
   -wait          wait for the job and report its final state
   -shell         run the command through "sh -c"
+
+CPU policy flags, accepted by queue and by policy:
+  -cpu N         CPUs the job is expected to use (default: its last run, then 1)
+  -priority      raise the job's nice value while it is over the CPU budget
+  -nice N        the nice value to apply (default 10)
+  -freeze        suspend the job's processes while it is over the budget
+  -affinity LIST pin the job to CPUs ("0,1", "all", or "last")
+  -exempt SEL    processes every enabled mechanism leaves alone
+  -only SEL      processes every enabled mechanism is restricted to
+  -<mech>-exempt SEL, -<mech>-only SEL   the same, for one mechanism, where
+                 <mech> is affinity, priority or freeze
+  a selector is a comma-separated list of process ids and names, e.g. "1234,ffmpeg"
 `
 
 func main() {
@@ -77,6 +94,10 @@ type globals struct {
 	spool    string
 	ipc      bool
 	jobs     int
+	budget   float64
+	cost     float64
+	sample   time.Duration
+	noCPU    bool
 	noHTTP   bool
 	noSocket bool
 	noSpool  bool
@@ -91,6 +112,10 @@ func (g *globals) bind(fs *flag.FlagSet) {
 	fs.StringVar(&g.spool, "spool", g.spool, "spool directory")
 	fs.BoolVar(&g.ipc, "ipc", g.ipc, "serve the go-ipc service")
 	fs.IntVar(&g.jobs, "j", g.jobs, "max concurrent jobs")
+	fs.Float64Var(&g.budget, "budget", g.budget, "CPUs the running jobs may use together")
+	fs.Float64Var(&g.cost, "cost", g.cost, "CPU cost assumed for a job that declares none")
+	fs.DurationVar(&g.sample, "sample", g.sample, "how often CPU use is sampled")
+	fs.BoolVar(&g.noCPU, "no-cpu", g.noCPU, "do not sample CPU use")
 	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
 	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
 	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")
@@ -124,8 +149,104 @@ func (g *globals) config() jobserver.Config {
 	if g.jobs > 0 {
 		cfg.MaxConcurrent = g.jobs
 	}
+	if g.budget > 0 {
+		cfg.CPUBudget = g.budget
+	}
+	if g.cost > 0 {
+		cfg.DefaultCost = g.cost
+	}
+	if g.sample > 0 {
+		cfg.SampleInterval = g.sample
+	}
+	cfg.DisableCPU = g.noCPU
 	cfg.IPC = g.ipc
 	return cfg
+}
+
+// setFlag is a string flag that remembers being given, so an empty value
+// still counts as a request.
+type setFlag struct {
+	value string
+	set   bool
+}
+
+func (f *setFlag) String() string { return f.value }
+
+func (f *setFlag) Set(v string) error {
+	f.value, f.set = v, true
+	return nil
+}
+
+// policyFlags are the CPU policy flags queue and policy share.
+type policyFlags struct {
+	cost     float64
+	nice     int
+	priority bool
+	freeze   bool
+	affinity setFlag
+	exempt   setFlag
+	only     setFlag
+	mech     map[jobserver.Mechanism]*[2]setFlag
+}
+
+// bind adds the policy flags.
+func (p *policyFlags) bind(fs *flag.FlagSet) {
+	p.mech = map[jobserver.Mechanism]*[2]setFlag{}
+	fs.Float64Var(&p.cost, "cpu", 0, "CPUs the job is expected to use")
+	fs.BoolVar(&p.priority, "priority", false, "raise the nice value while over budget")
+	fs.IntVar(&p.nice, "nice", 0, "nice value for the priority mechanism")
+	fs.BoolVar(&p.freeze, "freeze", false, "suspend processes while over budget")
+	fs.Var(&p.affinity, "affinity", "CPUs to pin to (\"0,1\", \"all\" or \"last\")")
+	fs.Var(&p.exempt, "exempt", "processes every enabled mechanism leaves alone")
+	fs.Var(&p.only, "only", "processes every enabled mechanism is restricted to")
+	for _, m := range jobserver.Mechanisms() {
+		pair := new([2]setFlag)
+		fs.Var(&pair[0], string(m)+"-exempt", "processes the "+string(m)+" mechanism leaves alone")
+		fs.Var(&pair[1], string(m)+"-only", "processes the "+string(m)+" mechanism is restricted to")
+		p.mech[m] = pair
+	}
+}
+
+// policy turns the flags into a job policy.
+func (p *policyFlags) policy() jobserver.JobPolicy {
+	out := jobserver.JobPolicy{
+		Cost: p.cost,
+		Affinity: jobserver.AffinitySettings{
+			Enabled: p.affinity.set,
+			CPUs:    jobserver.ParseCPUs(p.affinity.value),
+			Exempt:  p.mechExempt(jobserver.MechAffinity),
+			Only:    p.mechOnly(jobserver.MechAffinity),
+		},
+		Priority: jobserver.PrioritySettings{
+			Enabled: p.priority || p.nice != 0,
+			Nice:    p.nice,
+			Exempt:  p.mechExempt(jobserver.MechPriority),
+			Only:    p.mechOnly(jobserver.MechPriority),
+		},
+		Freeze: jobserver.FreezeSettings{
+			Enabled: p.freeze,
+			Exempt:  p.mechExempt(jobserver.MechFreeze),
+			Only:    p.mechOnly(jobserver.MechFreeze),
+		},
+	}
+	return out
+}
+
+// mechExempt is one mechanism's exemption list: its own flag when given,
+// otherwise the job-wide one.
+func (p *policyFlags) mechExempt(m jobserver.Mechanism) jobserver.Selector {
+	if pair := p.mech[m]; pair[0].set {
+		return jobserver.ParseSelector(pair[0].value)
+	}
+	return jobserver.ParseSelector(p.exempt.value)
+}
+
+// mechOnly is one mechanism's restriction list, by the same rule.
+func (p *policyFlags) mechOnly(m jobserver.Mechanism) jobserver.Selector {
+	if pair := p.mech[m]; pair[1].set {
+		return jobserver.ParseSelector(pair[1].value)
+	}
+	return jobserver.ParseSelector(p.only.value)
 }
 
 // newGlobals returns the flag set every command starts from.
@@ -173,6 +294,8 @@ func run(args []string) error {
 		return cmdInterrupt(g, rest)
 	case "depend":
 		return cmdDepend(g, rest)
+	case "policy", "cpu":
+		return cmdPolicy(g, rest)
 	case "stats":
 		return cmdStats(g, rest)
 	case "version":
@@ -255,6 +378,8 @@ func cmdQueue(g *globals, args []string) error {
 	fs.Var(&inputs, "input", "a file whose content decides the cache identity")
 	fs.Var(&outputs, "output", "a file the job must produce")
 	fs.Var(&envs, "env", "an extra environment entry")
+	var pol policyFlags
+	pol.bind(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -286,6 +411,7 @@ func cmdQueue(g *globals, args []string) error {
 		Key:     *key,
 		Draft:   *draft,
 		Force:   *force,
+		Policy:  pol.policy(),
 	}
 	c, ctx, cancel, err := client(g)
 	if err != nil {
@@ -627,6 +753,76 @@ func cmdDepend(g *globals, args []string) error {
 	return nil
 }
 
+// cmdPolicy replaces a job's CPU policy.
+func cmdPolicy(g *globals, args []string) error {
+	fs := flag.NewFlagSet("policy", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Print(usage) }
+	g.bind(fs)
+	var pol policyFlags
+	pol.bind(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("policy needs one job id")
+	}
+	id := fs.Arg(0)
+	policy := pol.policy()
+	c, ctx, cancel, err := client(g)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	defer c.Close()
+	resp, err := c.Do(ctx, jobserver.Request{Op: jobserver.OpPolicy, ID: id, Policy: &policy})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return errors.New(resp.Error)
+	}
+	printPolicy(resp.Job.Policy)
+	return nil
+}
+
+// printPolicy reports a job's policy in the form the flags take.
+func printPolicy(p jobserver.JobPolicy) {
+	fmt.Printf("cpu        %g\n", p.Cost)
+	for _, m := range jobserver.Mechanisms() {
+		enabled, exempt, only := p.Settings(m)
+		line := "off"
+		if enabled {
+			switch m {
+			case jobserver.MechPriority:
+				line = fmt.Sprintf("on nice %d", p.Priority.Nice)
+			case jobserver.MechAffinity:
+				line = "on cpus " + joinCPUList(p.Affinity.CPUs)
+			default:
+				line = "on"
+			}
+		}
+		if !exempt.Empty() {
+			line += " exempt " + exempt.String()
+		}
+		if !only.Empty() {
+			line += " only " + only.String()
+		}
+		fmt.Printf("%-10s %s\n", m, line)
+	}
+}
+
+// joinCPUList renders a CPU list for the policy report.
+func joinCPUList(cpus []int) string {
+	if len(cpus) == 0 {
+		return "last"
+	}
+	parts := make([]string, 0, len(cpus))
+	for _, c := range cpus {
+		parts = append(parts, fmt.Sprint(c))
+	}
+	return strings.Join(parts, ",")
+}
+
 // cmdStats prints the server counters.
 func cmdStats(g *globals, args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
@@ -659,6 +855,10 @@ func cmdStats(g *globals, args []string) error {
 	fmt.Printf("paused   %v\n", st.Paused)
 	fmt.Printf("running  %d\n", st.Running)
 	fmt.Printf("total    %d\n", st.Total)
+	printCPU(st.CPU)
+	for _, c := range st.Controls {
+		fmt.Printf("control  %s %s pid %d %s %s\n", c.Job, c.Mechanism, c.PID, c.Outcome, c.Detail)
+	}
 	states := make([]string, 0, len(st.ByState))
 	for state := range st.ByState {
 		states = append(states, state)
@@ -668,6 +868,18 @@ func cmdStats(g *globals, args []string) error {
 		fmt.Printf("%-10s %d\n", state, st.ByState[state])
 	}
 	return nil
+}
+
+// printCPU reports the daemon's CPU measurement.
+func printCPU(cpu jobserver.CPUReport) {
+	fmt.Printf("cpus     %d\n", cpu.CPUs)
+	fmt.Printf("budget   %.2f\n", cpu.Budget)
+	fmt.Printf("measured %.2f\n", cpu.Measured)
+	fmt.Printf("host     %.2f\n", cpu.HostBusy)
+	fmt.Printf("over     %v\n", cpu.OverBudget)
+	if cpu.Note != "" {
+		fmt.Printf("note     %s\n", cpu.Note)
+	}
 }
 
 // printJSON writes a value as indented JSON.

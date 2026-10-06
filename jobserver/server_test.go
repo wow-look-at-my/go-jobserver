@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -28,7 +29,10 @@ type fakeRunner struct {
 	entered  chan string
 }
 
-func (f *fakeRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error) {
+func (f *fakeRunner) Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error) {
+	if started != nil {
+		started(os.Getpid())
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, j.ID)
 	f.commands = append(f.commands, j.Command[0])
@@ -558,4 +562,115 @@ func TestServerHoldsManyJobsInTheScheduler(t *testing.T) {
 	}
 	waitState(t, srv, ids[len(ids)-1], StateCompleted)
 	assert.Equal(t, 25, runner.count())
+}
+
+func TestSchedulerHoldsAJobThatWouldOversubscribeTheBudget(t *testing.T) {
+	hold := make(chan struct{})
+	runner := &fakeRunner{hold: hold}
+	srv := newTestServer(t, func(c *Config) {
+		c.Runner = runner
+		c.CPUBudget = 2
+		c.DefaultCost = 2
+		c.MaxConcurrent = 4
+	})
+	first, _, err := srv.Enqueue(Spec{Command: []string{"first"}})
+	require.NoError(t, err)
+	waitState(t, srv, first.ID, StateRunning)
+
+	second, _, err := srv.Enqueue(Spec{Command: []string{"second"}})
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
+
+	waiting, err := srv.Get(second.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateActive, waiting.State, "a job that does not fit must stay runnable")
+	assert.False(t, runner.ran(second.ID), "the budget must hold the second job back")
+
+	close(hold)
+	waitState(t, srv, second.ID, StateCompleted)
+}
+
+func TestSchedulerRunsAJobLargerThanTheWholeBudget(t *testing.T) {
+	runner := &fakeRunner{}
+	srv := newTestServer(t, func(c *Config) {
+		c.Runner = runner
+		c.CPUBudget = 1
+		c.DefaultCost = 4
+	})
+	j, _, err := srv.Enqueue(Spec{Command: []string{"big"}})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateCompleted)
+}
+
+func TestStatsCarryTheCPUReport(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.CPUBudget = 3
+		c.SampleInterval = 20 * time.Millisecond
+	})
+	st := srv.Stats()
+	assert.InDelta(t, 3, st.CPU.Budget, 1e-9)
+	assert.Equal(t, runtime.NumCPU(), st.CPU.CPUs)
+	assert.False(t, st.CPU.OverBudget)
+	assert.Empty(t, st.Controls)
+
+	off := newTestServer(t, func(c *Config) { c.DisableCPU = true })
+	assert.Contains(t, off.Stats().CPU.Note, "cpu sampling is off")
+}
+
+func TestGovernorThrottlesAnOversubscribedJobAndSparesAnExemptProcess(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.CPUBudget = 0.001
+		c.SampleInterval = 20 * time.Millisecond
+	})
+	j, _, err := srv.Enqueue(Spec{
+		Command: []string{"sh", "-c", "sleep 30 & while :; do :; done"},
+		Policy: JobPolicy{
+			Cost:   1,
+			Freeze: FreezeSettings{Enabled: true, Exempt: ParseSelector("sleep")},
+		},
+	})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateRunning)
+	t.Cleanup(func() { srv.InterruptAll() })
+
+	var controls []Control
+	require.Eventually(t, func() bool {
+		controls = srv.Controls()
+		return len(controls) > 0
+	}, 20*time.Second, 20*time.Millisecond, "the governor never applied a control")
+
+	for _, c := range controls {
+		assert.Equal(t, j.ID, c.Job)
+		assert.Equal(t, MechFreeze, c.Mechanism)
+		assert.Equal(t, OutcomeApplied, c.Outcome, c.Detail)
+		assert.NotEqual(t, "sleep", filepath.Base(c.Name), "an exempt process must be left alone")
+	}
+	assert.NotEmpty(t, srv.Stats().Controls)
+}
+
+func TestServerRecordsTheCPUAJobUsed(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.SampleInterval = 10 * time.Millisecond })
+	j, _, err := srv.Enqueue(Spec{Command: []string{"sh", "-c", "head -c 4000000000 /dev/zero > /dev/null"}})
+	require.NoError(t, err)
+	done := waitState(t, srv, j.ID, StateCompleted)
+	assert.Greater(t, done.CPUSeconds, 0.0, "the daemon must measure what the job's tree consumed")
+}
+
+func TestServerReplacesAJobPolicyAndReportsIt(t *testing.T) {
+	srv := newTestServer(t, nil)
+	j, _, err := srv.Enqueue(Spec{Command: []string{"sh", "-c", "sleep 30"}, Draft: true})
+	require.NoError(t, err)
+
+	updated, err := srv.SetPolicy(j.ID, JobPolicy{
+		Cost:     2,
+		Freeze:   FreezeSettings{Enabled: true},
+		Priority: PrioritySettings{Enabled: true, Nice: 5},
+	})
+	require.NoError(t, err)
+	assert.InDelta(t, 2, updated.Policy.Cost, 1e-9)
+	assert.Equal(t, []Mechanism{MechPriority, MechFreeze}, updated.Policy.Enabled())
+
+	stored, err := srv.Get(j.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.Policy.equal(updated.Policy))
 }

@@ -21,6 +21,7 @@ const (
 	OpInterrupt    = "interrupt"
 	OpInterruptAll = "interrupt-all"
 	OpStats        = "stats"
+	OpPolicy       = "policy"
 )
 
 // Request is one API call.
@@ -32,6 +33,8 @@ type Request struct {
 	Deps   []string `json:"deps,omitempty"`
 	Offset int64    `json:"offset,omitempty"`
 	Max    int      `json:"max,omitempty"`
+	// Policy carries a job's CPU cost and process-control settings.
+	Policy *JobPolicy `json:"policy,omitempty"`
 }
 
 // ErrorCode classifies a failed call, so a transport can map it to a status without matching on the message text.
@@ -152,6 +155,16 @@ func (s *Server) Handle(req Request) Response {
 
 	case OpInterruptAll:
 		return Response{OK: true, Count: s.InterruptAll()}
+
+	case OpPolicy:
+		if req.Policy == nil {
+			return Failure(fmt.Errorf("jobserver: policy needs a policy"))
+		}
+		j, err := s.SetPolicy(req.ID, *req.Policy)
+		if err != nil {
+			return Failure(err)
+		}
+		return Response{OK: true, Job: j}
 
 	case OpStats:
 		st := s.Stats()

@@ -105,13 +105,82 @@ Every route answers JSON, and `POST /api/<op>` takes the same request envelope t
 | `POST /api/interrupt/{id}` | cancel one job |
 | `GET /api/stats` | counters for the server |
 
-Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all` and `stats`.
+Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy` and `stats`.
 
 ## Pause, resume and interruption
 
 Pause takes effect between jobs: a request to pause stops new jobs from starting, and jobs already running finish. Resume starts scheduling again. Interruption is per job: `interrupt <id>` kills the job's process group, so a job that spawns helpers leaves none of them behind. The job becomes `cancelled` with the output it produced up to that moment.
 
 The paused flag is part of the journal, so a daemon that restarts stays paused.
+
+## CPU oversubscription
+
+Jobs that each want four CPUs on a four-CPU machine do not run faster together than one after the other. They run slower, and everything else on the host does too. The daemon watches CPU use and acts on it in multiple places: before a job starts, and on the processes of a job already running.
+
+### Measuring
+
+Every `-sample` interval (one second by default) the daemon reads the host's process table, once, and turns consecutive reads into rates.
+
+- How many CPUs were busy **across the whole host**, counted from process CPU time. Kernel time spent outside a process is not part of it.
+- How many CPUs **each running job's process tree** used. The tree is the job's child plus its descendants plus everything sharing its process group, so a job that spawns helpers is measured as one.
+- The daemon accumulates each job's total, and records it on the job as `cpu_seconds` when the job ends.
+
+On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. On a host with neither, the reading says so instead of reporting a zero.
+
+### Before a job starts
+
+Each job declares what it expects to cost, and the daemon keeps a running total of what the jobs it started have claimed. A job that will push the total over `-budget` (one per CPU by default) stays `active` and starts when enough of the running jobs have finished. A job larger than the whole budget still runs on an otherwise idle daemon, so nothing is starved forever.
+
+The cost a job declares is used first. A job that declares none is priced at what its last run measured, and a job that has never run is priced at `-cost` (one by default).
+
+```sh
+go-jobserver queue -cpu 4 -- make -j4
+go-jobserver -budget 6 run
+```
+
+### While a job runs
+
+When the running jobs together exceed the budget, the daemon applies the controls each job enables to that job's processes. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
+
+| mechanism | what it does | Linux | macOS | Windows |
+| --- | --- | --- | --- | --- |
+| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | not available |
+| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | not available |
+| `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | not available |
+
+A mechanism that this host cannot perform reports `not-applicable` with the reason rather than claiming to have done something. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
+
+macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy: the same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
+
+### Picking processes
+
+Every mechanism can be limited by process. A selector is a comma-separated list of process IDs and process names.
+
+```sh
+# freeze everything but this job's ffmpeg helper
+go-jobserver queue -freeze -exempt ffmpeg -- transcode.sh
+
+# only touch one process, by name or by pid, and leave its siblings alone
+go-jobserver queue -affinity 0 -affinity-only 1234 -- worker
+go-jobserver queue -priority -priority-exempt 99,logger -- build
+```
+
+`-exempt` and `-only` apply to every mechanism the job enables. `-affinity-exempt`, `-priority-only` and their siblings apply to one mechanism. `-only` restricts a mechanism to the processes it names. `-exempt` takes processes out of it. A process named by `exempt` is never touched, whatever else names it.
+
+Per-mechanism selectors are also part of the job spec, so the JSON transports carry them:
+
+```json
+{
+  "command": ["transcode.sh"],
+  "policy": {
+    "cost": 2,
+    "freeze": {"enabled": true, "exempt": {"names": ["ffmpeg"], "pids": [1234]}},
+    "affinity": {"enabled": true, "cpus": [0, 1], "only": {"names": ["worker"]}}
+  }
+}
+```
+
+`go-jobserver policy <id> -freeze -exempt ffmpeg` replaces a job's policy, which is how a mechanism is turned off again. `-no-cpu` turns sampling off entirely.
 
 ## Durability
 
@@ -142,13 +211,14 @@ activate <id>                move a draft job to active
 depend <id> <dep>...         add dependencies
 pause | resume               stop and start scheduling
 interrupt <id|all>           stop running jobs
-stats                        show server counters
+policy [flags] <id>          replace a job's CPU cost and process controls
+stats                        show server counters, CPU use and active controls
 version                      print the version
 ```
 
 `queue` flags: `-name`, `-dep`/`-depends` (repeatable), `-input`, `-output`, `-env`, `-workdir`, `-key`, `-draft`, `-force`, `-wait`, `-shell`. With no command arguments, `queue` reads one command line from standard input.
 
-Global flags: `-dir`, `-http`, `-socket`, `-spool`, `-ipc`, `-j`, `-no-http`, `-no-socket`, `-no-spool`.
+Global flags: `-dir`, `-http`, `-socket`, `-spool`, `-ipc`, `-j`, `-budget`, `-cost`, `-sample`, `-no-cpu`, `-no-http`, `-no-socket`, `-no-spool`.
 
 ## Build and test
 
@@ -169,7 +239,12 @@ go-toolchain
 | `jobserver/scheduler.go` | readiness, blocking, cycles and cache lookup, as pure functions |
 | `jobserver/executor.go` | running a command and hashing what it produced |
 | `jobserver/process_unix.go` | the process group a job runs in, and killing all of it |
-| `jobserver/server.go` | the daemon: the scheduling loop and lifecycle control |
+| `jobserver/policy.go` | a job's CPU cost, its control settings and the process selectors |
+| `jobserver/measure.go` | the process table, the process tree and CPU rates |
+| `jobserver/control.go` | the mechanisms, the host each is available on, and their outcomes |
+| `jobserver/affinity_linux.go` | the CPU mask, where the kernel has one |
+| `jobserver/govern.go` | the sampling loop and the response to oversubscription |
+| `jobserver/server.go` | the daemon: the scheduling loop, the CPU budget and lifecycle control |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |

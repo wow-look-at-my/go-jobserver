@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 )
 
 // The journal is an append-only file of frames.
@@ -24,6 +25,8 @@ const (
 	recState    byte = 5
 	recControl  byte = 6
 	recDeps     byte = 7
+	recPolicy   byte = 8
+	recCPU      byte = 9
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -62,6 +65,12 @@ type record struct {
 
 	// recDeps
 	replaceDeps []string
+
+	// recPolicy
+	policy JobPolicy
+
+	// recCPU
+	cpuSeconds float64
 }
 
 // Encode returns the payload bytes of the record without its frame.
@@ -117,6 +126,12 @@ func (r record) encode() []byte {
 	case recDeps:
 		e.str(r.id)
 		e.list(r.replaceDeps)
+	case recPolicy:
+		e.str(r.id)
+		e.policy(r.policy)
+	case recCPU:
+		e.str(r.id)
+		e.f64(r.cpuSeconds)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -180,6 +195,12 @@ func decodeRecord(payload []byte) (record, error) {
 	case recDeps:
 		r.id = d.str()
 		r.replaceDeps = d.list()
+	case recPolicy:
+		r.id = d.str()
+		r.policy = d.policy()
+	case recCPU:
+		r.id = d.str()
+		r.cpuSeconds = d.f64()
 	default:
 		return record{}, fmt.Errorf("jobserver: unknown record kind %d", r.kind)
 	}
@@ -253,6 +274,37 @@ func (e *encoder) list(ss []string) {
 	for _, s := range ss {
 		e.str(s)
 	}
+}
+
+func (e *encoder) ints(ns []int) {
+	e.uvarint(uint64(len(ns)))
+	for _, n := range ns {
+		e.i64(int64(n))
+	}
+}
+
+func (e *encoder) f64(v float64) {
+	e.b = binary.LittleEndian.AppendUint64(e.b, math.Float64bits(v))
+}
+
+func (e *encoder) selector(s Selector) {
+	e.list(s.Names)
+	e.ints(s.PIDs)
+}
+
+func (e *encoder) policy(p JobPolicy) {
+	e.f64(p.Cost)
+	e.bool(p.Affinity.Enabled)
+	e.ints(p.Affinity.CPUs)
+	e.selector(p.Affinity.Exempt)
+	e.selector(p.Affinity.Only)
+	e.bool(p.Priority.Enabled)
+	e.i64(int64(p.Priority.Nice))
+	e.selector(p.Priority.Exempt)
+	e.selector(p.Priority.Only)
+	e.bool(p.Freeze.Enabled)
+	e.selector(p.Freeze.Exempt)
+	e.selector(p.Freeze.Only)
 }
 
 // A decoder reads what an encoder wrote.
@@ -330,6 +382,58 @@ func (d *decoder) list() []string {
 		}
 	}
 	return out
+}
+
+func (d *decoder) ints() []int {
+	n := d.uvarint()
+	if d.err != nil || n == 0 {
+		return nil
+	}
+	if n > uint64(len(d.b)) {
+		d.fail("int list runs past the record")
+		return nil
+	}
+	out := make([]int, 0, n)
+	for i := uint64(0); i < n; i++ {
+		out = append(out, int(d.i64()))
+		if d.err != nil {
+			return nil
+		}
+	}
+	return out
+}
+
+func (d *decoder) f64() float64 {
+	if len(d.b) < 8 {
+		d.fail("record ends early")
+		return 0
+	}
+	v := math.Float64frombits(binary.LittleEndian.Uint64(d.b[:8]))
+	d.b = d.b[8:]
+	return v
+}
+
+func (d *decoder) selector() Selector {
+	names := d.list()
+	pids := d.ints()
+	return Selector{Names: names, PIDs: pids}
+}
+
+func (d *decoder) policy() JobPolicy {
+	var p JobPolicy
+	p.Cost = d.f64()
+	p.Affinity.Enabled = d.bool()
+	p.Affinity.CPUs = d.ints()
+	p.Affinity.Exempt = d.selector()
+	p.Affinity.Only = d.selector()
+	p.Priority.Enabled = d.bool()
+	p.Priority.Nice = int(d.i64())
+	p.Priority.Exempt = d.selector()
+	p.Priority.Only = d.selector()
+	p.Freeze.Enabled = d.bool()
+	p.Freeze.Exempt = d.selector()
+	p.Freeze.Only = d.selector()
+	return p
 }
 
 func (d *decoder) remaining() bool { return len(d.b) > 0 }

@@ -353,3 +353,57 @@ func TestCLIQueueWithInputsAndOutputs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "1\n", string(body))
 }
+
+func TestCLICarriesAJobPolicyAndReplacesIt(t *testing.T) {
+	dir := shortDir(t)
+	startDaemon(t, dir)
+	out, err := capture(t, func() error {
+		return run([]string{
+			"-dir", dir, "queue", "-draft",
+			"-cpu", "2.5",
+			"-priority", "-nice", "5",
+			"-freeze", "-exempt", "1234,sleep",
+			"-affinity", "0,1",
+			"--", "sh", "-c", "true",
+		})
+	})
+	require.NoError(t, err)
+	id := strings.Split(strings.TrimSpace(out), "\n")[0]
+
+	raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	require.NoError(t, err)
+	var job jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(raw), &job))
+	assert.InDelta(t, 2.5, job.Policy.Cost, 1e-9)
+	assert.Equal(t, []jobserver.Mechanism{jobserver.MechAffinity, jobserver.MechPriority, jobserver.MechFreeze},
+		job.Policy.Enabled())
+	assert.Equal(t, []int{0, 1}, job.Policy.Affinity.CPUs)
+	assert.Equal(t, 5, job.Policy.Priority.Nice)
+	assert.Equal(t, []int{1234}, job.Policy.Freeze.Exempt.PIDs)
+	assert.Equal(t, []string{"sleep"}, job.Policy.Freeze.Exempt.Names)
+
+	replaced, err := capture(t, func() error {
+		return run([]string{"-dir", dir, "policy", "-cpu", "1", "-freeze-exempt", "99", id})
+	})
+	require.NoError(t, err)
+	assert.Contains(t, replaced, "freeze")
+	assert.Contains(t, replaced, "exempt 99")
+
+	raw, err = capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	require.NoError(t, err)
+	var after jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(raw), &after))
+	assert.InDelta(t, 1, after.Policy.Cost, 1e-9)
+	assert.Empty(t, after.Policy.Enabled(), "the replacement turns every mechanism off")
+	assert.Equal(t, []int{99}, after.Policy.Freeze.Exempt.PIDs)
+}
+
+func TestCLIStatsPrintsTheCPUReport(t *testing.T) {
+	dir := shortDir(t)
+	startDaemon(t, dir)
+	out, err := capture(t, func() error { return run([]string{"-dir", dir, "stats"}) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "budget")
+	assert.Contains(t, out, "measured")
+	assert.Contains(t, out, "host")
+}
