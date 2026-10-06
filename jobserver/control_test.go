@@ -33,9 +33,12 @@ func fileSize(path string) int64 {
 }
 
 func TestFreezeStopsAProcessAndThawResumesIt(t *testing.T) {
-	if hostOS() == "windows" {
-		out, detail := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{}, 1)
-		assert.Equal(t, OutcomeNotApplicable, out, detail)
+	if supported, detail := probeSuspend(); !supported {
+		// A host whose stop signal ends a process has no freeze to offer, and
+		// saying so is the whole of what it can do.
+		out, why := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{},
+			hostFacts{CPUs: 1, FreezeDetail: detail})
+		assert.Equal(t, OutcomeNotApplicable, out, why)
 		return
 	}
 	marker := filepath.Join(t.TempDir(), "ticks")
@@ -48,7 +51,7 @@ func TestFreezeStopsAProcessAndThawResumesIt(t *testing.T) {
 	require.Eventually(t, func() bool { return fileSize(marker) > 20 }, 10*time.Second, 10*time.Millisecond,
 		"the child never started writing")
 
-	outcome, detail := applyMechanism(MechFreeze, cmd.Process.Pid, JobPolicy{}, 1)
+	outcome, detail := applyMechanism(MechFreeze, cmd.Process.Pid, JobPolicy{}, freezable(1))
 	require.Equal(t, OutcomeApplied, outcome, detail)
 
 	time.Sleep(200 * time.Millisecond)
@@ -64,7 +67,7 @@ func TestFreezeStopsAProcessAndThawResumesIt(t *testing.T) {
 
 func TestPriorityChangesANiceValueAndRevertsIt(t *testing.T) {
 	if hostOS() == "windows" {
-		out, detail := applyMechanism(MechPriority, os.Getpid(), JobPolicy{}, 1)
+		out, detail := applyMechanism(MechPriority, os.Getpid(), JobPolicy{}, freezable(1))
 		assert.Equal(t, OutcomeNotApplicable, out, detail)
 		return
 	}
@@ -73,7 +76,7 @@ func TestPriorityChangesANiceValueAndRevertsIt(t *testing.T) {
 	require.NoError(t, err)
 
 	policy := JobPolicy{Priority: PrioritySettings{Enabled: true, Nice: 7}}
-	outcome, detail := applyMechanism(MechPriority, pid, policy, 1)
+	outcome, detail := applyMechanism(MechPriority, pid, policy, freezable(1))
 	require.Equal(t, OutcomeApplied, outcome, detail)
 	after, err := processNice(pid)
 	require.NoError(t, err)
@@ -94,7 +97,7 @@ func TestPriorityChangesANiceValueAndRevertsIt(t *testing.T) {
 func TestAffinityIsAppliedOrHonestlyUnavailable(t *testing.T) {
 	pid := spawnSleep(t)
 	policy := JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: []int{0}}}
-	outcome, detail := applyMechanism(MechAffinity, pid, policy, runtime.NumCPU())
+	outcome, detail := applyMechanism(MechAffinity, pid, policy, freezable(runtime.NumCPU()))
 	switch hostOS() {
 	case "linux", "darwin":
 		assert.Equal(t, OutcomeApplied, outcome, detail)
@@ -121,7 +124,7 @@ func TestAffinityPinsTheLinuxCPUMask(t *testing.T) {
 	want := []int{allowed[len(allowed)-1]}
 
 	outcome, detail := applyMechanism(MechAffinity, pid,
-		JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: want}}, runtime.NumCPU())
+		JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: want}}, freezable(runtime.NumCPU()))
 	require.Equal(t, OutcomeApplied, outcome, detail)
 
 	got, err := getAffinitySyscall(pid)
@@ -144,15 +147,13 @@ func TestACallAMissingHostCarriesIsNotARefusal(t *testing.T) {
 }
 
 func TestControllingAProcessThatIsGoneIsNotARefusal(t *testing.T) {
-	if hostOS() == "windows" {
-		return
-	}
 	cmd := exec.Command("sleep", "30")
 	require.NoError(t, cmd.Start())
 	pid := cmd.Process.Pid
 	require.NoError(t, cmd.Process.Kill())
 	_, _ = cmd.Process.Wait()
 
-	outcome, detail := applyMechanism(MechFreeze, pid, JobPolicy{}, 1)
+	// Letting a process that has already ended run again is not a refusal: there is nothing left to control.
+	outcome, detail := revertMechanism(MechFreeze, pid, 1)
 	require.Equal(t, OutcomeReverted, outcome, detail)
 }

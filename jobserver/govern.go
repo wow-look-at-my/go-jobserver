@@ -37,6 +37,15 @@ type governor struct {
 	active map[string][]Control
 	// history is every control this daemon has applied or reverted, newest last.
 	history []Control
+	// suspend is what this host's stop signal does, asked once.
+	suspend suspendFacts
+}
+
+// suspendFacts is the governor's answer about stopping a process here.
+type suspendFacts struct {
+	known     bool
+	supported bool
+	detail    string
 }
 
 // historyLimit bounds the control log the status surface carries.
@@ -70,6 +79,8 @@ func (g *governor) loop() {
 func (g *governor) tick() {
 	roots := g.srv.runningRoots()
 	reading := g.sampler.sample(roots)
+	// Asking this host how it stops a process starts one and waits for it.
+	facts := g.hostFacts(g.freezeInPlay(roots))
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -87,7 +98,7 @@ func (g *governor) tick() {
 		measured += rate
 	}
 	if budget := g.srv.budget(); measured > budget {
-		g.throttle(reading, roots)
+		g.throttle(reading, roots, facts)
 		return
 	}
 	// Back within budget: give every process back its normal scheduling.
@@ -98,7 +109,7 @@ func (g *governor) tick() {
 
 // throttle applies every mechanism a running job enables to the processes that
 // job's selectors pick out.
-func (g *governor) throttle(reading Reading, roots map[string]int) {
+func (g *governor) throttle(reading Reading, roots map[string]int, facts hostFacts) {
 	index := newProcIndex(reading.Table)
 	for id, root := range roots {
 		j, ok := g.srv.store.Job(id)
@@ -111,13 +122,43 @@ func (g *governor) throttle(reading Reading, roots map[string]int) {
 				if g.isActiveLocked(id, m, p.PID) {
 					continue
 				}
-				out, detail := applyMechanism(m, p.PID, j.Policy, reading.CPUs)
+				out, detail := applyMechanism(m, p.PID, j.Policy, facts)
 				g.recordLocked(Control{
 					Job: id, Mechanism: m, PID: p.PID, Name: p.Name,
 					Outcome: out, Detail: detail, Active: true, At: time.Now(),
 				})
 			}
 		}
+	}
+}
+
+// freezeInPlay reports whether any running job asks to be stopped.
+func (g *governor) freezeInPlay(roots map[string]int) bool {
+	for id := range roots {
+		if j, ok := g.srv.store.Job(id); ok && j.Policy.Freeze.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// hostFacts reports what this host can do. The answer it cannot read off the
+// platform is asked for once, on a process of this daemon's own.
+func (g *governor) hostFacts(want bool) hostFacts {
+	g.mu.Lock()
+	answer := g.suspend
+	g.mu.Unlock()
+	if want && !answer.known {
+		supported, detail := probeSuspend()
+		answer = suspendFacts{known: true, supported: supported, detail: detail}
+		g.mu.Lock()
+		g.suspend = answer
+		g.mu.Unlock()
+	}
+	return hostFacts{
+		CPUs:         g.srv.sampleCPUs(),
+		CanFreeze:    !answer.known || answer.supported,
+		FreezeDetail: answer.detail,
 	}
 }
 

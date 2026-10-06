@@ -2,6 +2,8 @@ package jobserver
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -36,15 +38,24 @@ type Control struct {
 	At     time.Time `json:"at"`
 }
 
+// A hostFacts is what the daemon has learned about process control here.
+type hostFacts struct {
+	CPUs int
+	// CanFreeze is whether the stop signal suspends a process here.
+	CanFreeze bool
+	// FreezeDetail says how that was found out.
+	FreezeDetail string
+}
+
 // applyMechanism applies one mechanism to one process of a job.
-func applyMechanism(m Mechanism, pid int, policy JobPolicy, cpus int) (Outcome, string) {
+func applyMechanism(m Mechanism, pid int, policy JobPolicy, host hostFacts) (Outcome, string) {
 	switch m {
 	case MechAffinity:
-		return applyAffinity(pid, affinityCPUs(policy.Affinity, cpus))
+		return applyAffinity(pid, affinityCPUs(policy.Affinity, host.CPUs))
 	case MechPriority:
 		return applyNice(pid, policy.Priority.Nice)
 	case MechFreeze:
-		return applyFreeze(pid)
+		return applyFreeze(pid, host)
 	}
 	return OutcomeNotApplicable, "unknown mechanism " + string(m)
 }
@@ -131,12 +142,118 @@ func schedulable(host string) bool {
 	return false
 }
 
-// applyFreeze suspends a process.
-func applyFreeze(pid int) (Outcome, string) {
-	if hostOS() == "windows" {
-		return OutcomeNotApplicable, "the Windows syscall layer turns this signal into termination"
+// applyFreeze suspends a process, on a host whose stop signal is known to
+// suspend one.
+func applyFreeze(pid int, host hostFacts) (Outcome, string) {
+	if !host.CanFreeze {
+		return OutcomeNotApplicable, host.FreezeDetail
 	}
 	return freeze(pid)
+}
+
+// How long a probe child is given to come up, to answer the stop, and to be
+// released again.
+const (
+	suspendProbeUp      = 5 * time.Second
+	suspendProbeSettle  = 100 * time.Millisecond
+	suspendProbeRelease = 5 * time.Second
+)
+
+// probeSuspend asks this host what its stop signal does to a process. It asks
+// with a process of its own. That process is running this binary in the mode
+// that waits for input. A host that ends a process when asked to stop it ends
+// nothing.
+//
+// The answer cannot come from the signal alone: a host whose stop signal ends
+// a process reports success for it. The same as one that suspends it. What
+// separates them is what happens after the resume. This is because a process
+// that was only stopped is still there to run and one that was ended is not.
+func probeSuspend() (bool, string) {
+	exe, err := os.Executable()
+	if err != nil {
+		return false, "this program cannot be found: " + err.Error()
+	}
+	cmd := exec.Command(exe, "-hold")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return false, "no pipe for the probe process: " + err.Error()
+	}
+	if err := cmd.Start(); err != nil {
+		return false, "the probe process would not start: " + err.Error()
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	stop := func() {
+		_ = cmd.Process.Kill()
+		_ = stdin.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	}
+
+	// Asking a process that had already ended would answer a different
+	// question, so the child has to be waiting first.
+	if !aliveFor(cmd.Process.Pid, suspendProbeUp) {
+		stop()
+		return false, "the probe process did not stay up"
+	}
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGSTOP); err != nil {
+		stop()
+		return false, "the stop signal was refused: " + err.Error()
+	}
+	time.Sleep(suspendProbeSettle)
+	stopped := syscall.Kill(cmd.Process.Pid, 0) == nil
+	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGCONT)
+
+	// Releasing the child is what tells the hosts apart.
+	_ = stdin.Close()
+	select {
+	case err := <-done:
+		if endedBySignal(err) {
+			return false, "the stop signal ended the process"
+		}
+		if err != nil || !stopped {
+			return false, "the probe process left on its own: " + describeExit(err)
+		}
+		return true, "the stop signal suspended the process"
+	case <-time.After(suspendProbeRelease):
+	}
+	stop()
+	return false, "the probe process never came back from the stop"
+}
+
+// aliveFor waits for a process to exist, and reports whether it did.
+func aliveFor(pid int, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if syscall.Kill(pid, 0) == nil {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// endedBySignal reports whether a process died by a signal rather than leaving
+// on its own.
+func endedBySignal(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled()
+}
+
+// describeExit names how a process ended.
+func describeExit(err error) string {
+	if err == nil {
+		return "it left with no error"
+	}
+	return err.Error()
 }
 
 // refused classifies a failed control call. A process that has already exited

@@ -4,10 +4,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -98,6 +98,7 @@ type globals struct {
 	cost     float64
 	sample   time.Duration
 	noCPU    bool
+	hold     bool
 	noHTTP   bool
 	noSocket bool
 	noSpool  bool
@@ -116,6 +117,7 @@ func (g *globals) bind(fs *flag.FlagSet) {
 	fs.Float64Var(&g.cost, "cost", g.cost, "CPU cost assumed for a job that declares none")
 	fs.DurationVar(&g.sample, "sample", g.sample, "how often CPU use is sampled")
 	fs.BoolVar(&g.noCPU, "no-cpu", g.noCPU, "do not sample CPU use")
+	fs.BoolVar(&g.hold, "hold", g.hold, "internal: wait for input, used to ask this host how it stops a process")
 	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
 	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
 	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")
@@ -179,6 +181,9 @@ func run(args []string) error {
 		g.bind(fs)
 		if err := fs.Parse(args); err != nil {
 			return err
+		}
+		if g.hold {
+			return holdOpen()
 		}
 		args = fs.Args()
 		if len(args) == 0 {
@@ -714,31 +719,8 @@ func cmdStats(g *globals, args []string) error {
 	return nil
 }
 
-// printCPU reports the daemon's CPU measurement.
-func printCPU(cpu jobserver.CPUReport) {
-	fmt.Printf("cpus     %d\n", cpu.CPUs)
-	fmt.Printf("budget   %.2f\n", cpu.Budget)
-	fmt.Printf("measured %.2f\n", cpu.Measured)
-	fmt.Printf("host     %.2f\n", cpu.HostBusy)
-	fmt.Printf("over     %v\n", cpu.OverBudget)
-	if cpu.Note != "" {
-		fmt.Printf("note     %s\n", cpu.Note)
-	}
-}
-
-// printJSON writes a value as indented JSON.
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(v)
-}
-
-// sortStrings sorts a small slice in place.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for k := i; k > 0 && s[k] < s[k-1]; k-- {
-			s[k], s[k-1] = s[k-1], s[k]
-		}
-	}
+// holdOpen waits for its input to end and then leaves.
+func holdOpen() error {
+	_, err := io.Copy(io.Discard, os.Stdin)
+	return err
 }

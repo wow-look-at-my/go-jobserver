@@ -14,6 +14,18 @@ import (
 	"github.com/wow-look-at-my/go-jobserver/jobserver"
 )
 
+// TestMain lets this test binary stand in for the daemon as the process the
+// suspend probe runs, which starts os.Executable() with -hold.
+func TestMain(m *testing.M) {
+	for _, arg := range os.Args[1:] {
+		if arg == "-hold" {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			os.Exit(0)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 // shortDir is a scratch directory with a path short enough to hold a socket.
 func shortDir(t *testing.T) string {
 	t.Helper()
