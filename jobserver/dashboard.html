@@ -1,0 +1,141 @@
+{{- if not .Job -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>go-jobserver</title>
+<meta http-equiv="refresh" content="2">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 1.5rem; background: #0d1117; color: #e6edf3;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+h1 { font-size: 1.1rem; margin: 0 0 .25rem; }
+a { color: #79c0ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; margin-bottom: 1rem; }
+.meta { color: #8b949e; }
+.badge { padding: .1rem .45rem; border-radius: 999px; font-size: .8rem; }
+.paused { background: #6e768166; color: #f0b72f; }
+.live { background: #1f6feb33; color: #79c0ff; }
+button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+  padding: .3rem .7rem; font: inherit; cursor: pointer; }
+button:hover { background: #30363d; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #21262d; vertical-align: top; }
+th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: #0d1117; }
+.cmd { color: #a5d6ff; }
+.deps { color: #8b949e; }
+.err { color: #ff7b72; }
+.chip { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .75rem; white-space: nowrap; }
+.s-draft { background: #6e768133; color: #8b949e; }
+.s-active { background: #d2992233; color: #d29922; }
+.s-running { background: #1f6feb33; color: #58a6ff; }
+.s-completed { background: #23863633; color: #3fb950; }
+.s-cached { background: #8957e533; color: #a371f7; }
+.s-failed { background: #da363333; color: #ff7b72; }
+.s-cancelled { background: #6e768133; color: #c9d1d9; }
+.s-blocked { background: #bb800933; color: #e3b341; }
+.empty { color: #8b949e; padding: 2rem 0; }
+.log { background: #010409; border: 1px solid #21262d; border-radius: 6px; padding: .75rem;
+  white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>go-jobserver</h1>
+  <span class="meta">{{.Stats.Dir}}</span>
+  <span class="meta">pid {{.Stats.PID}}</span>
+  <span class="meta">up {{.Stats.Uptime}}</span>
+  <span class="meta">{{.Stats.Running}} running / {{.Stats.Total}} jobs</span>
+  {{if .Stats.Paused}}<span class="badge paused">paused</span>{{else}}<span class="badge live">scheduling</span>{{end}}
+  <span style="flex:1"></span>
+  <button onclick="act('pause')">Pause</button>
+  <button onclick="act('resume')">Resume</button>
+  <button onclick="act('interrupt-all')">Interrupt all</button>
+</header>
+{{- if .Jobs}}
+<table>
+  <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>started</th><th>took</th><th>exit</th><th></th></tr></thead>
+  <tbody>
+  {{- range .Graph}}
+    <tr>
+      <td><a href="/job/{{.Job.ID}}">{{.Job.ID}}</a></td>
+      <td><span class="chip s-{{.Job.State}}">{{.Job.State}}</span></td>
+      <td class="deps">{{.Depth}}</td>
+      <td class="cmd">{{args .Job.Command " "}}</td>
+      <td class="deps">{{args .Job.Deps " "}}</td>
+      <td class="deps">{{short .Job.Started}}</td>
+      <td class="deps">{{dur .Job.Finished.Sub .Job.Started}}</td>
+      <td>{{if .Job.ExitCode}}<span class="err">{{.Job.ExitCode}}</span>{{end}}</td>
+      <td>{{if .Job.Error}}<span class="err">{{.Job.Error}}</span>{{end}}</td>
+    </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{- else}}
+<p class="empty">No jobs yet. Enqueue one with <code>go-jobserver queue -- sh -c 'echo hi'</code>.</p>
+{{- end}}
+<script>
+function act(op) {
+  fetch('/api/' + op, {method: 'POST'}).then(function () { location.reload(); });
+}
+</script>
+</body>
+</html>
+{{- else -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{.Job.ID}} - go-jobserver</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; padding: 1.5rem; background: #0d1117; color: #e6edf3;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+a { color: #79c0ff; text-decoration: none; }
+h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; margin: 0 0 1rem; }
+dt { color: #8b949e; }
+dd { margin: 0; }
+.log { background: #010409; border: 1px solid #21262d; border-radius: 6px; padding: .75rem;
+  white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<h1><a href="/">go-jobserver</a> / {{.Job.ID}}</h1>
+<dl>
+  <dt>state</dt><dd>{{.Job.State}}</dd>
+  {{- if .Job.Name}}<dt>name</dt><dd>{{.Job.Name}}</dd>{{end}}
+  <dt>command</dt><dd>{{args .Job.Command " "}}</dd>
+  {{- if .Job.Dir}}<dt>dir</dt><dd>{{.Job.Dir}}</dd>{{end}}
+  {{- if .Job.Deps}}<dt>deps</dt><dd>{{args .Job.Deps " "}}</dd>{{end}}
+  {{- if .Job.Inputs}}<dt>inputs</dt><dd>{{args .Job.Inputs " "}}</dd>{{end}}
+  {{- if .Job.Outputs}}<dt>outputs</dt><dd>{{args .Job.Outputs " "}}</dd>{{end}}
+  {{- if .Job.Identity}}<dt>identity</dt><dd>{{.Job.Identity}}</dd>{{end}}
+  {{- if .Job.CacheOf}}<dt>reused</dt><dd><a href="/job/{{.Job.CacheOf}}">{{.Job.CacheOf}}</a></dd>{{end}}
+  <dt>attempts</dt><dd>{{.Job.Attempts}}</dd>
+  <dt>exit</dt><dd>{{.Job.ExitCode}}</dd>
+  {{- if .Job.Error}}<dt>error</dt><dd>{{.Job.Error}}</dd>{{end}}
+  <dt>log</dt><dd>{{.Job.LogBytes}} bytes</dd>
+</dl>
+{{- if .Job.Artifacts}}
+<table>
+  <thead><tr><th>artifact</th><th>size</th><th>sha256</th></tr></thead>
+  <tbody>
+  {{- range .Job.Artifacts}}
+  <tr><td>{{.Path}}</td><td>{{.Size}}</td><td>{{.SHA256}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+{{- end}}
+<h2 style="font-size:1rem">output</h2>
+{{- if .Output}}
+<pre class="log">{{.Output}}</pre>
+{{- else}}
+<p style="color:#8b949e">no output</p>
+{{- end}}
+{{- if .Truncated}}<p style="color:#8b949e">showing the first 256 KiB</p>{{end}}
+</body>
+</html>
+{{- end -}}
