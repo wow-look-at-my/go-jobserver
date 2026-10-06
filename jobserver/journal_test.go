@@ -132,7 +132,7 @@ func TestOpenStoreCutsATornTail(t *testing.T) {
 	info, err := os.Stat(path)
 	require.Nil(t, err)
 
-	require.Greater(t, info.Size(), 0)
+	require.Greater(t, info.Size(), int64(0))
 
 	require.NoError(t, st2.SetPaused(true))
 
@@ -143,15 +143,6 @@ func TestOpenStoreCutsATornTail(t *testing.T) {
 
 	defer st3.Close()
 	require.True(t, st3.Paused())
-
-}
-
-// journalRecordSize measures the records the torn-tail test writes before the
-// cut, so a size assertion stays honest when the codec changes.
-func journalRecordSize() int {
-	create := record{kind: recCreate, id: "j-1", command: []string{"true"}, state: StateActive}
-	finish := record{kind: recFinish, id: "j-1", state: StateCompleted}
-	return len(create.encode()) + len(finish.encode())
 }
 
 func TestOpenStoreKeepsJobs(t *testing.T) {

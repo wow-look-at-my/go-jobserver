@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -143,7 +144,9 @@ func TestCLIListShowsJobs(t *testing.T) {
 
 	out, err = capture(t, func() error { return run([]string{"-dir", dir, "list", "-json"}) })
 	require.NoError(t, err)
-	assert.Contains(t, out, `"id": "`+id+`"`)
+	encoded, err := json.Marshal(id)
+	require.NoError(t, err)
+	assert.Contains(t, out, `"id": `+string(encoded))
 }
 
 func TestCLILogsPrintsTheOutput(t *testing.T) {
