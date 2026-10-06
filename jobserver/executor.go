@@ -40,7 +40,8 @@ func (ExecRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error) {
 	}
 	cmd.Stdout = out
 	cmd.Stderr = out
-	// Killing the process is the default cancel; the wait delay bounds a child that holds a pipe open after it is killed.
+	// Cancellation kills the job's whole process group.
+	prepareProcess(cmd)
 	cmd.WaitDelay = waitDelay
 	err := cmd.Run()
 	if err == nil {

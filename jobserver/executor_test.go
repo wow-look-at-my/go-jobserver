@@ -60,6 +60,32 @@ func TestExecRunnerStopsOnContextCancel(t *testing.T) {
 	assert.Less(t, time.Since(start), 20*time.Second)
 }
 
+func TestExecRunnerStopsAJobThatLeavesAChildOnThePipe(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := ExecRunner{}.Run(ctx, &Job{
+			Command: []string{"sh", "-c", "mkfifo -m 600 hold; cat hold"},
+			Dir:     dir,
+		}, &bytes.Buffer{})
+		done <- err
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "hold"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "the job never started")
+
+	cancel()
+	select {
+	case err := <-done:
+		require.Error(t, err, "a cancelled run must report an error")
+	case <-time.After(20 * time.Second):
+		require.FailNow(t, "the runner did not return after its context was cancelled")
+	}
+}
+
 func TestExecRunnerReportsAMissingBinary(t *testing.T) {
 	var out bytes.Buffer
 	_, err := ExecRunner{}.Run(context.Background(), &Job{Command: []string{"definitely-not-a-real-binary-xyz"}}, &out)

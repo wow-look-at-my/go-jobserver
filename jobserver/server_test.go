@@ -377,6 +377,24 @@ func TestServerInterruptCancelsARunningJob(t *testing.T) {
 	waitState(t, srv, j.ID, StateCancelled)
 }
 
+func TestServerInterruptsAJobWhoseChildHoldsThePipe(t *testing.T) {
+	dir := t.TempDir()
+	srv := newTestServer(t, nil)
+	j, _, err := srv.Enqueue(Spec{
+		Command: []string{"sh", "-c", "mkfifo -m 600 hold; cat hold"},
+		Dir:     dir,
+	})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateRunning)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "hold"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "the job never started")
+
+	require.NoError(t, srv.Interrupt(j.ID))
+	waitState(t, srv, j.ID, StateCancelled)
+}
+
 func TestServerInterruptAll(t *testing.T) {
 	runner := &fakeRunner{hold: make(chan struct{})}
 	srv := newTestServer(t, func(c *Config) { c.Runner = runner; c.MaxConcurrent = 2 })

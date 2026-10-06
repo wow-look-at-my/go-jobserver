@@ -661,7 +661,7 @@ func cmdStats(g *globals, args []string) error {
 	}
 	sortStrings(states)
 	for _, state := range states {
-		fmt.Printf("%-9s%d\n", state, st.ByState[state])
+		fmt.Printf("%-10s %d\n", state, st.ByState[state])
 	}
 	return nil
 }
