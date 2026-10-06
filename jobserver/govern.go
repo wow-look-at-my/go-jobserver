@@ -123,9 +123,11 @@ func (g *governor) throttle(reading Reading, roots map[string]int, facts hostFac
 					continue
 				}
 				out, detail := applyMechanism(m, p.PID, j.Policy, facts)
+				// Only a mechanism that took effect is in effect. Any other
+				// answer left the process as it was.
 				g.recordLocked(Control{
 					Job: id, Mechanism: m, PID: p.PID, Name: p.Name,
-					Outcome: out, Detail: detail, Active: true, At: time.Now(),
+					Outcome: out, Detail: detail, Active: out == OutcomeApplied, At: time.Now(),
 				})
 			}
 		}

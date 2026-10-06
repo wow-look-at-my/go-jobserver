@@ -680,6 +680,42 @@ func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
 	assert.Empty(t, srv.Controls(), "nothing may still be in effect once the job is under budget")
 }
 
+func TestGovernorLeavesAJobAloneWhereFreezeCannotSuspend(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.CPUBudget = 0.001
+		c.SampleInterval = 20 * time.Millisecond
+	})
+	// A host whose stop signal ends a process cannot be asked to stop a job.
+	srv.gov.mu.Lock()
+	srv.gov.suspend = suspendFacts{known: true, supported: false, detail: "the stop signal ended the process"}
+	srv.gov.mu.Unlock()
+
+	j, _, err := srv.Enqueue(Spec{
+		Command: []string{"sh", "-c", "while :; do :; done"},
+		Policy:  JobPolicy{Cost: 1, Freeze: FreezeSettings{Enabled: true}},
+	})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateRunning)
+	t.Cleanup(func() { srv.InterruptAll() })
+
+	var told bool
+	require.Eventually(t, func() bool {
+		for _, c := range srv.Events() {
+			if c.Job == j.ID && c.Mechanism == MechFreeze {
+				told = true
+				assert.Equal(t, OutcomeNotApplicable, c.Outcome)
+				assert.Equal(t, "the stop signal ended the process", c.Detail)
+			}
+		}
+		return told
+	}, 20*time.Second, 20*time.Millisecond, "the governor never said why it did not stop the job")
+
+	assert.Empty(t, srv.Controls(), "nothing may be in effect where freeze cannot suspend")
+	running, err := srv.Get(j.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateRunning, running.State, "the job must keep running")
+}
+
 func TestServerRecordsTheCPUAJobUsed(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.SampleInterval = 10 * time.Millisecond })
 	j, _, err := srv.Enqueue(Spec{Command: []string{"sh", "-c", "head -c 4000000000 /dev/zero > /dev/null"}})
