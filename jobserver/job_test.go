@@ -1,23 +1,23 @@
 package jobserver
 
 import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/wow-look-at-my/go-containers/set"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestNewIDIsUnique(t *testing.T) {
-	taken := map[string]bool{}
-	reg := func(id string) bool { return taken[id] }
+	taken := set.New[string]()
+	reg := func(id string) bool { return taken.Contains(id) }
 	for i := 0; i < 500; i++ {
 		id := NewID(reg)
-		if taken[id] {
-			t.Fatalf("NewID returned a taken id %q", id)
-		}
-		if !strings.HasPrefix(id, "j-") || len(id) != 14 {
-			t.Fatalf("NewID returned %q, want j- followed by 12 hex digits", id)
-		}
-		taken[id] = true
+		require.False(t, taken.Contains(id))
+
+		require.False(t, !strings.HasPrefix(id, "j-") || len(id) != 14)
+		taken.Add(id)
 	}
 }
 
@@ -26,9 +26,8 @@ func TestNewIDSkipsTaken(t *testing.T) {
 	first := NewID(func(string) bool { return false })
 	seen[first]++
 	second := NewID(func(id string) bool { return id == first })
-	if second == first {
-		t.Fatalf("NewID returned the taken id %q", first)
-	}
+	require.NotEqual(t, first, second)
+
 }
 
 func TestStateTerminal(t *testing.T) {
@@ -46,9 +45,9 @@ func TestStateTerminal(t *testing.T) {
 		{StateBlocked, true},
 	}
 	for _, c := range cases {
-		if got := c.state.Terminal(); got != c.want {
-			t.Errorf("%s.Terminal() = %v, want %v", c.state, got, c.want)
-		}
+		got := c.state.Terminal()
+		assert.Equal(t, c.want, got)
+
 	}
 }
 
@@ -63,30 +62,27 @@ func TestStateSucceeded(t *testing.T) {
 		{StateActive, false},
 		{StateBlocked, false},
 	} {
-		if got := c.state.succeeded(); got != c.want {
-			t.Errorf("%s.succeeded() = %v, want %v", c.state, got, c.want)
-		}
+		got := c.state.succeeded()
+		assert.Equal(t, c.want, got)
+
 	}
 }
 
 func TestValidDepsNormalizes(t *testing.T) {
 	got := ValidDeps([]string{" b ", "a", "b", "", "a"})
 	want := []string{"a", "b"}
-	if len(got) != len(want) {
-		t.Fatalf("ValidDeps = %v, want %v", got, want)
-	}
+	require.Equal(t, len(want), len(got))
+
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("ValidDeps = %v, want %v", got, want)
-		}
+		require.Equal(t, want[i], got[i])
+
 	}
 }
 
 func TestComputeIdentityIsStable(t *testing.T) {
 	base := identityInput{Command: []string{"echo", "hi"}, Dir: "/tmp", Outputs: []string{"out"}}
-	if computeIdentity(base) != computeIdentity(base) {
-		t.Fatal("the same input hashed differently twice")
-	}
+	require.Equal(t, computeIdentity(base), computeIdentity(base))
+
 	variants := map[string]identityInput{
 		"other command": {Command: []string{"echo", "bye"}, Dir: "/tmp", Outputs: []string{"out"}},
 		"other dir":     {Command: []string{"echo", "hi"}, Dir: "/elsewhere", Outputs: []string{"out"}},
@@ -96,37 +92,34 @@ func TestComputeIdentityIsStable(t *testing.T) {
 		"other inputs":  {Command: []string{"echo", "hi"}, Dir: "/tmp", Outputs: []string{"out"}, Inputs: []string{"in=2"}},
 	}
 	want := computeIdentity(base)
-	for name, in := range variants {
-		if got := computeIdentity(in); got == want {
-			t.Errorf("%s hashed the same as the base input", name)
-		}
+	for _, in := range variants {
+		got := computeIdentity(in)
+		assert.NotEqual(t, want, got)
+
 	}
 }
 
 func TestComputeIdentityUsesTheKey(t *testing.T) {
 	withKey := computeIdentity(identityInput{Key: "k"})
 	without := computeIdentity(identityInput{Command: []string{"k"}})
-	if withKey == without {
-		t.Fatal("a key collides with a command of the same text")
-	}
+	require.NotEqual(t, without, withKey)
+
 }
 
 func TestJobIdentityNeedsDependencyIdentities(t *testing.T) {
 	a := &Job{ID: "a", Command: []string{"one"}}
 	b := &Job{ID: "b", Command: []string{"two"}, Deps: []string{"a"}}
 	byID := map[string]*Job{"a": a, "b": b}
-	if id := JobIdentity(b, byID); id != "" {
-		t.Fatalf("JobIdentity = %q, want empty while a dependency has no identity", id)
-	}
+	id := JobIdentity(b, byID)
+	require.Equal(t, "", id)
+
 	a.Identity = "sha256:aa"
 	first := JobIdentity(b, byID)
-	if first == "" {
-		t.Fatal("JobIdentity stayed empty after the dependency got an identity")
-	}
+	require.NotEqual(t, "", first)
+
 	a.Identity = "sha256:bb"
-	if JobIdentity(b, byID) == first {
-		t.Fatal("a dependency's identity change did not change the dependent")
-	}
+	require.NotEqual(t, first, JobIdentity(b, byID))
+
 }
 
 func TestSortedJobsOrdersByCreation(t *testing.T) {
@@ -139,16 +132,6 @@ func TestSortedJobsOrdersByCreation(t *testing.T) {
 	got := SortedJobs(jobs)
 	want := []string{"a", "c", "b"}
 	for i, id := range want {
-		if got[i].ID != id {
-			t.Fatalf("SortedJobs = %s, want %v", ids(got), want)
-		}
+		require.Equal(t, id, got[i].ID)
 	}
-}
-
-func ids(jobs []*Job) []string {
-	out := make([]string, 0, len(jobs))
-	for _, j := range jobs {
-		out = append(out, j.ID)
-	}
-	return out
 }

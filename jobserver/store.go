@@ -3,6 +3,7 @@ package jobserver
 import (
 	"errors"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"io"
 	"os"
 	"path/filepath"
@@ -362,16 +363,16 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 // The caller holds the lock.
 func (s *Store) checkCycle(id string, deps []string) error {
 	// Walk from each new dependency; reaching id means a loop.
-	seen := map[string]bool{}
+	seen := set.New[string]()
 	var walk func(cur string) bool
 	walk = func(cur string) bool {
 		if cur == id {
 			return true
 		}
-		if seen[cur] {
+		if seen.Contains(cur) {
 			return false
 		}
-		seen[cur] = true
+		seen.Add(cur)
 		j, ok := s.jobs[cur]
 		if !ok {
 			return false

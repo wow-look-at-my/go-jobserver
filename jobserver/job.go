@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"sort"
 	"strings"
 	"time"
@@ -139,14 +140,14 @@ func SortedDeps(deps []string) []string {
 
 // ValidDeps normalizes a dependency list: trimmed, de-duplicated, sorted.
 func ValidDeps(deps []string) []string {
-	seen := make(map[string]bool, len(deps))
+	seen := set.New[string]()
 	out := make([]string, 0, len(deps))
 	for _, d := range deps {
 		d = CanonicalID(d)
-		if d == "" || seen[d] {
+		if d == "" || seen.Contains(d) {
 			continue
 		}
-		seen[d] = true
+		seen.Add(d)
 		out = append(out, d)
 	}
 	sort.Strings(out)
