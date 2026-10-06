@@ -31,43 +31,60 @@ func startDaemon(t *testing.T, dir string) *jobserver.Server {
 // capture runs the CLI and returns what it wrote to stdout.
 func capture(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
+	out, _, err := captureBoth(t, fn)
+	return out, err
+}
+
+// captureBoth runs the CLI and returns what it wrote to each stream.
+func captureBoth(t *testing.T, fn func() error) (string, string, error) {
+	t.Helper()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	outR, outW, err := os.Pipe()
 	require.NoError(t, err)
-	os.Stdout = w
-	done := make(chan string, 1)
+	errR, errW, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout, os.Stderr = outW, errW
+	outDone := make(chan string, 1)
+	errDone := make(chan string, 1)
 	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
+		b, _ := io.ReadAll(outR)
+		outDone <- string(b)
+	}()
+	go func() {
+		b, _ := io.ReadAll(errR)
+		errDone <- string(b)
 	}()
 	fnErr := fn()
-	w.Close()
-	os.Stdout = old
-	return <-done, fnErr
+	outW.Close()
+	errW.Close()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	return <-outDone, <-errDone, fnErr
 }
 
 func TestCLIQueueWaitsForAJob(t *testing.T) {
 	dir := t.TempDir()
 	startDaemon(t, dir)
-	out, err := capture(t, func() error {
+	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo from-cli"})
 	})
 	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 2, "output was %q", out)
-	assert.True(t, strings.HasPrefix(lines[0], "j-"), "the first line is the job id, got %q", lines[0])
-	assert.Contains(t, lines[1], string(jobserver.StateCompleted))
+	// stdout carries the id alone, so a script can capture it.
+	id := strings.TrimSpace(out)
+	assert.True(t, strings.HasPrefix(id, "j-"), "stdout was %q", out)
+	assert.NotContains(t, id, "\n", "stdout carries more than the id: %q", out)
+	assert.Contains(t, errText, string(jobserver.StateCompleted))
 }
 
 func TestCLIQueueReportsAFailure(t *testing.T) {
 	dir := t.TempDir()
 	startDaemon(t, dir)
-	out, err := capture(t, func() error {
+	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo bad >&2; exit 4"})
 	})
 	require.Error(t, err)
-	assert.Contains(t, out, "exit 4")
-	assert.Contains(t, out, "bad")
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"), "stdout was %q", out)
+	assert.Contains(t, errText, "exit 4")
+	assert.Contains(t, errText, "bad")
 }
 
 func TestCLIQueueDraftThenActivate(t *testing.T) {
@@ -248,11 +265,12 @@ func TestCLIRejectsAnUnknownCommand(t *testing.T) {
 func TestCLIQueueThroughAShell(t *testing.T) {
 	dir := t.TempDir()
 	startDaemon(t, dir)
-	out, err := capture(t, func() error {
+	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "-shell", "echo a && echo b"})
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, string(jobserver.StateCompleted))
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"))
+	assert.Contains(t, errText, string(jobserver.StateCompleted))
 }
 
 func TestCLIInterruptAll(t *testing.T) {

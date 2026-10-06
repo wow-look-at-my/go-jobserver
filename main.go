@@ -308,14 +308,15 @@ func cmdQueue(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s %s", done.ID, done.State)
+	// The job id is what stdout carries.
+	fmt.Fprintf(os.Stderr, "%s %s", done.ID, done.State)
 	if done.ExitCode != 0 {
-		fmt.Printf(" exit %d", done.ExitCode)
+		fmt.Fprintf(os.Stderr, " exit %d", done.ExitCode)
 	}
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 	if done.State != jobserver.StateCompleted && done.State != jobserver.StateCached {
 		if out, lerr := c.Logs(ctx, done.ID, 0, 64<<10); lerr == nil && out.Output != "" {
-			fmt.Print(out.Output)
+			fmt.Fprint(os.Stderr, out.Output)
 		}
 		return fmt.Errorf("job %s %s", done.ID, done.State)
 	}
