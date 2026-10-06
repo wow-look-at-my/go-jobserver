@@ -104,12 +104,15 @@ func TestHTTPTransport(t *testing.T) {
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 	assert.Contains(t, string(page), "go-jobserver")
 	assert.Contains(t, string(page), created.Job.ID)
+	assert.Contains(t, string(page), "</html>", "the dashboard rendered only part of the page")
 
 	res, err = http.Get(front.URL + "/job/" + created.Job.ID)
 	require.NoError(t, err)
 	detail, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	assert.Contains(t, string(detail), created.Job.ID)
+	assert.Contains(t, string(detail), "</html>", "the job page rendered only part of the page")
+	assert.Contains(t, string(detail), "completed")
 }
 
 func TestHTTPRejectsAnEmptyBody(t *testing.T) {
@@ -293,4 +296,10 @@ func TestPageHelpers(t *testing.T) {
 	assert.NotEqual(t, "-", shortTime(time.Now()))
 	assert.Equal(t, "-", shortDuration(0))
 	assert.Equal(t, "5ms", shortDuration(5*time.Millisecond))
+	assert.Equal(t, "-", elapsed(&Job{}))
+	running := elapsed(&Job{Started: time.Now()})
+	assert.NotEqual(t, "-", running)
+	assert.Contains(t, running, "running")
+	done := elapsed(&Job{Started: time.Now().Add(-time.Second), Finished: time.Now()})
+	assert.Contains(t, done, "s")
 }

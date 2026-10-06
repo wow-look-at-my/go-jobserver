@@ -66,7 +66,7 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
       <td class="cmd">{{args .Job.Command " "}}</td>
       <td class="deps">{{args .Job.Deps " "}}</td>
       <td class="deps">{{short .Job.Started}}</td>
-      <td class="deps">{{dur .Job.Finished.Sub .Job.Started}}</td>
+      <td class="deps">{{elapsed .Job}}</td>
       <td>{{if .Job.ExitCode}}<span class="err">{{.Job.ExitCode}}</span>{{end}}</td>
       <td>{{if .Job.Error}}<span class="err">{{.Job.Error}}</span>{{end}}</td>
     </tr>

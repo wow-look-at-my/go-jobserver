@@ -21,9 +21,10 @@ var dashboardFiles embed.FS
 // pages is parsed once; a parse failure is a build-time mistake, so it panics
 // at first use rather than serving a broken page.
 var pages = template.Must(template.New("dashboard.html").Funcs(template.FuncMap{
-	"short": shortTime,
-	"dur":   shortDuration,
-	"args":  strings.Join,
+	"short":   shortTime,
+	"dur":     shortDuration,
+	"elapsed": elapsed,
+	"args":    strings.Join,
 }).ParseFS(dashboardFiles, "dashboard.html"))
 
 // Mux returns the HTTP routes the dashboard and the JSON API answer on.
@@ -374,4 +375,15 @@ func shortDuration(d time.Duration) string {
 		return "-"
 	}
 	return d.Round(time.Millisecond).String()
+}
+
+// elapsed is how long a job ran, for the pages.
+func elapsed(j *Job) string {
+	if j.Started.IsZero() {
+		return "-"
+	}
+	if j.Finished.IsZero() {
+		return shortDuration(time.Since(j.Started)) + " (running)"
+	}
+	return shortDuration(j.Finished.Sub(j.Started))
 }
