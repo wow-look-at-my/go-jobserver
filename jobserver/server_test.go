@@ -374,7 +374,12 @@ func TestServerInterruptCancelsARunningJob(t *testing.T) {
 	require.NoError(t, err)
 	waitState(t, srv, j.ID, StateRunning)
 	require.NoError(t, srv.Interrupt(j.ID))
-	waitState(t, srv, j.ID, StateCancelled)
+	// The job is settled by the time Interrupt returns.
+	got, err := srv.Get(j.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateCancelled, got.State)
+	assert.Equal(t, -1, got.ExitCode)
+	assert.Contains(t, got.Error, "interrupted")
 }
 
 func TestServerInterruptsAJobWhoseChildHoldsThePipe(t *testing.T) {
@@ -392,7 +397,9 @@ func TestServerInterruptsAJobWhoseChildHoldsThePipe(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond, "the job never started")
 
 	require.NoError(t, srv.Interrupt(j.ID))
-	waitState(t, srv, j.ID, StateCancelled)
+	got, err := srv.Get(j.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateCancelled, got.State)
 }
 
 func TestServerInterruptAll(t *testing.T) {
