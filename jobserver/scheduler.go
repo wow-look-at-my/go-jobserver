@@ -190,15 +190,14 @@ func TopoOrder(jobs []*Job) []string {
 	return out
 }
 
-// CacheHit returns the ID of a finished job whose identity matches the one
-// this job would compute, or "" when there is none.
-func CacheHit(j *Job, idx IdentityIndex, byID map[string]*Job) string {
-	id := JobIdentity(j, byID)
-	if id == "" {
+// CacheHit returns the ID of a finished job that already produced this
+// identity, or "" when there is none.
+func CacheHit(identity string, idx IdentityIndex, selfID string) string {
+	if identity == "" {
 		return ""
 	}
-	cand, ok := idx[id]
-	if !ok || cand == j.ID {
+	cand, ok := idx[identity]
+	if !ok || cand == selfID {
 		return ""
 	}
 	return cand
@@ -206,7 +205,9 @@ func CacheHit(j *Job, idx IdentityIndex, byID map[string]*Job) string {
 
 // JobIdentity computes what a job's work is worth deduping on: its command,
 // directory, environment, outputs, hashed inputs, and the identities of its
-// dependencies. An empty string means the identity cannot be computed yet.
+// dependencies. A dependency contributes its identity rather than its name, so
+// the same work reaches the same identity through a cached copy of it. An
+// empty string means the identity cannot be computed yet.
 func JobIdentity(j *Job, byID map[string]*Job) string {
 	deps := make([]string, 0, len(j.Deps))
 	for _, d := range j.Deps {
@@ -214,7 +215,7 @@ func JobIdentity(j *Job, byID map[string]*Job) string {
 		if !ok || dep.Identity == "" {
 			return ""
 		}
-		deps = append(deps, d+"="+dep.Identity)
+		deps = append(deps, dep.Identity)
 	}
 	sort.Strings(deps)
 	return computeIdentity(identityInput{

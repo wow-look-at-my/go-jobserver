@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -21,9 +22,10 @@ var dashboardFiles embed.FS
 // pages is parsed once; a parse failure is a build-time mistake, so it panics
 // at first use rather than serving a broken page.
 var pages = template.Must(template.New("dashboard.html").Funcs(template.FuncMap{
-	"short": shortTime,
-	"dur":   shortDuration,
-	"args":  strings.Join,
+	"short":   shortTime,
+	"dur":     shortDuration,
+	"elapsed": elapsed,
+	"args":    strings.Join,
 }).ParseFS(dashboardFiles, "dashboard.html"))
 
 // Mux returns the HTTP routes the dashboard and the JSON API answer on.
@@ -64,6 +66,9 @@ func (s *Server) startHTTP() error {
 func (s *Server) startUnix() error {
 	if s.cfg.UnixSocket == "" {
 		return nil
+	}
+	if n := len(s.cfg.UnixSocket); n > unixPathLimit {
+		return fmt.Errorf("go-jobserver: unix socket path is %d bytes and %s allows %d: pass -socket with a shorter path, or -no-socket to use the ipc service", n, runtime.GOOS, unixPathLimit)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.cfg.UnixSocket), 0o755); err != nil {
 		return err
@@ -120,7 +125,10 @@ type httpServer struct {
 
 func (h *httpServer) Close() error {
 	_ = h.srv.Close()
-	return h.ln.Close()
+	if err := h.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // unixServer closes a file socket, its server and the socket file.
@@ -132,8 +140,11 @@ type unixServer struct {
 
 func (u *unixServer) Close() error {
 	_ = u.srv.Close()
-	err := u.ln.Close()
-	if rerr := os.Remove(u.path); err == nil && !errors.Is(rerr, os.ErrNotExist) {
+	var err error
+	if cerr := u.ln.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		err = cerr
+	}
+	if rerr := os.Remove(u.path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) && err == nil {
 		err = rerr
 	}
 	return err
@@ -332,21 +343,13 @@ func statusFor(resp Response) int {
 	if resp.OK {
 		return http.StatusOK
 	}
-	switch {
-	case errors.Is(errText(resp.Error), ErrNotFound):
+	switch resp.Code {
+	case CodeNotFound:
 		return http.StatusNotFound
-	case errors.Is(errText(resp.Error), ErrDuplicate), errors.Is(errText(resp.Error), ErrCycle), errors.Is(errText(resp.Error), ErrMissingDep), errors.Is(errText(resp.Error), ErrBadState), errors.Is(errText(resp.Error), ErrNoCommand):
+	case CodeBadRequest:
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
-}
-
-// errText is the error a Response carries, for status mapping.
-func errText(msg string) error {
-	if msg == "" {
-		return nil
-	}
-	return errors.New(msg)
 }
 
 func writeJSON(w http.ResponseWriter, resp Response) {
@@ -376,4 +379,15 @@ func shortDuration(d time.Duration) string {
 		return "-"
 	}
 	return d.Round(time.Millisecond).String()
+}
+
+// elapsed is how long a job ran, for the pages.
+func elapsed(j *Job) string {
+	if j.Started.IsZero() {
+		return "-"
+	}
+	if j.Finished.IsZero() {
+		return shortDuration(time.Since(j.Started)) + " (running)"
+	}
+	return shortDuration(j.Finished.Sub(j.Started))
 }

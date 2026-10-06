@@ -70,7 +70,7 @@ type Server struct {
 	runner Runner
 
 	mu      sync.Mutex
-	running map[string]context.CancelFunc
+	running map[string]*runHandle
 	closed  bool
 
 	wake   chan struct{}
@@ -100,6 +100,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.SyncInterval <= 0 {
 		cfg.SyncInterval = time.Second
 	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
 	st, err := OpenStore(cfg.Dir)
 	if err != nil {
 		return nil, err
@@ -108,13 +111,10 @@ func New(cfg Config) (*Server, error) {
 		cfg:     cfg,
 		store:   st,
 		runner:  cfg.Runner,
-		running: make(map[string]context.CancelFunc),
+		running: make(map[string]*runHandle),
 		wake:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		start:   time.Now(),
-	}
-	if cfg.Logf == nil {
-		cfg.Logf = func(string, ...any) {}
 	}
 	return s, nil
 }
@@ -153,6 +153,16 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// A runHandle is one job's run in flight: the way to stop it, and the moment
+// it has stopped for good.
+type runHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// An interruptTimeout bounds how long Interrupt waits for a run to stop.
+const interruptTimeout = 30 * time.Second
+
 // Close stops the transports, interrupts running jobs, and closes the store.
 func (s *Server) Close() error {
 	s.mu.Lock()
@@ -164,8 +174,8 @@ func (s *Server) Close() error {
 	closes := s.closes
 	s.closes = nil
 	cancels := make([]context.CancelFunc, 0, len(s.running))
-	for _, c := range s.running {
-		cancels = append(cancels, c)
+	for _, h := range s.running {
+		cancels = append(cancels, h.cancel)
 	}
 	s.mu.Unlock()
 
@@ -276,7 +286,7 @@ func (s *Server) tick() {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
 			if !j.Force {
-				if src := CacheHit(j, s.store.IdentityIndex(), byID); src != "" {
+				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" {
 					s.reuse(j, src, identity)
 					continue
 				}
@@ -327,24 +337,28 @@ func (s *Server) dispatch(id string) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.running[id] = cancel
+	h := &runHandle{cancel: cancel, done: make(chan struct{})}
+	s.running[id] = h
 	s.mu.Unlock()
 
 	j, ok := s.store.Job(id)
 	if !ok {
 		s.finishRun(id)
 		cancel()
+		close(h.done)
 		return
 	}
 	if err := s.store.Start(id); err != nil {
 		s.cfg.Logf("go-jobserver: start %s: %v", id, err)
 		s.finishRun(id)
 		cancel()
+		close(h.done)
 		return
 	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		defer close(h.done)
 		defer func() {
 			s.finishRun(id)
 			cancel()
@@ -457,11 +471,12 @@ func (s *Server) Resume() error {
 // Paused reports whether scheduling is paused.
 func (s *Server) Paused() bool { return s.store.Paused() }
 
-// Interrupt cancels one running job.
+// Interrupt stops one running job and returns once it has stopped, so the
+// job's state is settled by the time the caller looks at it.
 func (s *Server) Interrupt(id string) error {
 	id = CanonicalID(id)
 	s.mu.Lock()
-	cancel, ok := s.running[id]
+	h, ok := s.running[id]
 	s.mu.Unlock()
 	if !ok {
 		j, found := s.store.Job(id)
@@ -474,8 +489,13 @@ func (s *Server) Interrupt(id string) error {
 		// Not running yet: cancel it outright so the scheduler skips it.
 		return s.store.Finish(id, StateCancelled, -1, "interrupted", nil, j.LogBytes)
 	}
-	cancel()
-	return nil
+	h.cancel()
+	select {
+	case <-h.done:
+		return nil
+	case <-time.After(interruptTimeout):
+		return fmt.Errorf("go-jobserver: %s did not stop within %s", id, interruptTimeout)
+	}
 }
 
 // InterruptAll cancels every running job.

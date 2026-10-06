@@ -82,16 +82,18 @@ type globals struct {
 	noSpool  bool
 }
 
+// bind adds the global flags, defaulting each to the value it already holds so
+// a subcommand can bind them again after the command. Line parsed them.
 func (g *globals) bind(fs *flag.FlagSet) {
-	fs.StringVar(&g.dir, "dir", "", "server directory")
-	fs.StringVar(&g.http, "http", "", "dashboard address")
-	fs.StringVar(&g.socket, "socket", "", "file socket path")
-	fs.StringVar(&g.spool, "spool", "", "spool directory")
-	fs.BoolVar(&g.ipc, "ipc", true, "serve the go-ipc service")
-	fs.IntVar(&g.jobs, "j", 0, "max concurrent jobs")
-	fs.BoolVar(&g.noHTTP, "no-http", false, "do not serve the dashboard")
-	fs.BoolVar(&g.noSocket, "no-socket", false, "do not serve the file socket")
-	fs.BoolVar(&g.noSpool, "no-spool", false, "do not watch a spool directory")
+	fs.StringVar(&g.dir, "dir", g.dir, "server directory")
+	fs.StringVar(&g.http, "http", g.http, "dashboard address")
+	fs.StringVar(&g.socket, "socket", g.socket, "file socket path")
+	fs.StringVar(&g.spool, "spool", g.spool, "spool directory")
+	fs.BoolVar(&g.ipc, "ipc", g.ipc, "serve the go-ipc service")
+	fs.IntVar(&g.jobs, "j", g.jobs, "max concurrent jobs")
+	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
+	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
+	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")
 }
 
 // config turns the flags into a server configuration.
@@ -126,13 +128,17 @@ func (g *globals) config() jobserver.Config {
 	return cfg
 }
 
+// newGlobals returns the flag set every command starts from.
+func newGlobals() *globals { return &globals{ipc: true} }
+
+// run dispatches one command line.
 func run(args []string) error {
 	if len(args) == 0 {
 		fmt.Print(usage)
 		return nil
 	}
 	// Global flags may come before the command.
-	var g globals
+	g := newGlobals()
 	if strings.HasPrefix(args[0], "-") && args[0] != "-" {
 		fs := flag.NewFlagSet("go-jobserver", flag.ContinueOnError)
 		g.bind(fs)
@@ -148,27 +154,27 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "run", "daemon", "serve", "start":
-		return cmdRun(&g, rest)
+		return cmdRun(g, rest)
 	case "queue", "enqueue", "add":
-		return cmdQueue(&g, rest)
+		return cmdQueue(g, rest)
 	case "list", "ls":
-		return cmdList(&g, rest)
+		return cmdList(g, rest)
 	case "status", "show":
-		return cmdStatus(&g, rest)
+		return cmdStatus(g, rest)
 	case "logs", "log":
-		return cmdLogs(&g, rest)
+		return cmdLogs(g, rest)
 	case "activate":
-		return cmdSimple(&g, rest, jobserver.OpActivate)
+		return cmdSimple(g, rest, jobserver.OpActivate)
 	case "pause":
-		return cmdSimple(&g, rest, jobserver.OpPause)
+		return cmdSimple(g, rest, jobserver.OpPause)
 	case "resume":
-		return cmdSimple(&g, rest, jobserver.OpResume)
+		return cmdSimple(g, rest, jobserver.OpResume)
 	case "interrupt", "cancel":
-		return cmdInterrupt(&g, rest)
+		return cmdInterrupt(g, rest)
 	case "depend":
-		return cmdDepend(&g, rest)
+		return cmdDepend(g, rest)
 	case "stats":
-		return cmdStats(&g, rest)
+		return cmdStats(g, rest)
 	case "version":
 		fmt.Printf("go-jobserver %s\n", jobserver.Revision)
 		return nil
@@ -306,14 +312,15 @@ func cmdQueue(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s %s", done.ID, done.State)
+	// The job id is what stdout carries.
+	fmt.Fprintf(os.Stderr, "%s %s", done.ID, done.State)
 	if done.ExitCode != 0 {
-		fmt.Printf(" exit %d", done.ExitCode)
+		fmt.Fprintf(os.Stderr, " exit %d", done.ExitCode)
 	}
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 	if done.State != jobserver.StateCompleted && done.State != jobserver.StateCached {
 		if out, lerr := c.Logs(ctx, done.ID, 0, 64<<10); lerr == nil && out.Output != "" {
-			fmt.Print(out.Output)
+			fmt.Fprint(os.Stderr, out.Output)
 		}
 		return fmt.Errorf("job %s %s", done.ID, done.State)
 	}
@@ -658,7 +665,7 @@ func cmdStats(g *globals, args []string) error {
 	}
 	sortStrings(states)
 	for _, state := range states {
-		fmt.Printf("%-9s%d\n", state, st.ByState[state])
+		fmt.Printf("%-10s %d\n", state, st.ByState[state])
 	}
 	return nil
 }
