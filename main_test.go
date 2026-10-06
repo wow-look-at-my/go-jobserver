@@ -144,9 +144,11 @@ func TestCLIListShowsJobs(t *testing.T) {
 
 	out, err = capture(t, func() error { return run([]string{"-dir", dir, "list", "-json"}) })
 	require.NoError(t, err)
-	encoded, err := json.Marshal(id)
-	require.NoError(t, err)
-	assert.Contains(t, out, `"id": `+string(encoded))
+	var listed []jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(out), &listed))
+	require.Len(t, listed, 1)
+	assert.Equal(t, id, listed[0].ID)
+	assert.Equal(t, jobserver.StateCompleted, listed[0].State)
 }
 
 func TestCLILogsPrintsTheOutput(t *testing.T) {
