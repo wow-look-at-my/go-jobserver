@@ -1,6 +1,7 @@
 package jobserver
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -204,16 +205,25 @@ func (g *governor) report() CPUReport {
 	return out
 }
 
-// controls lists the controls in effect right now.
+// controls lists the controls in effect right now. The history log carries
+// every control ever applied, so it is the live set that answers this, not the
+// log.
 func (g *governor) controls() []Control {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	out := make([]Control, 0, len(g.history))
-	for _, c := range g.history {
-		if c.Active {
-			out = append(out, c)
-		}
+	var out []Control
+	for _, job := range g.active {
+		out = append(out, job...)
 	}
+	sort.Slice(out, func(i, k int) bool {
+		if out[i].Job != out[k].Job {
+			return out[i].Job < out[k].Job
+		}
+		if out[i].Mechanism != out[k].Mechanism {
+			return out[i].Mechanism < out[k].Mechanism
+		}
+		return out[i].PID < out[k].PID
+	})
 	return out
 }
 

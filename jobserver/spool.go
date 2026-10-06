@@ -73,15 +73,23 @@ func (s *Server) takeSpoolFile(name string) {
 	s.cfg.Logf("go-jobserver: spooled %s", name)
 }
 
-// moveSpool moves a processed file aside, recording why when it failed.
+// moveSpool moves a processed file aside, recording why when it failed. The
+// reason is written before the move, so a file never appears under failed/
+// without the reason beside it.
 func (s *Server) moveSpool(path, dir string, cause error) {
 	dst := filepath.Join(s.cfg.SpoolDir, dir, filepath.Base(path))
+	reason := dst + ".error"
+	if cause != nil {
+		if err := os.WriteFile(reason, []byte(cause.Error()+"\n"), 0o644); err != nil {
+			s.cfg.Logf("go-jobserver: spool reason %s: %v", reason, err)
+			return
+		}
+	}
 	if err := os.Rename(path, dst); err != nil {
 		s.cfg.Logf("go-jobserver: spool move %s: %v", path, err)
-		return
-	}
-	if cause != nil {
-		os.WriteFile(dst+".error", []byte(cause.Error()+"\n"), 0o644)
+		if cause != nil {
+			os.Remove(reason)
+		}
 	}
 }
 

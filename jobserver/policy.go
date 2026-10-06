@@ -134,16 +134,6 @@ var MechanismOrder = []Mechanism{MechAffinity, MechPriority, MechFreeze}
 // Mechanisms lists the mechanisms this build knows.
 func Mechanisms() []Mechanism { return append([]Mechanism(nil), MechanismOrder...) }
 
-// ValidMechanism reports whether name is a mechanism this build knows.
-func ValidMechanism(name string) bool {
-	for _, m := range MechanismOrder {
-		if string(m) == name {
-			return true
-		}
-	}
-	return false
-}
-
 // AffinitySettings pins a job's processes to a set of CPUs.
 type AffinitySettings struct {
 	Enabled bool     `json:"enabled,omitempty"`

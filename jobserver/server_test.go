@@ -648,6 +648,38 @@ func TestGovernorThrottlesAnOversubscribedJobAndSparesAnExemptProcess(t *testing
 	assert.NotEmpty(t, srv.Stats().Controls)
 }
 
+func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.CPUBudget = 0.001
+		c.SampleInterval = 20 * time.Millisecond
+	})
+	j, _, err := srv.Enqueue(Spec{
+		Command: []string{"sh", "-c", "head -c 4000000000 /dev/zero > /dev/null; sleep 30"},
+		Policy: JobPolicy{
+			Cost:     1,
+			Priority: PrioritySettings{Enabled: true, Nice: 10},
+		},
+	})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateRunning)
+	t.Cleanup(func() { srv.InterruptAll() })
+
+	require.Eventually(t, func() bool { return len(srv.Controls()) > 0 },
+		20*time.Second, 20*time.Millisecond, "the governor never applied a control")
+
+	// The heavy command finishes and the job goes quiet, which is where the
+	// daemon hands its processes back.
+	require.Eventually(t, func() bool {
+		for _, c := range srv.Events() {
+			if c.Job == j.ID && !c.Active {
+				return true
+			}
+		}
+		return false
+	}, 20*time.Second, 20*time.Millisecond, "the governor never released the control")
+	assert.Empty(t, srv.Controls(), "nothing may still be in effect once the job is under budget")
+}
+
 func TestServerRecordsTheCPUAJobUsed(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) { c.SampleInterval = 10 * time.Millisecond })
 	j, _, err := srv.Enqueue(Spec{Command: []string{"sh", "-c", "head -c 4000000000 /dev/zero > /dev/null"}})
