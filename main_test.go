@@ -14,6 +14,15 @@ import (
 	"github.com/wow-look-at-my/go-jobserver/jobserver"
 )
 
+// shortDir is a scratch directory with a path short enough to hold a socket.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "goj")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // startDaemon runs a server whose file socket and spool live in dir.
 func startDaemon(t *testing.T, dir string) *jobserver.Server {
 	t.Helper()
@@ -62,7 +71,7 @@ func captureBoth(t *testing.T, fn func() error) (string, string, error) {
 }
 
 func TestCLIQueueWaitsForAJob(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo from-cli"})
@@ -76,7 +85,7 @@ func TestCLIQueueWaitsForAJob(t *testing.T) {
 }
 
 func TestCLIQueueReportsAFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo bad >&2; exit 4"})
@@ -88,7 +97,7 @@ func TestCLIQueueReportsAFailure(t *testing.T) {
 }
 
 func TestCLIQueueDraftThenActivate(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-draft", "-name", "later", "--", "sh", "-c", "echo later"})
@@ -112,7 +121,7 @@ func TestCLIQueueDraftThenActivate(t *testing.T) {
 }
 
 func TestCLIDependBuildsAChain(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	var producer, consumer string
 	out, err := capture(t, func() error {
@@ -145,7 +154,7 @@ func TestCLIDependBuildsAChain(t *testing.T) {
 }
 
 func TestCLIListShowsJobs(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "true"})
@@ -169,7 +178,7 @@ func TestCLIListShowsJobs(t *testing.T) {
 }
 
 func TestCLILogsPrintsTheOutput(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo logged-line"})
@@ -183,7 +192,7 @@ func TestCLILogsPrintsTheOutput(t *testing.T) {
 }
 
 func TestCLIPauseResumeAndInterrupt(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error { return run([]string{"-dir", dir, "pause"}) })
 	require.NoError(t, err)
@@ -217,7 +226,7 @@ func TestCLIPauseResumeAndInterrupt(t *testing.T) {
 }
 
 func TestCLIQueueReadsTheSpool(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	spool := filepath.Join(dir, "spool")
 	require.NoError(t, os.MkdirAll(spool, 0o755))
@@ -229,7 +238,7 @@ func TestCLIQueueReadsTheSpool(t *testing.T) {
 }
 
 func TestCLIQueueOverIPC(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	cfg := jobserver.DefaultConfig(dir)
 	cfg.HTTPAddr = ""
 	// No socket: the client has to reach the daemon over its ipc service.
@@ -256,7 +265,7 @@ func TestCLIQueueOverIPC(t *testing.T) {
 }
 
 func TestCLIWithoutADaemonReportsIt(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	_, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no daemon")
@@ -277,7 +286,7 @@ func TestCLIVersionAndHelp(t *testing.T) {
 }
 
 func TestCLIQueueNeedsACommand(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	_, err := capture(t, func() error { return run([]string{"-dir", dir, "queue"}) })
 	require.Error(t, err)
@@ -290,7 +299,7 @@ func TestCLIRejectsAnUnknownCommand(t *testing.T) {
 }
 
 func TestCLIQueueThroughAShell(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "-shell", "echo a && echo b"})
@@ -301,7 +310,7 @@ func TestCLIQueueThroughAShell(t *testing.T) {
 }
 
 func TestCLIInterruptAll(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error { return run([]string{"-dir", dir, "interrupt", "all"}) })
 	require.NoError(t, err)
@@ -309,7 +318,7 @@ func TestCLIInterruptAll(t *testing.T) {
 }
 
 func TestCLIStatusJSON(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	startDaemon(t, dir)
 	idOut, err := capture(t, func() error {
 		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "true"})
@@ -322,7 +331,7 @@ func TestCLIStatusJSON(t *testing.T) {
 }
 
 func TestCLIQueueWithInputsAndOutputs(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	work := t.TempDir()
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {

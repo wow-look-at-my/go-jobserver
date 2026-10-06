@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,29 @@ func TestHTTPTransport(t *testing.T) {
 	assert.Contains(t, string(detail), "completed")
 }
 
+func TestStartRefusesASocketPathThePlatformCannotBind(t *testing.T) {
+	dir := shortDir(t)
+	cfg := DefaultConfig(dir)
+	cfg.UnixSocket = filepath.Join(dir, strings.Repeat("x", 200), "go-jobserver.sock")
+	cfg.HTTPAddr = ""
+	cfg.SpoolDir = ""
+	cfg.IPC = false
+	srv, err := New(cfg)
+	require.NoError(t, err)
+	err = srv.Start()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unix socket path")
+	require.Contains(t, err.Error(), "-no-socket")
+	srv.Close()
+
+	// The same daemon starts once the socket has a path the platform allows.
+	cfg.UnixSocket = filepath.Join(dir, "js.sock")
+	srv2, err := New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv2.Start())
+	require.NoError(t, srv2.Close())
+}
+
 func TestHTTPRejectsAnEmptyBody(t *testing.T) {
 	srv := newTestServer(t, nil)
 	front := httptest.NewServer(srv.Mux())
@@ -126,7 +150,7 @@ func TestHTTPRejectsAnEmptyBody(t *testing.T) {
 }
 
 func TestClientOverTheUnixSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortDir(t)
 	srv := newTestServer(t, func(c *Config) {
 		c.Dir = dir
 		c.UnixSocket = filepath.Join(dir, "go-jobserver.sock")

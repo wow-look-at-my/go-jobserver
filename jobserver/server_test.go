@@ -75,6 +75,15 @@ func (f *fakeRunner) count() int {
 	return len(f.calls)
 }
 
+// shortDir is a scratch directory with a path short enough to hold a socket.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "goj")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // newTestServer starts a server whose transports are off unless the test
 // turns them on.
 func newTestServer(t *testing.T, mutate func(*Config)) *Server {
