@@ -21,7 +21,6 @@ const (
 	OpInterrupt    = "interrupt"
 	OpInterruptAll = "interrupt-all"
 	OpStats        = "stats"
-	OpWait         = "wait"
 )
 
 // Request is one API call.

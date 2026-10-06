@@ -109,7 +109,7 @@ Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `
 
 ## Pause, resume and interruption
 
-Pause takes effect between jobs: a request to pause stops new jobs from starting, and jobs already running finish. Resume starts scheduling again. Interruption is per job: `interrupt <id>` kills that job's process, and the job becomes `cancelled` with the output it produced up to that moment.
+Pause takes effect between jobs: a request to pause stops new jobs from starting, and jobs already running finish. Resume starts scheduling again. Interruption is per job: `interrupt <id>` kills the job's process group, so a job that spawns helpers leaves none of them behind. The job becomes `cancelled` with the output it produced up to that moment.
 
 The paused flag is part of the journal, so a daemon that restarts stays paused.
 
@@ -168,6 +168,7 @@ go-toolchain
 | `jobserver/store.go` | the job table, the journal and the log files |
 | `jobserver/scheduler.go` | readiness, blocking, cycles and cache lookup, as pure functions |
 | `jobserver/executor.go` | running a command and hashing what it produced |
+| `jobserver/process_unix.go` | the process group a job runs in, and killing all of it |
 | `jobserver/server.go` | the daemon: the scheduling loop and lifecycle control |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
