@@ -59,12 +59,12 @@ func DefaultDir() string {
 // DefaultConfig returns the daemon's out-of-the-box settings for a directory.
 func DefaultConfig(dir string) Config {
 	return Config{
-		Dir:           dir,
-		MaxConcurrent: runtime.NumCPU(),
-		SpoolDir:      filepath.Join(dir, "spool"),
-		HTTPAddr:      "127.0.0.1:8059",
-		UnixSocket:    filepath.Join(dir, "go-jobserver.sock"),
-		IPC:           true,
+		Dir:            dir,
+		MaxConcurrent:  runtime.NumCPU(),
+		SpoolDir:       filepath.Join(dir, "spool"),
+		HTTPAddr:       "127.0.0.1:8059",
+		UnixSocket:     filepath.Join(dir, "go-jobserver.sock"),
+		IPC:            true,
 		SpoolInterval:  250 * time.Millisecond,
 		SyncInterval:   time.Second,
 		CPUBudget:      float64(runtime.NumCPU()),

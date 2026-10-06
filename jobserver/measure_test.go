@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -141,7 +142,7 @@ func TestSamplerReadsThisHost(t *testing.T) {
 	assert.NotEmpty(t, procs)
 	var self bool
 	for _, p := range procs {
-		if p.PID == ownPID {
+		if p.PID == os.Getpid() {
 			self = true
 			assert.NotEmpty(t, p.Name)
 		}

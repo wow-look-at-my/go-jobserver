@@ -227,10 +227,3 @@ func (g *governor) events() []Control {
 	}
 	return out
 }
-
-// cpuSeconds is how much CPU a job's process tree has used so far.
-func (g *governor) cpuSeconds(id string) float64 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.used[id]
-}

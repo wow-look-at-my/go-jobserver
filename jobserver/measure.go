@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"os"
 	"os/exec"
 	"runtime"
@@ -84,8 +85,7 @@ func (psSource) procs() ([]Proc, error) {
 	return parsePS(string(out))
 }
 
-// newProcSource picks the process source for the host this binary is running
-// on, which is a runtime question: one binary serves Linux, macOS and Windows.
+// newProcSource picks the process source for the host this binary runs on.
 func newProcSource() procSource {
 	if _, err := os.Stat("/proc/self/stat"); err == nil {
 		return procfsSource{root: "/proc"}
@@ -236,7 +236,7 @@ func newProcIndex(procs []Proc) *procIndex {
 // Descendants cover a child that changed its own group; the group covers a
 // descendant that was reparented away.
 func (x *procIndex) tree(root int) []Proc {
-	seen := map[int]bool{root: true}
+	seen := set.Of[int](root)
 	out := make([]Proc, 0, 4)
 	if p, ok := x.byPID[root]; ok {
 		out = append(out, p)
@@ -246,10 +246,10 @@ func (x *procIndex) tree(root int) []Proc {
 		pid := queue[0]
 		queue = queue[1:]
 		for _, child := range x.children[pid] {
-			if seen[child] {
+			if seen.Contains(child) {
 				continue
 			}
-			seen[child] = true
+			seen.Add(child)
 			if p, ok := x.byPID[child]; ok {
 				out = append(out, p)
 			}
@@ -257,10 +257,10 @@ func (x *procIndex) tree(root int) []Proc {
 		}
 	}
 	for _, p := range x.group[root] {
-		if seen[p.PID] {
+		if seen.Contains(p.PID) {
 			continue
 		}
-		seen[p.PID] = true
+		seen.Add(p.PID)
 		out = append(out, p)
 	}
 	return out
@@ -285,9 +285,6 @@ func (s *sampler) nowAt() time.Time {
 	}
 	return s.now()
 }
-
-// ownPID is this process's id, which the daemon samples alongside everything else.
-var ownPID = os.Getpid()
 
 // sample returns the CPU used since the sample, split by job. roots maps a
 // job id to the process id at the head of that job's process tree.

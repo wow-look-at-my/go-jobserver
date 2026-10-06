@@ -229,8 +229,8 @@ func (s FreezeSettings) zero() bool {
 	return !s.Enabled && s.Exempt.Empty() && s.Only.Empty()
 }
 
-// Settings reports one mechanism's configuration: whether the job turns it on,
-// the processes it leaves alone, and the processes it is restricted to.
+// Settings reports one mechanism's configuration: whether the job turns it
+// on, the processes it spares, and the ones it is restricted to.
 func (p JobPolicy) Settings(m Mechanism) (enabled bool, exempt, only Selector) {
 	s := p.settings(m)
 	return s.Enabled, s.Exempt, s.Only

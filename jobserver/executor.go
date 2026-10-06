@@ -18,9 +18,8 @@ import (
 // waitDelay bounds how long a killed child may hold its output pipe open.
 const waitDelay = 5 * time.Second
 
-// A Runner runs one job's command, writing its output to out, and reports the
-// process exit code. started, when not nil, is handed the process id of the
-// child as soon as it is running. The daemon can measure it and control it.
+// A Runner runs one job's command into out and reports its exit code.
+// started receives the child's process id once it is running.
 type Runner interface {
 	Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error)
 }
