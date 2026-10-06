@@ -128,13 +128,17 @@ func (g *globals) config() jobserver.Config {
 	return cfg
 }
 
+// newGlobals returns the flag set every command starts from.
+func newGlobals() *globals { return &globals{ipc: true} }
+
+// run dispatches one command line.
 func run(args []string) error {
 	if len(args) == 0 {
 		fmt.Print(usage)
 		return nil
 	}
 	// Global flags may come before the command.
-	var g globals
+	g := newGlobals()
 	if strings.HasPrefix(args[0], "-") && args[0] != "-" {
 		fs := flag.NewFlagSet("go-jobserver", flag.ContinueOnError)
 		g.bind(fs)
@@ -150,27 +154,27 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "run", "daemon", "serve", "start":
-		return cmdRun(&g, rest)
+		return cmdRun(g, rest)
 	case "queue", "enqueue", "add":
-		return cmdQueue(&g, rest)
+		return cmdQueue(g, rest)
 	case "list", "ls":
-		return cmdList(&g, rest)
+		return cmdList(g, rest)
 	case "status", "show":
-		return cmdStatus(&g, rest)
+		return cmdStatus(g, rest)
 	case "logs", "log":
-		return cmdLogs(&g, rest)
+		return cmdLogs(g, rest)
 	case "activate":
-		return cmdSimple(&g, rest, jobserver.OpActivate)
+		return cmdSimple(g, rest, jobserver.OpActivate)
 	case "pause":
-		return cmdSimple(&g, rest, jobserver.OpPause)
+		return cmdSimple(g, rest, jobserver.OpPause)
 	case "resume":
-		return cmdSimple(&g, rest, jobserver.OpResume)
+		return cmdSimple(g, rest, jobserver.OpResume)
 	case "interrupt", "cancel":
-		return cmdInterrupt(&g, rest)
+		return cmdInterrupt(g, rest)
 	case "depend":
-		return cmdDepend(&g, rest)
+		return cmdDepend(g, rest)
 	case "stats":
-		return cmdStats(&g, rest)
+		return cmdStats(g, rest)
 	case "version":
 		fmt.Printf("go-jobserver %s\n", jobserver.Revision)
 		return nil

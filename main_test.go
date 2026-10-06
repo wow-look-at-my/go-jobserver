@@ -228,6 +228,33 @@ func TestCLIQueueReadsTheSpool(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond)
 }
 
+func TestCLIQueueOverIPC(t *testing.T) {
+	dir := t.TempDir()
+	cfg := jobserver.DefaultConfig(dir)
+	cfg.HTTPAddr = ""
+	// No socket: the client has to reach the daemon over its ipc service.
+	cfg.UnixSocket = ""
+	cfg.SpoolDir = filepath.Join(dir, "spool")
+	cfg.SpoolInterval = 10 * time.Millisecond
+	srv, err := jobserver.New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv.Start())
+	t.Cleanup(func() { srv.Close() })
+
+	out, errText, err := captureBoth(t, func() error {
+		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo over-ipc"})
+	})
+	require.NoError(t, err, errText)
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"), "stdout was %q", out)
+	assert.Contains(t, errText, string(jobserver.StateCompleted))
+
+	logs, err := capture(t, func() error {
+		return run([]string{"-dir", dir, "logs", strings.TrimSpace(out)})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "over-ipc\n", logs)
+}
+
 func TestCLIWithoutADaemonReportsIt(t *testing.T) {
 	dir := t.TempDir()
 	_, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
