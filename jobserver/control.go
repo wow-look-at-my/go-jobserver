@@ -274,7 +274,7 @@ func revertNice(c Control) controlResult {
 // missingCall reports whether a host's syscall layer carries no such call,
 // which is where a route built on that call hands over to another.
 func missingCall(err error) bool {
-	return errors.Is(err, syscall.ENOSYS)
+	return errors.Is(err, syscall.ENOSYS) || errors.Is(err, errNoAffinity)
 }
 
 // errNoAffinity is what a host without sched_setaffinity(2) reports.

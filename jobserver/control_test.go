@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,6 +179,15 @@ func TestAffinityPinsTheLinuxCPUMask(t *testing.T) {
 	restored, err := getAffinitySyscall(pid)
 	require.NoError(t, err)
 	assert.Equal(t, allowed, restored, "the revert must put back the mask it found")
+}
+
+// TestAMissingCallHandsOverToTheNextRoute pins what the Windows routes rest
+// on. The daemon's own answer for a host that has no such call reads as a
+// missing call. The syscall route hands over to the host's shell.
+func TestAMissingCallHandsOverToTheNextRoute(t *testing.T) {
+	assert.True(t, missingCall(errNoAffinity), "the daemon's own answer must hand over")
+	assert.True(t, missingCall(syscall.ENOSYS), "a syscall layer without the call must hand over")
+	assert.False(t, missingCall(syscall.EPERM), "a refusal the host made is not a missing call")
 }
 
 func TestACallAMissingHostCarriesIsNotARefusal(t *testing.T) {

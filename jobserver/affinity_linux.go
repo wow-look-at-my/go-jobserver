@@ -9,8 +9,15 @@ import (
 
 const affinityMaskWords = 16
 
-// affinityHere reports whether the host has the Linux CPU mask calls.
-func affinityHere() bool { return hostOS() == "linux" }
+// affinityHere reports whether this host may carry the Linux CPU mask calls.
+// One cosmo binary carries them onto every host it runs on.
+func affinityHere() bool {
+	switch hostOS() {
+	case "linux", "windows":
+		return true
+	}
+	return false
+}
 
 // setAffinitySyscall restricts a process to the given CPUs with
 // sched_setaffinity(2).
