@@ -9,9 +9,15 @@ import (
 
 const affinityMaskWords = 16
 
+// affinityHere reports whether the host has the Linux CPU mask calls.
+func affinityHere() bool { return hostOS() == "linux" }
+
 // setAffinitySyscall restricts a process to the given CPUs with
 // sched_setaffinity(2).
 func setAffinitySyscall(pid int, cpus []int) error {
+	if !affinityHere() {
+		return errNoAffinity
+	}
 	var mask [affinityMaskWords]uintptr
 	for _, c := range cpus {
 		if c < 0 || c >= affinityMaskWords*64 {
@@ -24,6 +30,9 @@ func setAffinitySyscall(pid int, cpus []int) error {
 
 // clearAffinitySyscall gives a process every CPU the host has.
 func clearAffinitySyscall(pid, cpus int) error {
+	if !affinityHere() {
+		return errNoAffinity
+	}
 	var mask [affinityMaskWords]uintptr
 	if cpus <= 0 {
 		cpus = 1
@@ -39,6 +48,9 @@ func clearAffinitySyscall(pid, cpus int) error {
 
 // getAffinitySyscall reads a process's CPU set with sched_getaffinity(2).
 func getAffinitySyscall(pid int) ([]int, error) {
+	if !affinityHere() {
+		return nil, errNoAffinity
+	}
 	var mask [affinityMaskWords]uintptr
 	_, _, errno := syscall.Syscall(syscall.SYS_SCHED_GETAFFINITY, uintptr(pid),
 		unsafe.Sizeof(mask), uintptr(unsafe.Pointer(&mask)))

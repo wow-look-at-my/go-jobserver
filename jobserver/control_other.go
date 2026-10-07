@@ -15,10 +15,6 @@ func processNice(int) (int, error) {
 	return 0, errors.New("no getpriority call on this host")
 }
 
-func darwinPolicy(int) (int, error) {
-	return 0, errors.New("the background policy is macOS only")
-}
-
 func setDarwinBackground(int) (Outcome, string) {
 	return OutcomeNotApplicable, "the background policy is macOS only"
 }

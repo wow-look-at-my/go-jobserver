@@ -115,19 +115,11 @@ func applyAffinity(pid int, cpus []int) controlResult {
 		return windowsAffinity(pid, cpus)
 	}
 	if hostOS() == "darwin" {
-		// Darwin's getpriority does not report the policy. The read is held against the change itself: one that moves with it is the state to put back.
-		was, _ := darwinPolicy(pid)
 		out, detail := setDarwinBackground(pid)
 		if out == OutcomeApplied {
 			detail += " (cpus " + joinInts(cpus) + ")"
 		}
-		res := controlResult{outcome: out, detail: detail}
-		if out == OutcomeApplied {
-			if now, err := darwinPolicy(pid); err == nil && now != was {
-				res.prior, res.hadPrior = []int{was}, true
-			}
-		}
-		return res
+		return controlResult{outcome: out, detail: detail}
 	}
 	prior, had := affinityPrior(pid)
 	return controlCall(func() error { return setAffinitySyscall(pid, cpus) },
@@ -148,13 +140,7 @@ func revertAffinity(c Control, cpus int) controlResult {
 		return windowsAffinityRevert(c)
 	}
 	if hostOS() == "darwin" {
-		// The state to put back is the policy it was under: one that was
-		// already in the background keeps it.
-		if c.HadPrior && len(c.Prior) > 0 && c.Prior[0] != 0 {
-			// It was already in the background, so putting that back leaves it there.
-			out, detail := setDarwinBackground(c.PID)
-			return appliedResult(relabel(out), detail)
-		}
+		// macOS reports the background policy of the process that asks for it.
 		out, detail := clearDarwinBackground(c.PID)
 		return appliedResult(out, detail)
 	}
@@ -263,15 +249,6 @@ func affinityPrior(pid int) ([]int, bool) {
 	return cpus, true
 }
 
-// relabel reports what a revert did: a call that worked put the state it found
-// back, which is what a revert means.
-func relabel(out Outcome) Outcome {
-	if out == OutcomeApplied {
-		return OutcomeReverted
-	}
-	return out
-}
-
 // revertNice puts back the nice value the process had, where it was read. A
 // host that would not say what that value was goes back to the default, and
 // the reason travels with the control.
@@ -300,6 +277,9 @@ func missingCall(err error) bool {
 	return errors.Is(err, syscall.ENOSYS)
 }
 
+// errNoAffinity is what a host without sched_setaffinity(2) reports.
+var errNoAffinity = errors.New("jobserver: this host has no sched_setaffinity")
+
 // callFailure classifies a failed process-control call.
 func callFailure(err error) (Outcome, string) {
 	out, detail := refused(err)
@@ -315,10 +295,10 @@ func outcomeFor(host string, out Outcome, detail string) (Outcome, string) {
 }
 
 // schedulable reports whether a host's syscall layer is the one these calls
-// are spelled for.
+// are spelled for. cosmo is the binary that carries them to every host.
 func schedulable(host string) bool {
 	switch host {
-	case "linux", "darwin", "freebsd", "netbsd", "openbsd":
+	case "cosmo", "linux", "darwin", "freebsd", "netbsd", "openbsd":
 		return true
 	}
 	return false

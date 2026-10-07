@@ -2,10 +2,7 @@
 
 package jobserver
 
-import "errors"
-
-// errNoAffinity is what a host without sched_setaffinity(2) reports.
-var errNoAffinity = errors.New("jobserver: this host has no sched_setaffinity")
+// The CPU mask calls a host outside the Linux family does not offer.
 
 func setAffinitySyscall(int, []int) error { return errNoAffinity }
 

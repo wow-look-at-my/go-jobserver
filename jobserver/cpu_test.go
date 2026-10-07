@@ -94,6 +94,49 @@ func TestGovernorThrottlesAnOversubscribedJobAndSparesAnExemptProcess(t *testing
 	assert.NotEmpty(t, srv.Stats().Controls)
 }
 
+// TestGovernorHoldsEveryMechanismAJobEnables covers the mechanisms on the
+// host this suite runs on: each has to reach the host's facility and report
+// that it took effect together.
+func TestGovernorHoldsEveryMechanismAJobEnables(t *testing.T) {
+	// The host's answers are asked for before the server starts, so no tick pays for the probe.
+	host := hostHere(t)
+	require.True(t, host.CanFreeze, "this host cannot suspend a process: %s", host.FreezeDetail)
+	srv := newTestServer(t, func(c *Config) {
+		c.CPUBudget = 0.001
+		c.SampleInterval = 100 * time.Millisecond
+	})
+	srv.gov.mu.Lock()
+	srv.gov.probe = hostProbe{known: true, canFreeze: host.CanFreeze, freezeWhy: host.FreezeDetail,
+		spelling: host.NiceSpelling, niceWhy: host.NiceDetail}
+	srv.gov.mu.Unlock()
+
+	j, _, err := srv.Enqueue(Spec{
+		Command: []string{"sh", "-c", "while :; do :; done"},
+		Policy: JobPolicy{
+			Cost:     1,
+			Affinity: AffinitySettings{Enabled: true},
+			Priority: PrioritySettings{Enabled: true, Nice: 10},
+			Freeze:   FreezeSettings{Enabled: true},
+		},
+	})
+	require.NoError(t, err)
+	waitState(t, srv, j.ID, StateRunning)
+	t.Cleanup(func() { srv.InterruptAll() })
+
+	var inEffect map[Mechanism]Control
+	require.Eventually(t, func() bool {
+		inEffect = map[Mechanism]Control{}
+		for _, c := range srv.Controls() {
+			inEffect[c.Mechanism] = c
+		}
+		return len(inEffect) == len(MechanismOrder)
+	}, 30*time.Second, 20*time.Millisecond,
+		"the governor never held every mechanism in effect at once")
+	for _, m := range MechanismOrder {
+		assert.Equal(t, OutcomeApplied, inEffect[m].Outcome, "%s: %s", m, inEffect[m].Detail)
+	}
+}
+
 func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
 	// The host's answers are asked for before the server starts.
 	host := hostHere(t)

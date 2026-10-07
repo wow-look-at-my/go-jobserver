@@ -127,6 +127,28 @@ func TestAffinityIsAppliedOrHonestlyUnavailable(t *testing.T) {
 	}
 }
 
+// TestDarwinAffinityIsTheBackgroundPolicyAndComesBack covers macOS's affinity
+// mechanism. macOS reports the background policy of the process that asks for
+// it. A job's policy cannot be read back and the assertions are what the
+// kernel answered the daemon's calls.
+func TestDarwinAffinityIsTheBackgroundPolicyAndComesBack(t *testing.T) {
+	if hostOS() != "darwin" {
+		t.Skip("the background policy is a macOS facility")
+	}
+	pid := spawnSleep(t)
+	res := applyMechanism(MechAffinity, pid,
+		JobPolicy{Affinity: AffinitySettings{Enabled: true}}, hostHere(t))
+	require.Equal(t, OutcomeApplied, res.outcome, res.detail)
+	assert.Contains(t, res.detail, "background policy")
+	assert.False(t, res.hadPrior, "macOS does not report the policy of another process")
+
+	back := revertMechanism(Control{
+		Mechanism: MechAffinity, PID: pid, Prior: res.prior, HadPrior: res.hadPrior,
+	}, runtime.NumCPU())
+	assert.Equal(t, OutcomeReverted, back.outcome, back.detail)
+	assert.Contains(t, back.detail, "standard policy")
+}
+
 // TestAffinityPinsTheLinuxCPUMask reads the CPU set back from the kernel, so
 // it only says anything where sched_getaffinity exists.
 func TestAffinityPinsTheLinuxCPUMask(t *testing.T) {

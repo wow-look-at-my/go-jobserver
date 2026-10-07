@@ -150,11 +150,28 @@ When the running jobs together exceed the budget, the daemon applies the control
 
 `affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` asks the host before it stops anything. A host whose stop signal ends a process reports success for that signal, so the two cannot be told apart from the answer alone. The daemon finds out on a process of its own. The first job that enables `freeze` makes it run one, stop it, resume it, and watch whether it lives through that. When the answer is that the stop signal ends a process, freeze reports `not-applicable` with that reason and the job is left running. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
 
-macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy: the same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
+macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy. The same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. macOS reports that policy for the process that asks for it. The daemon cannot read back the policy a job's process was under, and taking the mechanism back clears it. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
+
+### What the control layer calls
+
+Every control the daemon has on macOS and Linux goes to a facility the host has.
+
+| what it does | the call | Linux | macOS |
+| --- | --- | --- | --- |
+| pin a CPU set | `sched_setaffinity`, `sched_getaffinity` | the kernel | not offered; `affinity` is the background policy |
+| move the background policy | `setpriority` with `PRIO_DARWIN_PROCESS` | not offered | libc |
+| change a nice value | `setpriority`, `getpriority` | the kernel | libc |
+| suspend and resume | `kill` with `SIGSTOP` and `SIGCONT` | the kernel | libc |
+| end a job's process tree | `kill` with a negative pid and `SIGKILL` | the kernel | libc |
+| put a child in its own process group | `setpgid` | the kernel | libc |
+| name the host | `uname` | the kernel | libc, read from `sysctl` |
+| list the host's processes | `/proc` | the kernel | `ps` |
+
+One cosmo binary carries the Linux CPU-mask calls to every host it runs on. The daemon checks the host before it makes them, so a host without them is never asked. No control reports a call the host will answer with `ENOSYS`.
 
 A Windows host has no syscall this binary can reach for a process's CPU set or its priority class. `affinity` and `priority` there go through the host's own shell instead - the same shape as a unix supervisor that reaches for `renice`. Both read the state the process is in before they change it. A revert puts that back, and a host that refuses the request answers in its own words, which travel with the outcome. A host with no PowerShell at all reports `not-applicable`, which is the same answer any host gives for a facility it does not have.
 
-Windows `freeze` is the one that has to wait. Windows `free the signal this binary can send there ends a process instead of stopping it, and the probe above detects exactly that, so freeze reports `not-applicable` with that reason and the job keeps running. A toolchain whose NT syscall layer serves that signal will be found by the same probe, and freeze will start working with no change here.
+Windows `freeze` is the one that has to wait. The signal this binary can send there ends a process instead of stopping it. The probe above detects exactly that, so freeze reports `not-applicable` with that reason and the job keeps running. A toolchain whose NT syscall layer serves that signal will be found by the same probe, and freeze will start working with no change here.
 
 ### Picking processes
 

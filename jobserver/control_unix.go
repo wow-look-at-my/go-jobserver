@@ -26,11 +26,6 @@ func processNice(pid int) (int, error) {
 	return syscall.Getpriority(prioProcess, pid)
 }
 
-// darwinPolicy reads a process's background policy.
-func darwinPolicy(pid int) (int, error) {
-	return syscall.Getpriority(prioDarwinProcess, pid)
-}
-
 // setDarwinBackground puts a process into Apple's background state.
 func setDarwinBackground(pid int) (Outcome, string) {
 	if err := syscall.Setpriority(prioDarwinProcess, pid, prioDarwinBG); err != nil {
