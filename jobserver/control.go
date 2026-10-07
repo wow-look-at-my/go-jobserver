@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -34,8 +35,26 @@ type Control struct {
 	Outcome   Outcome   `json:"outcome"`
 	Detail    string    `json:"detail,omitempty"`
 	// Active reports whether the mechanism is in effect right now.
-	Active bool      `json:"active"`
-	At     time.Time `json:"at"`
+	Active bool `json:"active"`
+	// Prior is the state this control found and replaced, in the mechanism's own spelling: the nice value for priority.
+	Prior []int `json:"prior,omitempty"`
+	// HadPrior reports whether Prior is that state.
+	HadPrior bool      `json:"had_prior,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+// A controlResult is what one mechanism did to one process, with the state it
+// replaced, so the same mechanism can put that back.
+type controlResult struct {
+	outcome  Outcome
+	detail   string
+	prior    []int
+	hadPrior bool
+}
+
+// applied is a result that changed nothing it has to put back.
+func appliedResult(out Outcome, detail string) controlResult {
+	return controlResult{outcome: out, detail: detail}
 }
 
 // A hostFacts is what the daemon has learned about process control here.
@@ -45,77 +64,201 @@ type hostFacts struct {
 	CanFreeze bool
 	// FreezeDetail says how that was found out.
 	FreezeDetail string
+	// NiceSpelling is how this host's getpriority answers, which decides what a revert writes.
+	NiceSpelling niceSpelling
+	// NiceDetail says how that was found out.
+	NiceDetail string
 }
 
 // applyMechanism applies one mechanism to one process of a job.
-func applyMechanism(m Mechanism, pid int, policy JobPolicy, host hostFacts) (Outcome, string) {
+func applyMechanism(m Mechanism, pid int, policy JobPolicy, host hostFacts) controlResult {
 	switch m {
 	case MechAffinity:
 		return applyAffinity(pid, affinityCPUs(policy.Affinity, host.CPUs))
 	case MechPriority:
-		return applyNice(pid, policy.Priority.Nice)
+		return applyNice(pid, policy.Priority.Nice, host)
 	case MechFreeze:
 		return applyFreeze(pid, host)
 	}
-	return OutcomeNotApplicable, "unknown mechanism " + string(m)
+	return appliedResult(OutcomeNotApplicable, "unknown mechanism "+string(m))
 }
 
-// revertMechanism undoes one mechanism on one process.
-func revertMechanism(m Mechanism, pid, cpus int) (Outcome, string) {
-	switch m {
+// revertMechanism undoes one mechanism on one process, putting back the state
+// the control found where it can.
+func revertMechanism(c Control, cpus int) controlResult {
+	switch c.Mechanism {
 	case MechAffinity:
-		return revertAffinity(pid, cpus)
+		return revertAffinity(c, cpus)
 	case MechPriority:
-		return revertNice(pid)
+		return revertNice(c)
 	case MechFreeze:
-		return thaw(pid)
+		out, detail := thaw(c.PID)
+		return appliedResult(out, detail)
 	}
-	return OutcomeNotApplicable, "unknown mechanism " + string(m)
+	return appliedResult(OutcomeNotApplicable, "unknown mechanism "+string(c.Mechanism))
 }
 
 // applyAffinity pins a process to a CPU set. Linux has a real per-process CPU
 // mask. Darwin's kernel keeps no such mask, so its CPU placement control is
 // the background policy, which moves a process's work onto the efficiency
 // cores.
-func applyAffinity(pid int, cpus []int) (Outcome, string) {
+func applyAffinity(pid int, cpus []int) controlResult {
+	if hostOS() == "windows" {
+		return windowsAffinity(pid, cpus)
+	}
 	if hostOS() == "darwin" {
+		// Darwin's getpriority does not report the policy. The read is held against the change itself: one that moves with it is the state to put back.
+		was, _ := darwinPolicy(pid)
 		out, detail := setDarwinBackground(pid)
 		if out == OutcomeApplied {
-			return out, detail + " (cpus " + joinInts(cpus) + ")"
+			detail += " (cpus " + joinInts(cpus) + ")"
 		}
-		return out, detail
+		res := controlResult{outcome: out, detail: detail}
+		if out == OutcomeApplied {
+			if now, err := darwinPolicy(pid); err == nil && now != was {
+				res.prior, res.hadPrior = []int{was}, true
+			}
+		}
+		return res
 	}
+	prior, had := affinityPrior(pid)
 	return controlCall(func() error { return setAffinitySyscall(pid, cpus) },
-		OutcomeApplied, "cpus "+joinInts(cpus))
+		OutcomeApplied, "cpus "+joinInts(cpus), prior, had)
 }
 
-// revertAffinity restores a process's full CPU set.
-func revertAffinity(pid, cpus int) (Outcome, string) {
+// revertAffinity puts back the CPU set the process was on, or every CPU where
+// none was read.
+func revertAffinity(c Control, cpus int) controlResult {
+	if hostOS() == "windows" {
+		return windowsAffinityRevert(c)
+	}
 	if hostOS() == "darwin" {
-		return clearDarwinBackground(pid)
+		// The state to put back is the policy it was under: one that was
+		// already in the background keeps it.
+		if c.HadPrior && len(c.Prior) > 0 && c.Prior[0] != 0 {
+			// It was already in the background, so putting that back leaves it there.
+			out, detail := setDarwinBackground(c.PID)
+			return appliedResult(relabel(out), detail)
+		}
+		out, detail := clearDarwinBackground(c.PID)
+		return appliedResult(out, detail)
 	}
-	return controlCall(func() error { return clearAffinitySyscall(pid, cpus) },
-		OutcomeReverted, "every CPU")
+	if c.HadPrior && len(c.Prior) > 0 {
+		return controlCall(func() error { return setAffinitySyscall(c.PID, c.Prior) },
+			OutcomeReverted, "cpus "+joinInts(c.Prior), nil, false)
+	}
+	return controlCall(func() error { return clearAffinitySyscall(c.PID, cpus) },
+		OutcomeReverted, "every CPU", nil, false)
 }
 
-// controlCall runs one process-control call.
-func controlCall(call func() error, applied Outcome, detail string) (Outcome, string) {
+// controlCall runs one process-control call, and remembers either what the
+// call replaced or what its caller hands it.
+func controlCall(call func() error, applied Outcome, detail string, prior []int, hadPrior bool) controlResult {
 	if err := call(); err != nil {
-		return callFailure(err)
+		out, why := callFailure(err)
+		return controlResult{outcome: out, detail: why}
 	}
-	return applied, detail
+	return controlResult{outcome: applied, detail: detail, prior: prior, hadPrior: hadPrior}
 }
 
-// applyNice raises a process's nice value.
-func applyNice(pid, nice int) (Outcome, string) {
-	out, detail := setNice(pid, nice)
-	return outcomeFor(hostOS(), out, detail)
+// applyNice raises a process's nice value, remembering the value it had in the
+// spelling the revert has to write.
+func applyNice(pid, nice int, host hostFacts) controlResult {
+	if hostOS() == "windows" {
+		return windowsPriority(pid, nice)
+	}
+	var prior []int
+	if was, err := processNice(pid); err == nil {
+		if value, ok := niceToWrite(host.NiceSpelling, was); ok {
+			prior = []int{value}
+		}
+	}
+	res := controlCall(func() error { return setNiceTo(pid, nice) },
+		OutcomeApplied, "nice "+strconv.Itoa(nice), nil, false)
+	res.prior, res.hadPrior = prior, prior != nil
+	return res
 }
 
-// revertNice restores a process's nice value.
-func revertNice(pid int) (Outcome, string) {
-	out, detail := clearNice(pid)
-	return outcomeFor(hostOS(), out, detail)
+// niceSpelling is how this host's getpriority answers: with the nice value itself, or with its complement.
+type niceSpelling int
+
+const (
+	niceUnknown niceSpelling = iota
+	niceItself
+	niceComplement
+)
+
+// prioMax is the top of the range a complemented answer counts down from.
+const prioMax = 20
+
+// clueNice is a value whose spellings differ.
+const clueNice = 7
+
+// niceToWrite turns a value this host's getpriority answered with into the
+// value this host's setpriority takes.
+func niceToWrite(spelling niceSpelling, read int) (int, bool) {
+	switch spelling {
+	case niceItself:
+		return read, true
+	case niceComplement:
+		return prioMax - read, true
+	}
+	return 0, false
+}
+
+// probeNiceSpelling learns which spelling a host answers with, on a process of
+// the daemon's own.
+func probeNiceSpelling(pid int) (niceSpelling, string) {
+	if err := setNiceTo(pid, clueNice); err != nil {
+		return niceUnknown, "no priority call here: " + err.Error()
+	}
+	got, err := processNice(pid)
+	if err != nil {
+		return niceUnknown, "no priority read here: " + err.Error()
+	}
+	switch got {
+	case clueNice:
+		return niceItself, "getpriority answers with the nice value"
+	case prioMax - clueNice:
+		return niceComplement, "getpriority answers with the value counted down from " + strconv.Itoa(prioMax)
+	}
+	return niceUnknown, "getpriority answered " + strconv.Itoa(got) + " for " + strconv.Itoa(clueNice)
+}
+
+// affinityPrior reads the CPU set a process is on, on a host that keeps one.
+func affinityPrior(pid int) ([]int, bool) {
+	if hostOS() != "linux" {
+		return nil, false
+	}
+	cpus, err := getAffinitySyscall(pid)
+	if err != nil || len(cpus) == 0 {
+		return nil, false
+	}
+	return cpus, true
+}
+
+// relabel reports what a revert did: a call that worked put the state it found
+// back, which is what a revert means.
+func relabel(out Outcome) Outcome {
+	if out == OutcomeApplied {
+		return OutcomeReverted
+	}
+	return out
+}
+
+// revertNice puts back the nice value the process had, where it was read. A
+// host that would not say what that value was goes back to the default, and
+// the reason travels with the control.
+func revertNice(c Control) controlResult {
+	if hostOS() == "windows" {
+		return windowsPriorityRevert(c)
+	}
+	if c.HadPrior && len(c.Prior) > 0 {
+		return controlCall(func() error { return setNiceTo(c.PID, c.Prior[0]) },
+			OutcomeReverted, "nice "+strconv.Itoa(c.Prior[0])+" back", nil, false)
+	}
+	return controlCall(func() error { return setNiceTo(c.PID, 0) },
+		OutcomeReverted, "nice 0, with no value to go back to", nil, false)
 }
 
 // callFailure classifies a failed process-control call.
@@ -144,11 +287,12 @@ func schedulable(host string) bool {
 
 // applyFreeze suspends a process, on a host whose stop signal is known to
 // suspend one.
-func applyFreeze(pid int, host hostFacts) (Outcome, string) {
+func applyFreeze(pid int, host hostFacts) controlResult {
 	if !host.CanFreeze {
-		return OutcomeNotApplicable, host.FreezeDetail
+		return appliedResult(OutcomeNotApplicable, host.FreezeDetail)
 	}
-	return freeze(pid)
+	out, detail := freeze(pid)
+	return appliedResult(out, detail)
 }
 
 // How long a probe child is given to come up, to answer the stop, and to be
@@ -159,27 +303,47 @@ const (
 	suspendProbeRelease = 5 * time.Second
 )
 
-// probeSuspend asks this host what its stop signal does to a process. It asks
-// with a process of its own. That process is running this binary in the mode
-// that waits for input. A host that ends a process when asked to stop it ends
-// nothing.
+// A hostProbe is what one host answered about process control, asked on a
+// process of the daemon's own.
+type hostProbe struct {
+	known     bool
+	canFreeze bool
+	freezeWhy string
+	spelling  niceSpelling
+	niceWhy   string
+}
+
+// probeHost asks this host what its mechanisms cannot read off the platform.
+// What its stop signal does to a process, and which spelling its getpriority
+// answers with. It asks with a process of its own. That process is running
+// this binary in the mode that waits for input. A host that ends a process
+// when asked to stop it ends nothing.
 //
-// The answer cannot come from the signal alone: a host whose stop signal ends
-// a process reports success for it. The same as one that suspends it. What
-// separates them is what happens after the resume. This is because a process
-// that was only stopped is still there to run and one that was ended is not.
-func probeSuspend() (bool, string) {
+// The stop answer cannot come from the signal alone: a host whose stop signal
+// ends a process reports success for it. The same as one that suspends it.
+// What separates them is what happens after the resume. This is because a
+// process that was only stopped is still there to run and one that was ended
+// is not.
+func probeHost() hostProbe {
+	var out hostProbe
+	out.known = true
 	exe, err := os.Executable()
 	if err != nil {
-		return false, "this program cannot be found: " + err.Error()
+		out.freezeWhy = "this program cannot be found: " + err.Error()
+		out.niceWhy = out.freezeWhy
+		return out
 	}
 	cmd := exec.Command(exe, "-hold")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return false, "no pipe for the probe process: " + err.Error()
+		out.freezeWhy = "no pipe for the probe process: " + err.Error()
+		out.niceWhy = out.freezeWhy
+		return out
 	}
 	if err := cmd.Start(); err != nil {
-		return false, "the probe process would not start: " + err.Error()
+		out.freezeWhy = "the probe process would not start: " + err.Error()
+		out.niceWhy = out.freezeWhy
+		return out
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -196,17 +360,28 @@ func probeSuspend() (bool, string) {
 	// question, so the child has to be waiting first.
 	if !aliveFor(cmd.Process.Pid, suspendProbeUp) {
 		stop()
-		return false, "the probe process did not stay up"
+		out.freezeWhy = "the probe process did not stay up"
+		out.niceWhy = out.freezeWhy
+		return out
 	}
-	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGSTOP); err != nil {
-		stop()
+	// The priority question goes first, because the stop half ends the child.
+	out.spelling, out.niceWhy = probeNiceSpelling(cmd.Process.Pid)
+	out.canFreeze, out.freezeWhy = stopTest(cmd.Process.Pid, stdin, done)
+	stop()
+	return out
+}
+
+// stopTest asks what a host's stop signal does to a process, and releases it
+// to find out. Releasing is what tells the hosts apart. The child reads its
+// input from that pipe, so a process that was suspended leaves as soon as the
+// pipe closes.
+func stopTest(pid int, stdin io.Closer, done <-chan error) (bool, string) {
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
 		return false, "the stop signal was refused: " + err.Error()
 	}
 	time.Sleep(suspendProbeSettle)
-	stopped := syscall.Kill(cmd.Process.Pid, 0) == nil
-	_ = syscall.Kill(cmd.Process.Pid, syscall.SIGCONT)
-
-	// Releasing the child is what tells the hosts apart.
+	stopped := syscall.Kill(pid, 0) == nil
+	_ = syscall.Kill(pid, syscall.SIGCONT)
 	_ = stdin.Close()
 	select {
 	case err := <-done:
@@ -219,7 +394,6 @@ func probeSuspend() (bool, string) {
 		return true, "the stop signal suspended the process"
 	case <-time.After(suspendProbeRelease):
 	}
-	stop()
 	return false, "the probe process never came back from the stop"
 }
 

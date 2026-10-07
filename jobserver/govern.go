@@ -37,15 +37,8 @@ type governor struct {
 	active map[string][]Control
 	// history is every control this daemon has applied or reverted, newest last.
 	history []Control
-	// suspend is what this host's stop signal does, asked once.
-	suspend suspendFacts
-}
-
-// suspendFacts is the governor's answer about stopping a process here.
-type suspendFacts struct {
-	known     bool
-	supported bool
-	detail    string
+	// probe is what this host answered about process control, asked once.
+	probe hostProbe
 }
 
 // historyLimit bounds the control log the status surface carries.
@@ -80,7 +73,7 @@ func (g *governor) tick() {
 	roots := g.srv.runningRoots()
 	reading := g.sampler.sample(roots)
 	// Asking this host how it stops a process starts one and waits for it.
-	facts := g.hostFacts(g.freezeInPlay(roots))
+	facts := g.hostFacts(g.asksTheHost(roots))
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -122,45 +115,53 @@ func (g *governor) throttle(reading Reading, roots map[string]int, facts hostFac
 				if g.isActiveLocked(id, m, p.PID) {
 					continue
 				}
-				out, detail := applyMechanism(m, p.PID, j.Policy, facts)
+				res := applyMechanism(m, p.PID, j.Policy, facts)
 				// Only a mechanism that took effect is in effect. Any other
 				// answer left the process as it was.
 				g.recordLocked(Control{
 					Job: id, Mechanism: m, PID: p.PID, Name: p.Name,
-					Outcome: out, Detail: detail, Active: out == OutcomeApplied, At: time.Now(),
+					Outcome: res.outcome, Detail: res.detail,
+					Prior: res.prior, HadPrior: res.hadPrior,
+					Active: res.outcome == OutcomeApplied, At: time.Now(),
 				})
 			}
 		}
 	}
 }
 
-// freezeInPlay reports whether any running job asks to be stopped.
-func (g *governor) freezeInPlay(roots map[string]int) bool {
+// asksTheHost reports whether any running job enables a mechanism whose answer
+// this host has to be asked for.
+func (g *governor) asksTheHost(roots map[string]int) bool {
 	for id := range roots {
-		if j, ok := g.srv.store.Job(id); ok && j.Policy.Freeze.Enabled {
+		j, ok := g.srv.store.Job(id)
+		if !ok {
+			continue
+		}
+		if j.Policy.Freeze.Enabled || j.Policy.Priority.Enabled {
 			return true
 		}
 	}
 	return false
 }
 
-// hostFacts reports what this host can do. The answer it cannot read off the
-// platform is asked for once, on a process of this daemon's own.
+// hostFacts reports what this host can do. The answers it cannot read off the
+// platform are asked for once, on a process of this daemon's own.
 func (g *governor) hostFacts(want bool) hostFacts {
 	g.mu.Lock()
-	answer := g.suspend
+	answer := g.probe
 	g.mu.Unlock()
 	if want && !answer.known {
-		supported, detail := probeSuspend()
-		answer = suspendFacts{known: true, supported: supported, detail: detail}
+		answer = probeHost()
 		g.mu.Lock()
-		g.suspend = answer
+		g.probe = answer
 		g.mu.Unlock()
 	}
 	return hostFacts{
 		CPUs:         g.srv.sampleCPUs(),
-		CanFreeze:    !answer.known || answer.supported,
-		FreezeDetail: answer.detail,
+		CanFreeze:    !answer.known || answer.canFreeze,
+		FreezeDetail: answer.freezeWhy,
+		NiceSpelling: answer.spelling,
+		NiceDetail:   answer.niceWhy,
 	}
 }
 
@@ -189,10 +190,10 @@ func (g *governor) recordLocked(c Control) {
 // releaseLocked reverts every control in effect on one job's processes.
 func (g *governor) releaseLocked(id string, cpus int) {
 	for _, c := range g.active[id] {
-		out, detail := revertMechanism(c.Mechanism, c.PID, cpus)
+		res := revertMechanism(c, cpus)
 		g.history = append(g.history, Control{
 			Job: id, Mechanism: c.Mechanism, PID: c.PID, Name: c.Name,
-			Outcome: out, Detail: detail, At: time.Now(),
+			Outcome: res.outcome, Detail: res.detail, At: time.Now(),
 		})
 	}
 	delete(g.active, id)

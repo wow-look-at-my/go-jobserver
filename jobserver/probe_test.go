@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,28 +23,64 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// freezable is the host this suite runs its mechanism tests against: the CPUs
-// it was told about, with freeze known to work.
-func freezable(cpus int) hostFacts {
-	return hostFacts{CPUs: cpus, CanFreeze: true, FreezeDetail: "the stop signal suspended the process"}
+// hostHere is what this host answers, asked the way the daemon asks: on a
+// process of the probe's own.
+func hostHere(t *testing.T) hostFacts {
+	t.Helper()
+	host := probeHost()
+	require.True(t, host.known, "the probe has to come back with an answer")
+	return hostFacts{
+		CPUs:         runtime.NumCPU(),
+		CanFreeze:    host.canFreeze,
+		FreezeDetail: host.freezeWhy,
+		NiceSpelling: host.spelling,
+		NiceDetail:   host.niceWhy,
+	}
 }
 
-func TestSuspendProbeAsksWithAProcessOfItsOwn(t *testing.T) {
-	supported, detail := probeSuspend()
+func TestTheHostProbeAsksWithAProcessOfItsOwn(t *testing.T) {
+	host := probeHost()
+	require.True(t, host.known, "the probe has to come back with an answer")
 	switch hostOS() {
 	case "linux", "darwin", "freebsd", "netbsd", "openbsd":
-		assert.True(t, supported, "this host's stop signal suspends a process: %s", detail)
+		assert.True(t, host.canFreeze, "this host's stop signal suspends a process: %s", host.freezeWhy)
+		assert.NotEqual(t, niceUnknown, host.spelling,
+			"this host's getpriority has a spelling: %s", host.niceWhy)
 	default:
 		// Either answer is possible outside that family. What matters is that
-		// the mechanism then does what the answer says it can.
-		out, why := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{},
-			hostFacts{CPUs: 1, CanFreeze: supported, FreezeDetail: detail})
-		if supported {
-			assert.Equal(t, OutcomeApplied, out, why)
-			return
+		// each mechanism then does what the answer says it can.
+		res := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{},
+			hostFacts{CPUs: 1, CanFreeze: host.canFreeze, FreezeDetail: host.freezeWhy})
+		if host.canFreeze {
+			assert.Equal(t, OutcomeApplied, res.outcome, res.detail)
+		} else {
+			assert.Equal(t, OutcomeNotApplicable, res.outcome, res.detail)
+			assert.Equal(t, host.freezeWhy, res.detail)
 		}
-		assert.Equal(t, OutcomeNotApplicable, out, why)
-		assert.Equal(t, detail, why)
+	}
+	assert.NotEmpty(t, host.niceWhy, "the priority answer carries its reason too")
+}
+
+// The value a revert writes depends on which spelling the host answers with,
+// and both are read and written differently.
+func TestNiceToWriteFollowsTheHostsSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		spelling niceSpelling
+		read     int
+		want     int
+		ok       bool
+	}{
+		{niceItself, 0, 0, true},
+		{niceItself, 7, 7, true},
+		{niceItself, 19, 19, true},
+		{niceComplement, 20, 0, true},
+		{niceComplement, 13, 7, true},
+		{niceComplement, 1, 19, true},
+		{niceUnknown, 7, 0, false},
+	} {
+		got, ok := niceToWrite(tc.spelling, tc.read)
+		assert.Equal(t, tc.ok, ok, "spelling %d reading %d", tc.spelling, tc.read)
+		assert.Equal(t, tc.want, got, "spelling %d reading %d", tc.spelling, tc.read)
 	}
 }
 

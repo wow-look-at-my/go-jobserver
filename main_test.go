@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -408,6 +410,61 @@ func TestCLICarriesAJobPolicyAndReplacesIt(t *testing.T) {
 	assert.InDelta(t, 1, after.Policy.Cost, 1e-9)
 	assert.Empty(t, after.Policy.Enabled(), "the replacement turns every mechanism off")
 	assert.Equal(t, []int{99}, after.Policy.Freeze.Exempt.PIDs)
+}
+
+func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
+	dir := shortDir(t)
+	// The signal that stops the daemon travels through this process.
+	quiet := make(chan os.Signal, 4)
+	signal.Notify(quiet, os.Interrupt)
+	defer signal.Stop(quiet)
+
+	daemon := make(chan error, 1)
+	go func() { daemon <- run([]string{"-dir", dir, "-no-http", "-ipc=false", "run"}) }()
+
+	sock := filepath.Join(dir, "go-jobserver.sock")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, 30*time.Second, 10*time.Millisecond, "the daemon must publish its socket")
+
+	idOut, err := capture(t, func() error {
+		return run([]string{"-dir", dir, "queue", "--", "sh", "-c", "while :; do :; done"})
+	})
+	require.NoError(t, err)
+	id := strings.TrimSpace(idOut)
+
+	// The shipped daemon reports the host's use, and the use of the job it is running, while that job burns.
+	var stats jobserver.Stats
+	require.Eventually(t, func() bool {
+		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "stats", "-json"}) })
+		if err != nil {
+			return false
+		}
+		return json.Unmarshal([]byte(raw), &stats) == nil && stats.CPU.Jobs[id] > 0
+	}, 30*time.Second, 50*time.Millisecond, "stats must report the CPU the job uses")
+	assert.GreaterOrEqual(t, stats.CPU.CPUs, 1)
+	assert.Greater(t, stats.CPU.Budget, 0.0)
+	assert.GreaterOrEqual(t, stats.CPU.HostBusy, 0.0)
+
+	_, err = capture(t, func() error { return run([]string{"-dir", dir, "interrupt", id}) })
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+		if err != nil {
+			return false
+		}
+		var j jobserver.Job
+		return json.Unmarshal([]byte(raw), &j) == nil && j.State.Terminal()
+	}, 30*time.Second, 50*time.Millisecond, "the interrupted job must reach a terminal state")
+
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	select {
+	case err := <-daemon:
+		require.NoError(t, err, "the daemon must shut down cleanly")
+	case <-time.After(30 * time.Second):
+		require.FailNow(t, "the daemon never returned")
+	}
 }
 
 func TestCLIStatsPrintsTheCPUReport(t *testing.T) {

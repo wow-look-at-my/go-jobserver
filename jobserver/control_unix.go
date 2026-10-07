@@ -2,10 +2,7 @@
 
 package jobserver
 
-import (
-	"fmt"
-	"syscall"
-)
+import "syscall"
 
 // The which and value arguments the priority call takes.
 const (
@@ -19,12 +16,9 @@ const (
 	prioDarwinNormal = 0
 )
 
-// setNice applies a nice value to one process.
-func setNice(pid, nice int) (Outcome, string) {
-	if err := syscall.Setpriority(prioProcess, pid, nice); err != nil {
-		return refused(err)
-	}
-	return OutcomeApplied, fmt.Sprintf("nice %d", nice)
+// setNiceTo applies a nice value to one process.
+func setNiceTo(pid, nice int) error {
+	return syscall.Setpriority(prioProcess, pid, nice)
 }
 
 // processNice reads a process's nice value.
@@ -32,12 +26,9 @@ func processNice(pid int) (int, error) {
 	return syscall.Getpriority(prioProcess, pid)
 }
 
-// clearNice restores a process's nice value to the default.
-func clearNice(pid int) (Outcome, string) {
-	if err := syscall.Setpriority(prioProcess, pid, 0); err != nil {
-		return refused(err)
-	}
-	return OutcomeReverted, "nice 0"
+// darwinPolicy reads a process's background policy.
+func darwinPolicy(pid int) (int, error) {
+	return syscall.Getpriority(prioDarwinProcess, pid)
 }
 
 // setDarwinBackground puts a process into Apple's background state.

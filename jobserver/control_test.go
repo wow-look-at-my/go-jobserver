@@ -33,12 +33,12 @@ func fileSize(path string) int64 {
 }
 
 func TestFreezeStopsAProcessAndThawResumesIt(t *testing.T) {
-	if supported, detail := probeSuspend(); !supported {
+	if host := probeHost(); !host.canFreeze {
 		// A host whose stop signal ends a process has no freeze to offer, and
 		// saying so is the whole of what it can do.
-		out, why := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{},
-			hostFacts{CPUs: 1, FreezeDetail: detail})
-		assert.Equal(t, OutcomeNotApplicable, out, why)
+		res := applyMechanism(MechFreeze, os.Getpid(), JobPolicy{},
+			hostFacts{CPUs: 1, FreezeDetail: host.freezeWhy})
+		assert.Equal(t, OutcomeNotApplicable, res.outcome, res.detail)
 		return
 	}
 	marker := filepath.Join(t.TempDir(), "ticks")
@@ -51,64 +51,80 @@ func TestFreezeStopsAProcessAndThawResumesIt(t *testing.T) {
 	require.Eventually(t, func() bool { return fileSize(marker) > 20 }, 10*time.Second, 10*time.Millisecond,
 		"the child never started writing")
 
-	outcome, detail := applyMechanism(MechFreeze, cmd.Process.Pid, JobPolicy{}, freezable(1))
-	require.Equal(t, OutcomeApplied, outcome, detail)
+	res := applyMechanism(MechFreeze, cmd.Process.Pid, JobPolicy{}, hostHere(t))
+	require.Equal(t, OutcomeApplied, res.outcome, res.detail)
 
 	time.Sleep(200 * time.Millisecond)
 	stopped := fileSize(marker)
 	time.Sleep(300 * time.Millisecond)
 	assert.Equal(t, stopped, fileSize(marker), "a frozen process must not make progress")
 
-	outcome, detail = revertMechanism(MechFreeze, cmd.Process.Pid, 1)
-	require.Equal(t, OutcomeReverted, outcome, detail)
+	back := revertMechanism(Control{Mechanism: MechFreeze, PID: cmd.Process.Pid}, 1)
+	require.Equal(t, OutcomeReverted, back.outcome, back.detail)
 	require.Eventually(t, func() bool { return fileSize(marker) > stopped }, 10*time.Second, 10*time.Millisecond,
 		"a thawed process must run again")
 }
 
 func TestPriorityChangesANiceValueAndRevertsIt(t *testing.T) {
-	if hostOS() == "windows" {
-		out, detail := applyMechanism(MechPriority, os.Getpid(), JobPolicy{}, freezable(1))
-		assert.Equal(t, OutcomeNotApplicable, out, detail)
-		return
-	}
 	pid := spawnSleep(t)
 	before, err := processNice(pid)
 	require.NoError(t, err)
 
 	policy := JobPolicy{Priority: PrioritySettings{Enabled: true, Nice: 7}}
-	outcome, detail := applyMechanism(MechPriority, pid, policy, freezable(1))
-	require.Equal(t, OutcomeApplied, outcome, detail)
-	after, err := processNice(pid)
-	require.NoError(t, err)
-	assert.NotEqual(t, before, after, "the nice value must change")
-
-	// Putting the nice value back means lowering it, which POSIX lets only a privileged process do.
-	outcome, detail = revertMechanism(MechPriority, pid, 1)
-	if outcome == OutcomeRefused {
-		assert.Contains(t, detail, "permission")
+	res := applyMechanism(MechPriority, pid, policy, hostHere(t))
+	if res.outcome == OutcomeNotApplicable {
+		// A host whose syscall layer has no priority call says so itself.
 		return
 	}
-	require.Equal(t, OutcomeReverted, outcome, detail)
-	back, err := processNice(pid)
+	require.Equal(t, OutcomeApplied, res.outcome, res.detail)
+	require.True(t, res.hadPrior, "the value it found has to travel with the control")
+	// The value it carries is the one a revert writes.
+	wantPrior, ok := niceToWrite(hostHere(t).NiceSpelling, before)
+	require.True(t, ok)
+	require.Equal(t, []int{wantPrior}, res.prior)
+
+	raised, err := processNice(pid)
 	require.NoError(t, err)
-	assert.NotEqual(t, after, back, "the revert must undo the applied value")
+	assert.NotEqual(t, before, raised, "the nice value must change")
+
+	// Putting a nice value back means lowering it, which POSIX reserves for a
+	// privileged process.
+	back := revertMechanism(Control{
+		Mechanism: MechPriority, PID: pid, Prior: res.prior, HadPrior: res.hadPrior,
+	}, 1)
+	got, err := processNice(pid)
+	require.NoError(t, err)
+	if back.outcome == OutcomeRefused {
+		assert.Contains(t, back.detail, "permission")
+		assert.Equal(t, raised, got, "a refused revert changes nothing")
+		return
+	}
+	require.Equal(t, OutcomeReverted, back.outcome, back.detail)
+	assert.Equal(t, before, got, "the revert must put back the value it found")
 }
 
 func TestAffinityIsAppliedOrHonestlyUnavailable(t *testing.T) {
 	pid := spawnSleep(t)
 	policy := JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: []int{0}}}
-	outcome, detail := applyMechanism(MechAffinity, pid, policy, freezable(runtime.NumCPU()))
+	res := applyMechanism(MechAffinity, pid, policy, hostHere(t))
 	switch hostOS() {
 	case "linux", "darwin":
-		assert.Equal(t, OutcomeApplied, outcome, detail)
+		assert.Equal(t, OutcomeApplied, res.outcome, res.detail)
 	default:
-		assert.Equal(t, OutcomeNotApplicable, outcome, detail)
+		assert.Equal(t, OutcomeNotApplicable, res.outcome, res.detail)
 	}
-	if outcome != OutcomeApplied {
+	if res.outcome != OutcomeApplied {
 		return
 	}
-	outcome, detail = revertMechanism(MechAffinity, pid, runtime.NumCPU())
-	assert.Equal(t, OutcomeReverted, outcome, detail)
+	back := revertMechanism(Control{
+		Mechanism: MechAffinity, PID: pid, Prior: res.prior, HadPrior: res.hadPrior,
+	}, runtime.NumCPU())
+	assert.Equal(t, OutcomeReverted, back.outcome, back.detail)
+	// Where the host lets the state be read the control carries it, and where
+	// it does not the revert clears the state and says so.
+	if !res.hadPrior {
+		assert.NotEmpty(t, back.detail, "a revert without a prior says what it did")
+	}
 }
 
 // TestAffinityPinsTheLinuxCPUMask reads the CPU set back from the kernel, so
@@ -123,16 +139,23 @@ func TestAffinityPinsTheLinuxCPUMask(t *testing.T) {
 	require.NotEmpty(t, allowed)
 	want := []int{allowed[len(allowed)-1]}
 
-	outcome, detail := applyMechanism(MechAffinity, pid,
-		JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: want}}, freezable(runtime.NumCPU()))
-	require.Equal(t, OutcomeApplied, outcome, detail)
+	res := applyMechanism(MechAffinity, pid,
+		JobPolicy{Affinity: AffinitySettings{Enabled: true, CPUs: want}}, hostHere(t))
+	require.Equal(t, OutcomeApplied, res.outcome, res.detail)
+	require.Equal(t, allowed, res.prior, "the mask it found has to travel with the control")
 
 	got, err := getAffinitySyscall(pid)
 	require.NoError(t, err)
 	assert.Equal(t, want, got, "the kernel must report the CPU set the daemon asked for")
 
-	outcome, detail = revertMechanism(MechAffinity, pid, runtime.NumCPU())
-	require.Equal(t, OutcomeReverted, outcome, detail)
+	back := revertMechanism(Control{
+		Mechanism: MechAffinity, PID: pid, Prior: res.prior, HadPrior: res.hadPrior,
+	}, runtime.NumCPU())
+	require.Equal(t, OutcomeReverted, back.outcome, back.detail)
+
+	restored, err := getAffinitySyscall(pid)
+	require.NoError(t, err)
+	assert.Equal(t, allowed, restored, "the revert must put back the mask it found")
 }
 
 func TestACallAMissingHostCarriesIsNotARefusal(t *testing.T) {
@@ -154,6 +177,6 @@ func TestControllingAProcessThatIsGoneIsNotARefusal(t *testing.T) {
 	_, _ = cmd.Process.Wait()
 
 	// Letting a process that has already ended run again is not a refusal: there is nothing left to control.
-	outcome, detail := revertMechanism(MechFreeze, pid, 1)
-	require.Equal(t, OutcomeReverted, outcome, detail)
+	back := revertMechanism(Control{Mechanism: MechFreeze, PID: pid}, 1)
+	require.Equal(t, OutcomeReverted, back.outcome, back.detail)
 }

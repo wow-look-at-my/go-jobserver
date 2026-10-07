@@ -144,15 +144,17 @@ When the running jobs together exceed the budget, the daemon applies the control
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
-| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | no such call |
-| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | no such call |
+| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | the host's shell |
+| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | the host's shell |
 | `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | asked first |
 
 `affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` asks the host before it stops anything. A host whose stop signal ends a process reports success for that signal, so the two cannot be told apart from the answer alone. The daemon finds out on a process of its own. The first job that enables `freeze` makes it run one, stop it, resume it, and watch whether it lives through that. When the answer is that the stop signal ends a process, freeze reports `not-applicable` with that reason and the job is left running. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
 
 macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy: the same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
 
-Windows is the one host where none of the three is available today. The gap is not in this program. This binary is one fat APE, so on Windows it reaches Win32 through the cosmo Go runtime's syscall emulation, and that layer has no case. This holds for `sched_setaffinity` or `setpriority` (it answers ENOSYS), while its `kill` terminates rather than suspends - which is the answer the probe above detects. Cosmopolitan's own C library does implement `sched_setaffinity` for Windows on top of `SetProcessAffinityMask`. The emulation case, and the toolchain release that ships it, are what is missing. When they arrive all mechanisms work there on their own. Affinity and priority because those calls are attempted everywhere, and freeze because the probe will then find a stop signal that suspends.
+A Windows host has no syscall this binary can reach for a process's CPU set or its priority class. `affinity` and `priority` there go through the host's own shell instead - the same shape as a unix supervisor that reaches for `renice`. Both read the state the process is in before they change it. A revert puts that back, and a host that refuses the request answers in its own words, which travel with the outcome. A host with no PowerShell at all reports `not-applicable`, which is the same answer any host gives for a facility it does not have.
+
+Windows `freeze` is the one that has to wait. Windows `free the signal this binary can send there ends a process instead of stopping it, and the probe above detects exactly that, so freeze reports `not-applicable` with that reason and the job keeps running. A toolchain whose NT syscall layer serves that signal will be found by the same probe, and freeze will start working with no change here.
 
 ### Picking processes
 
