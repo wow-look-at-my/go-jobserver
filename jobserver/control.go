@@ -104,6 +104,14 @@ func revertMechanism(c Control, cpus int) controlResult {
 // cores.
 func applyAffinity(pid int, cpus []int) controlResult {
 	if hostOS() == "windows" {
+		// The syscall layer serves this over SetProcessAffinityMask once the toolchain's runtime carries the call.
+		prior, had := affinityPrior(pid)
+		if err := setAffinitySyscall(pid, cpus); err == nil {
+			return controlResult{outcome: OutcomeApplied, detail: "cpus " + joinInts(cpus),
+				prior: prior, hadPrior: had}
+		} else if !missingCall(err) {
+			return controlResult{outcome: OutcomeRefused, detail: err.Error()}
+		}
 		return windowsAffinity(pid, cpus)
 	}
 	if hostOS() == "darwin" {
@@ -130,6 +138,13 @@ func applyAffinity(pid int, cpus []int) controlResult {
 // none was read.
 func revertAffinity(c Control, cpus int) controlResult {
 	if hostOS() == "windows" {
+		if c.HadPrior && len(c.Prior) > 0 {
+			if err := setAffinitySyscall(c.PID, c.Prior); err == nil {
+				return appliedResult(OutcomeReverted, "cpus "+joinInts(c.Prior))
+			} else if !missingCall(err) {
+				return appliedResult(OutcomeRefused, err.Error())
+			}
+		}
 		return windowsAffinityRevert(c)
 	}
 	if hostOS() == "darwin" {
@@ -165,6 +180,19 @@ func controlCall(call func() error, applied Outcome, detail string, prior []int,
 // spelling the revert has to write.
 func applyNice(pid, nice int, host hostFacts) controlResult {
 	if hostOS() == "windows" {
+		// The syscall layer serves this over SetPriorityClass once the toolchain's runtime carries the call.
+		var prior []int
+		if was, err := processNice(pid); err == nil {
+			if value, ok := niceToWrite(host.NiceSpelling, was); ok {
+				prior = []int{value}
+			}
+		}
+		if err := setNiceTo(pid, nice); err == nil {
+			return controlResult{outcome: OutcomeApplied, detail: "nice " + strconv.Itoa(nice),
+				prior: prior, hadPrior: prior != nil}
+		} else if !missingCall(err) {
+			return controlResult{outcome: OutcomeRefused, detail: err.Error()}
+		}
 		return windowsPriority(pid, nice)
 	}
 	var prior []int
@@ -225,11 +253,9 @@ func probeNiceSpelling(pid int) (niceSpelling, string) {
 	return niceUnknown, "getpriority answered " + strconv.Itoa(got) + " for " + strconv.Itoa(clueNice)
 }
 
-// affinityPrior reads the CPU set a process is on, on a host that keeps one.
+// affinityPrior reads the CPU set a process is on, on a host whose syscall
+// layer serves that read.
 func affinityPrior(pid int) ([]int, bool) {
-	if hostOS() != "linux" {
-		return nil, false
-	}
 	cpus, err := getAffinitySyscall(pid)
 	if err != nil || len(cpus) == 0 {
 		return nil, false
@@ -251,6 +277,13 @@ func relabel(out Outcome) Outcome {
 // the reason travels with the control.
 func revertNice(c Control) controlResult {
 	if hostOS() == "windows" {
+		if c.HadPrior && len(c.Prior) > 0 {
+			if err := setNiceTo(c.PID, c.Prior[0]); err == nil {
+				return appliedResult(OutcomeReverted, "nice "+strconv.Itoa(c.Prior[0])+" back")
+			} else if !missingCall(err) {
+				return appliedResult(OutcomeRefused, err.Error())
+			}
+		}
 		return windowsPriorityRevert(c)
 	}
 	if c.HadPrior && len(c.Prior) > 0 {
@@ -259,6 +292,12 @@ func revertNice(c Control) controlResult {
 	}
 	return controlCall(func() error { return setNiceTo(c.PID, 0) },
 		OutcomeReverted, "nice 0, with no value to go back to", nil, false)
+}
+
+// missingCall reports whether a host's syscall layer carries no such call,
+// which is where a route built on that call hands over to another.
+func missingCall(err error) bool {
+	return errors.Is(err, syscall.ENOSYS)
 }
 
 // callFailure classifies a failed process-control call.
