@@ -280,8 +280,13 @@ func missingCall(err error) bool {
 // errNoAffinity is what a host without sched_setaffinity(2) reports.
 var errNoAffinity = errors.New("jobserver: this host has no sched_setaffinity")
 
-// callFailure classifies a failed process-control call.
+// callFailure classifies a failed process-control call. A call the host's
+// syscall layer does not carry is a missing capability, which is not the host
+// refusing anything.
 func callFailure(err error) (Outcome, string) {
+	if missingCall(err) {
+		return OutcomeNotApplicable, err.Error()
+	}
 	out, detail := refused(err)
 	return outcomeFor(hostOS(), out, detail)
 }

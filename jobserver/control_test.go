@@ -190,6 +190,19 @@ func TestAMissingCallHandsOverToTheNextRoute(t *testing.T) {
 	assert.False(t, missingCall(syscall.EPERM), "a refusal the host made is not a missing call")
 }
 
+// TestACallTheSyscallLayerLacksIsNotARefusal covers what the status surface
+// says about a control the host has no call for.
+func TestACallTheSyscallLayerLacksIsNotARefusal(t *testing.T) {
+	lacks := controlCall(func() error { return errNoAffinity }, OutcomeApplied, "cpus 0", nil, false)
+	assert.Equal(t, OutcomeNotApplicable, lacks.outcome, lacks.detail)
+
+	absent := controlCall(func() error { return syscall.ENOSYS }, OutcomeApplied, "cpus 0", nil, false)
+	assert.Equal(t, OutcomeNotApplicable, absent.outcome, absent.detail)
+
+	denied := controlCall(func() error { return syscall.EPERM }, OutcomeApplied, "cpus 0", nil, false)
+	assert.Equal(t, OutcomeRefused, denied.outcome, denied.detail)
+}
+
 func TestACallAMissingHostCarriesIsNotARefusal(t *testing.T) {
 	out, detail := outcomeFor("windows", OutcomeRefused, "function not implemented")
 	assert.Equal(t, OutcomeNotApplicable, out, "%s on a host without the call", detail)
