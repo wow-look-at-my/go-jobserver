@@ -33,6 +33,14 @@ type Config struct {
 	SpoolInterval time.Duration
 	// SyncInterval is how often running job logs are flushed to disk.
 	SyncInterval time.Duration
+	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
+	CPUBudget float64
+	// DefaultCost is the CPU cost assumed for a job that declares none and has never run. Zero means one.
+	DefaultCost float64
+	// SampleInterval is how often CPU use is sampled. Zero means one second.
+	SampleInterval time.Duration
+	// DisableCPU turns off CPU sampling, so the daemon neither measures nor throttles anything.
+	DisableCPU bool
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
 	// Logf receives the server's own status lines. Nil discards them.
@@ -51,14 +59,17 @@ func DefaultDir() string {
 // DefaultConfig returns the daemon's out-of-the-box settings for a directory.
 func DefaultConfig(dir string) Config {
 	return Config{
-		Dir:           dir,
-		MaxConcurrent: runtime.NumCPU(),
-		SpoolDir:      filepath.Join(dir, "spool"),
-		HTTPAddr:      "127.0.0.1:8059",
-		UnixSocket:    filepath.Join(dir, "go-jobserver.sock"),
-		IPC:           true,
-		SpoolInterval: 250 * time.Millisecond,
-		SyncInterval:  time.Second,
+		Dir:            dir,
+		MaxConcurrent:  runtime.NumCPU(),
+		SpoolDir:       filepath.Join(dir, "spool"),
+		HTTPAddr:       "127.0.0.1:8059",
+		UnixSocket:     filepath.Join(dir, "go-jobserver.sock"),
+		IPC:            true,
+		SpoolInterval:  250 * time.Millisecond,
+		SyncInterval:   time.Second,
+		CPUBudget:      float64(runtime.NumCPU()),
+		DefaultCost:    1,
+		SampleInterval: time.Second,
 	}
 }
 
@@ -68,6 +79,7 @@ type Server struct {
 	cfg    Config
 	store  *Store
 	runner Runner
+	gov    *governor
 
 	mu      sync.Mutex
 	running map[string]*runHandle
@@ -103,6 +115,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	if cfg.SampleInterval <= 0 {
+		cfg.SampleInterval = time.Second
+	}
+	if cfg.DefaultCost < 0 {
+		cfg.DefaultCost = 0
+	}
 	st, err := OpenStore(cfg.Dir)
 	if err != nil {
 		return nil, err
@@ -116,7 +134,66 @@ func New(cfg Config) (*Server, error) {
 		quit:    make(chan struct{}),
 		start:   time.Now(),
 	}
+	s.gov = newGovernor(s)
 	return s, nil
+}
+
+// budget is how many CPUs the running jobs may use together.
+func (s *Server) budget() float64 {
+	if s.cfg.CPUBudget > 0 {
+		return s.cfg.CPUBudget
+	}
+	return float64(s.cfg.cpuCount())
+}
+
+// cpuCount is how many logical CPUs the host has.
+func (c Config) cpuCount() int { return runtime.NumCPU() }
+
+// sampleCPUs is the CPU count the latest sample saw.
+func (s *Server) sampleCPUs() int {
+	s.gov.mu.Lock()
+	defer s.gov.mu.Unlock()
+	if s.gov.sample.CPUs > 0 {
+		return s.gov.sample.CPUs
+	}
+	return s.cfg.cpuCount()
+}
+
+// runningRoots maps each running job to the process at the head of its
+// process tree.
+func (s *Server) runningRoots() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.running))
+	for id, h := range s.running {
+		if h.pid > 0 {
+			out[id] = h.pid
+		}
+	}
+	return out
+}
+
+// reserved is how many CPUs the running jobs have claimed between them.
+func (s *Server) reserved() float64 {
+	var total float64
+	for _, id := range s.runningIDs() {
+		if j, ok := s.store.Job(id); ok {
+			total += j.ExpectedCost(s.cfg.DefaultCost)
+		}
+	}
+	return total
+}
+
+// runningIDs lists the running jobs.
+func (s *Server) runningIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.running))
+	for id := range s.running {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Config returns the settings the server was built with.
@@ -132,6 +209,10 @@ func (s *Server) Start() error {
 	go s.loop()
 	s.wg.Add(1)
 	go s.syncLoop()
+	if !s.cfg.DisableCPU {
+		s.wg.Add(1)
+		go s.gov.loop()
+	}
 	if s.cfg.SpoolDir != "" {
 		s.wg.Add(1)
 		go s.watchSpool()
@@ -158,6 +239,8 @@ func (s *Server) Start() error {
 type runHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	// pid is the running job's process, once the runner has started it.
+	pid int
 }
 
 // An interruptTimeout bounds how long Interrupt waits for a run to stop.
@@ -184,6 +267,7 @@ func (s *Server) Close() error {
 	}
 	close(s.quit)
 	s.wg.Wait()
+	s.gov.releaseAll()
 	var err error
 	for _, c := range closes {
 		if cerr := c.Close(); cerr == nil {
@@ -217,11 +301,15 @@ func (s *Server) Wake() {
 // what can.
 func (s *Server) loop() {
 	defer s.wg.Done()
+	// The ticker re-runs the decision.
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
 	for {
 		select {
 		case <-s.quit:
 			return
 		case <-s.wake:
+		case <-t.C:
 		}
 		s.tick()
 	}
@@ -269,6 +357,8 @@ func (s *Server) tick() {
 	}
 	jobs = s.store.Jobs()
 	byID := Index(jobs)
+	budget := s.budget()
+	reserved := s.reserved()
 	for _, id := range Ready(jobs) {
 		if !s.capacity() {
 			break
@@ -292,6 +382,12 @@ func (s *Server) tick() {
 				}
 			}
 		}
+		// A job that would not fit beside the running ones keeps its place in the queue and starts later.
+		cost := j.ExpectedCost(s.cfg.DefaultCost)
+		if reserved > 0 && reserved+cost > budget {
+			continue
+		}
+		reserved += cost
 		s.dispatch(j.ID)
 	}
 }
@@ -360,11 +456,17 @@ func (s *Server) dispatch(id string) {
 		defer s.wg.Done()
 		defer close(h.done)
 		defer func() {
+			// The governor gives the job's processes their normal scheduling back and records what its tree consumed.
+			s.gov.finish(id)
 			s.finishRun(id)
 			cancel()
 			s.Wake()
 		}()
-		s.runOnce(ctx, j)
+		s.runOnce(ctx, j, func(pid int) {
+			s.mu.Lock()
+			h.pid = pid
+			s.mu.Unlock()
+		})
 	}()
 }
 
@@ -376,17 +478,19 @@ func (s *Server) finishRun(id string) {
 }
 
 // runOnce runs a job and records everything that happened.
-func (s *Server) runOnce(ctx context.Context, j *Job) {
+func (s *Server) runOnce(ctx context.Context, j *Job, started func(pid int)) {
 	w, err := s.store.LogWriter(j.ID)
 	if err != nil {
 		s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
-	code, runErr := s.runner.Run(ctx, j, w)
+	code, runErr := s.runner.Run(ctx, j, w, started)
 	if err := w.Sync(); err != nil {
 		s.cfg.Logf("go-jobserver: sync log %s: %v", j.ID, err)
 	}
 	n := w.N()
+	// Record what the job's tree consumed, and give its processes their normal scheduling back, before the outcome is recorded.
+	s.gov.finish(j.ID)
 	switch {
 	case ctx.Err() != nil:
 		s.finish(j.ID, StateCancelled, -1, "interrupted", nil, n)
@@ -540,6 +644,10 @@ type Stats struct {
 	PID      int            `json:"pid"`
 	Started  time.Time      `json:"started"`
 	Revision string         `json:"version"`
+	// CPU is what the daemon last measured, and what it did about it.
+	CPU CPUReport `json:"cpu"`
+	// Controls lists the process controls in effect right now.
+	Controls []Control `json:"controls,omitempty"`
 }
 
 // Stats reports the server's current shape.
@@ -561,7 +669,31 @@ func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	st.Running = len(s.running)
 	s.mu.Unlock()
+	if s.cfg.DisableCPU {
+		st.CPU = CPUReport{Budget: s.budget(), CPUs: s.cfg.cpuCount(), Note: "cpu sampling is off"}
+		return st
+	}
+	st.CPU = s.gov.report()
+	st.Controls = s.gov.controls()
 	return st
+}
+
+// Readings returns the daemon's latest CPU measurement.
+func (s *Server) Readings() CPUReport { return s.gov.report() }
+
+// Controls returns the process controls in effect right now.
+func (s *Server) Controls() []Control { return s.gov.controls() }
+
+// Events returns the recent control history, newest first.
+func (s *Server) Events() []Control { return s.gov.events() }
+
+// SetPolicy replaces a job's CPU policy.
+func (s *Server) SetPolicy(id string, policy JobPolicy) (*Job, error) {
+	if err := s.store.SetPolicy(id, policy); err != nil {
+		return nil, err
+	}
+	s.Wake()
+	return mustJob(s.store, id)
 }
 
 // Wait blocks until the server is closed.

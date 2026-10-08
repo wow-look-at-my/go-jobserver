@@ -4,10 +4,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -34,7 +34,8 @@ commands:
   pause                stop starting new jobs
   resume               start scheduling again
   interrupt <id|all>   stop running jobs
-  stats                show server counters
+  policy [flags] <id>  replace a job's CPU cost and process-control settings
+  stats                show server counters, CPU use and active controls
   version              print the version
 
 global flags (also accepted after the command):
@@ -44,11 +45,15 @@ global flags (also accepted after the command):
   -spool DIR     spool directory to watch (default DIR/spool)
   -ipc BOOL      serve the go-ipc service (default true)
   -j N           how many jobs may run at once (default one per CPU)
+  -budget N      how many CPUs the running jobs may use together (default one per CPU)
+  -cost N        CPU cost assumed for a job that declares none (default 1)
+  -sample DUR    how often CPU use is sampled (default 1s)
+  -no-cpu        do not sample CPU use or throttle anything
   -no-http       do not serve the dashboard
   -no-socket     do not serve the file socket
   -no-spool      do not watch a spool directory
 
-queue flags:
+queue and policy flags:
   -name NAME     a label for the job
   -dep ID        add a dependency (repeatable)
   -input PATH    a file whose content decides the job's cache identity (repeatable)
@@ -60,6 +65,18 @@ queue flags:
   -force         run even when an identical job already finished
   -wait          wait for the job and report its final state
   -shell         run the command through "sh -c"
+
+CPU policy flags, accepted by queue and by policy:
+  -cpu N         CPUs the job is expected to use (default: its last run, then 1)
+  -priority      raise the job's nice value while it is over the CPU budget
+  -nice N        the nice value to apply (default 10)
+  -freeze        suspend the job's processes while it is over the budget
+  -affinity LIST pin the job to CPUs ("0,1", "all", or "last")
+  -exempt SEL    processes every enabled mechanism leaves alone
+  -only SEL      processes every enabled mechanism is restricted to
+  -<mech>-exempt SEL, -<mech>-only SEL   the same, for one mechanism, where
+                 <mech> is affinity, priority or freeze
+  a selector is a comma-separated list of process ids and names, e.g. "1234,ffmpeg"
 `
 
 func main() {
@@ -77,6 +94,11 @@ type globals struct {
 	spool    string
 	ipc      bool
 	jobs     int
+	budget   float64
+	cost     float64
+	sample   time.Duration
+	noCPU    bool
+	hold     bool
 	noHTTP   bool
 	noSocket bool
 	noSpool  bool
@@ -91,6 +113,11 @@ func (g *globals) bind(fs *flag.FlagSet) {
 	fs.StringVar(&g.spool, "spool", g.spool, "spool directory")
 	fs.BoolVar(&g.ipc, "ipc", g.ipc, "serve the go-ipc service")
 	fs.IntVar(&g.jobs, "j", g.jobs, "max concurrent jobs")
+	fs.Float64Var(&g.budget, "budget", g.budget, "CPUs the running jobs may use together")
+	fs.Float64Var(&g.cost, "cost", g.cost, "CPU cost assumed for a job that declares none")
+	fs.DurationVar(&g.sample, "sample", g.sample, "how often CPU use is sampled")
+	fs.BoolVar(&g.noCPU, "no-cpu", g.noCPU, "do not sample CPU use")
+	fs.BoolVar(&g.hold, "hold", g.hold, "internal: wait for input, used to ask this host how it stops a process")
 	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
 	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
 	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")
@@ -124,6 +151,16 @@ func (g *globals) config() jobserver.Config {
 	if g.jobs > 0 {
 		cfg.MaxConcurrent = g.jobs
 	}
+	if g.budget > 0 {
+		cfg.CPUBudget = g.budget
+	}
+	if g.cost > 0 {
+		cfg.DefaultCost = g.cost
+	}
+	if g.sample > 0 {
+		cfg.SampleInterval = g.sample
+	}
+	cfg.DisableCPU = g.noCPU
 	cfg.IPC = g.ipc
 	return cfg
 }
@@ -144,6 +181,9 @@ func run(args []string) error {
 		g.bind(fs)
 		if err := fs.Parse(args); err != nil {
 			return err
+		}
+		if g.hold {
+			return holdOpen()
 		}
 		args = fs.Args()
 		if len(args) == 0 {
@@ -173,6 +213,8 @@ func run(args []string) error {
 		return cmdInterrupt(g, rest)
 	case "depend":
 		return cmdDepend(g, rest)
+	case "policy", "cpu":
+		return cmdPolicy(g, rest)
 	case "stats":
 		return cmdStats(g, rest)
 	case "version":
@@ -255,6 +297,8 @@ func cmdQueue(g *globals, args []string) error {
 	fs.Var(&inputs, "input", "a file whose content decides the cache identity")
 	fs.Var(&outputs, "output", "a file the job must produce")
 	fs.Var(&envs, "env", "an extra environment entry")
+	var pol policyFlags
+	pol.bind(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -286,6 +330,7 @@ func cmdQueue(g *globals, args []string) error {
 		Key:     *key,
 		Draft:   *draft,
 		Force:   *force,
+		Policy:  pol.policy(),
 	}
 	c, ctx, cancel, err := client(g)
 	if err != nil {
@@ -659,6 +704,10 @@ func cmdStats(g *globals, args []string) error {
 	fmt.Printf("paused   %v\n", st.Paused)
 	fmt.Printf("running  %d\n", st.Running)
 	fmt.Printf("total    %d\n", st.Total)
+	printCPU(st.CPU)
+	for _, c := range st.Controls {
+		fmt.Printf("control  %s %s pid %d %s %s\n", c.Job, c.Mechanism, c.PID, c.Outcome, c.Detail)
+	}
 	states := make([]string, 0, len(st.ByState))
 	for state := range st.ByState {
 		states = append(states, state)
@@ -670,19 +719,8 @@ func cmdStats(g *globals, args []string) error {
 	return nil
 }
 
-// printJSON writes a value as indented JSON.
-func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(v)
-}
-
-// sortStrings sorts a small slice in place.
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for k := i; k > 0 && s[k] < s[k-1]; k-- {
-			s[k], s[k-1] = s[k-1], s[k]
-		}
-	}
+// holdOpen waits for its input to end and then leaves.
+func holdOpen() error {
+	_, err := io.Copy(io.Discard, os.Stdin)
+	return err
 }

@@ -82,6 +82,35 @@ type Job struct {
 	Artifacts []Artifact `json:"artifacts,omitempty"`
 	// LogBytes is how many bytes of output the job wrote.
 	LogBytes int64 `json:"log_bytes"`
+	// Policy is the job's CPU cost and the controls the daemon may apply to its processes while it is over the CPU budget.
+	Policy JobPolicy `json:"policy"`
+	// CPUSeconds is how much CPU the job's process tree used across its last run, measured by the daemon.
+	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+}
+
+// AvgCPUs is how many CPUs the job's last run used per second of wall clock.
+// It is zero when the job has not run yet.
+func (j *Job) AvgCPUs() float64 {
+	if j.CPUSeconds <= 0 {
+		return 0
+	}
+	elapsed := j.Finished.Sub(j.Started)
+	if elapsed <= 0 {
+		return 0
+	}
+	return j.CPUSeconds / elapsed.Seconds()
+}
+
+// ExpectedCost is how many CPUs the job is expected to use: what it declared,
+// then what its last run measured, then the caller's fallback.
+func (j *Job) ExpectedCost(fallback float64) float64 {
+	if j.Policy.Cost > 0 {
+		return j.Policy.Cost
+	}
+	if avg := j.AvgCPUs(); avg > 0 {
+		return avg
+	}
+	return fallback
 }
 
 // Spec is the caller-supplied half of a job.
@@ -99,6 +128,8 @@ type Spec struct {
 	Draft bool `json:"draft"`
 	// Force skips the dedup lookup, so the job runs even when an identical one already did.
 	Force bool `json:"force"`
+	// Policy declares the job's CPU cost and the controls the daemon may apply to its processes while it runs.
+	Policy JobPolicy `json:"policy"`
 }
 
 var (

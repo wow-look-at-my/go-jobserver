@@ -28,7 +28,10 @@ type fakeRunner struct {
 	entered  chan string
 }
 
-func (f *fakeRunner) Run(ctx context.Context, j *Job, out io.Writer) (int, error) {
+func (f *fakeRunner) Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error) {
+	if started != nil {
+		started(os.Getpid())
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, j.ID)
 	f.commands = append(f.commands, j.Command[0])

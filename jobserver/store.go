@@ -205,6 +205,14 @@ func (s *Store) apply(r record) {
 		if j, ok := s.jobs[r.id]; ok {
 			j.Deps = r.replaceDeps
 		}
+	case recPolicy:
+		if j, ok := s.jobs[r.id]; ok {
+			j.Policy = r.policy
+		}
+	case recCPU:
+		if j, ok := s.jobs[r.id]; ok {
+			j.CPUSeconds = r.cpuSeconds
+		}
 	}
 }
 
@@ -347,6 +355,7 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 		Force:   spec.Force,
 		State:   state,
 		Created: time.Now(),
+		Policy:  spec.Policy.normalize(),
 	}
 	if err := s.commit(record{
 		kind: recCreate, id: j.ID, name: j.Name, command: j.Command, deps: j.Deps,
@@ -354,6 +363,11 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 		force: j.Force, created: j.Created.UnixNano(), state: j.State,
 	}); err != nil {
 		return nil, err
+	}
+	if !j.Policy.Zero() {
+		if err := s.commit(record{kind: recPolicy, id: j.ID, policy: j.Policy}); err != nil {
+			return nil, err
+		}
 	}
 	s.jobs[j.ID] = j
 	s.order = append(s.order, j.ID)
@@ -512,6 +526,34 @@ func (s *Store) SetIdentity(id, identity, cacheOf string) error {
 	return s.commit(record{kind: recIdentity, id: j.ID, identity: identity, cacheOf: cacheOf})
 }
 
+// SetPolicy replaces a job's CPU policy.
+func (s *Store) SetPolicy(id string, policy JobPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[CanonicalID(id)]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	policy = policy.normalize()
+	if policy.equal(j.Policy) {
+		return nil
+	}
+	j.Policy = policy
+	return s.commit(record{kind: recPolicy, id: j.ID, policy: policy})
+}
+
+// FinishCPU records how much CPU a job's process tree used across its run.
+func (s *Store) FinishCPU(id string, seconds float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[CanonicalID(id)]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	j.CPUSeconds = seconds
+	return s.commit(record{kind: recCPU, id: j.ID, cpuSeconds: seconds})
+}
+
 // Finish records the end of an attempt.
 func (s *Store) Finish(id string, st State, exitCode int, msg string, artifacts []Artifact, logBytes int64) error {
 	s.mu.Lock()
@@ -623,6 +665,7 @@ func (j *Job) clone() *Job {
 	c.Outputs = append([]string(nil), j.Outputs...)
 	c.Env = append([]string(nil), j.Env...)
 	c.Artifacts = append([]Artifact(nil), j.Artifacts...)
+	c.Policy = j.Policy.clone()
 	return &c
 }
 

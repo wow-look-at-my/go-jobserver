@@ -24,7 +24,7 @@ func TestExecRunnerKillsAJobsWholeProcessGroup(t *testing.T) {
 		_, err := ExecRunner{}.Run(ctx, &Job{
 			Command: []string{"sh", "-c", "mkfifo -m 600 hold; cat hold & cat hold & wait"},
 			Dir:     dir,
-		}, &bytes.Buffer{})
+		}, &bytes.Buffer{}, nil)
 		done <- err
 	}()
 	require.Eventually(t, func() bool {

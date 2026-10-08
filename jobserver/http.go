@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,6 +27,8 @@ var pages = template.Must(template.New("dashboard.html").Funcs(template.FuncMap{
 	"dur":     shortDuration,
 	"elapsed": elapsed,
 	"args":    strings.Join,
+	"pct":     func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
+	"secs":    func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) + " s" },
 }).ParseFS(dashboardFiles, "dashboard.html"))
 
 // Mux returns the HTTP routes the dashboard and the JSON API answer on.
@@ -172,6 +175,7 @@ func (s *Server) pageJob(w http.ResponseWriter, r *http.Request) {
 	data.Job = j
 	data.Output = string(out)
 	data.Truncated = len(out) >= pageLogLimit
+	data.Mechanisms = enabledMechanisms(j.Policy)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := pages.ExecuteTemplate(w, "dashboard.html", data); err != nil {
 		s.cfg.Logf("go-jobserver: job page: %v", err)
@@ -183,13 +187,34 @@ const pageLogLimit = 256 << 10
 
 // pageData is what the dashboard template renders.
 type pageData struct {
-	Stats     Stats
-	Jobs      []*Job
-	Job       *Job
-	Output    string
-	Truncated bool
-	Graph     []GraphRow
-	Now       time.Time
+	Stats      Stats
+	Jobs       []*Job
+	Job        *Job
+	Output     string
+	Truncated  bool
+	Graph      []GraphRow
+	Now        time.Time
+	Mechanisms string
+}
+
+// enabledMechanisms names the controls a job turns on.
+func enabledMechanisms(p JobPolicy) string {
+	var parts []string
+	for _, m := range p.Enabled() {
+		label := string(m)
+		switch m {
+		case MechPriority:
+			label = fmt.Sprintf("%s nice %d", m, p.Priority.Nice)
+		case MechAffinity:
+			cpus := joinInts(p.Affinity.CPUs)
+			if cpus == "" {
+				cpus = "last"
+			}
+			label = fmt.Sprintf("%s cpus %s", m, cpus)
+		}
+		parts = append(parts, label)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // GraphRow is one job's place in the dependency order.

@@ -48,6 +48,8 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
   <span class="meta">pid {{.Stats.PID}}</span>
   <span class="meta">up {{.Stats.Uptime}}</span>
   <span class="meta">{{.Stats.Running}} running / {{.Stats.Total}} jobs</span>
+  <span class="meta">cpu {{pct .Stats.CPU.Measured}}/{{pct .Stats.CPU.Budget}} of {{.Stats.CPU.CPUs}} (host {{pct .Stats.CPU.HostBusy}})</span>
+  {{if .Stats.CPU.OverBudget}}<span class="badge paused">over budget</span>{{end}}
   {{if .Stats.Paused}}<span class="badge paused">paused</span>{{else}}<span class="badge live">scheduling</span>{{end}}
   <span style="flex:1"></span>
   <button onclick="act('pause')">Pause</button>
@@ -75,6 +77,27 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
 </table>
 {{- else}}
 <p class="empty">No jobs yet. Enqueue one with <code>go-jobserver queue -- sh -c 'echo hi'</code>.</p>
+{{- end}}
+{{- if .Stats.CPU.Note}}
+<p class="empty">cpu: {{.Stats.CPU.Note}}</p>
+{{- end}}
+{{- if .Stats.Controls}}
+<h2 class="meta">controls in effect</h2>
+<table>
+  <thead><tr><th>job</th><th>mechanism</th><th>pid</th><th>process</th><th>outcome</th><th>detail</th></tr></thead>
+  <tbody>
+  {{- range .Stats.Controls}}
+    <tr>
+      <td><a href="/job/{{.Job}}">{{.Job}}</a></td>
+      <td>{{.Mechanism}}</td>
+      <td>{{.PID}}</td>
+      <td class="deps">{{.Name}}</td>
+      <td>{{.Outcome}}</td>
+      <td class="deps">{{.Detail}}</td>
+    </tr>
+  {{- end}}
+  </tbody>
+</table>
 {{- end}}
 <script>
 function act(op) {
@@ -118,6 +141,9 @@ dd { margin: 0; }
   <dt>exit</dt><dd>{{.Job.ExitCode}}</dd>
   {{- if .Job.Error}}<dt>error</dt><dd>{{.Job.Error}}</dd>{{end}}
   <dt>log</dt><dd>{{.Job.LogBytes}} bytes</dd>
+  {{- if .Job.Policy.Cost}}<dt>cpu cost</dt><dd>{{pct .Job.Policy.Cost}}</dd>{{end}}
+  {{- if .Job.CPUSeconds}}<dt>cpu used</dt><dd>{{secs .Job.CPUSeconds}}</dd>{{end}}
+  {{- if .Mechanisms}}<dt>controls</dt><dd>{{.Mechanisms}}</dd>{{end}}
 </dl>
 {{- if .Job.Artifacts}}
 <table>

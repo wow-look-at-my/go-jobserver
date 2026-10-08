@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -13,6 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wow-look-at-my/go-jobserver/jobserver"
 )
+
+// TestMain lets this test binary stand in for the daemon as the process the
+// suspend probe runs, which starts os.Executable() with -hold.
+func TestMain(m *testing.M) {
+	for _, arg := range os.Args[1:] {
+		if arg == "-hold" {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			os.Exit(0)
+		}
+	}
+	os.Exit(m.Run())
+}
 
 // shortDir is a scratch directory with a path short enough to hold a socket.
 func shortDir(t *testing.T) string {
@@ -352,4 +366,113 @@ func TestCLIQueueWithInputsAndOutputs(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join(work, "made.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "1\n", string(body))
+}
+
+func TestCLICarriesAJobPolicyAndReplacesIt(t *testing.T) {
+	dir := shortDir(t)
+	startDaemon(t, dir)
+	out, err := capture(t, func() error {
+		return run([]string{
+			"-dir", dir, "queue", "-draft",
+			"-cpu", "2.5",
+			"-priority", "-nice", "5",
+			"-freeze", "-exempt", "1234,sleep",
+			"-affinity", "0,1",
+			"--", "sh", "-c", "true",
+		})
+	})
+	require.NoError(t, err)
+	id := strings.Split(strings.TrimSpace(out), "\n")[0]
+
+	raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	require.NoError(t, err)
+	var job jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(raw), &job))
+	assert.InDelta(t, 2.5, job.Policy.Cost, 1e-9)
+	assert.Equal(t, []jobserver.Mechanism{jobserver.MechAffinity, jobserver.MechPriority, jobserver.MechFreeze},
+		job.Policy.Enabled())
+	assert.Equal(t, []int{0, 1}, job.Policy.Affinity.CPUs)
+	assert.Equal(t, 5, job.Policy.Priority.Nice)
+	assert.Equal(t, []int{1234}, job.Policy.Freeze.Exempt.PIDs)
+	assert.Equal(t, []string{"sleep"}, job.Policy.Freeze.Exempt.Names)
+
+	replaced, err := capture(t, func() error {
+		return run([]string{"-dir", dir, "policy", "-cpu", "1", "-freeze-exempt", "99", id})
+	})
+	require.NoError(t, err)
+	assert.Contains(t, replaced, "freeze")
+	assert.Contains(t, replaced, "exempt 99")
+
+	raw, err = capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	require.NoError(t, err)
+	var after jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(raw), &after))
+	assert.InDelta(t, 1, after.Policy.Cost, 1e-9)
+	assert.Empty(t, after.Policy.Enabled(), "the replacement turns every mechanism off")
+	assert.Equal(t, []int{99}, after.Policy.Freeze.Exempt.PIDs)
+}
+
+func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
+	dir := shortDir(t)
+	// The signal that stops the daemon travels through this process.
+	quiet := make(chan os.Signal, 4)
+	signal.Notify(quiet, os.Interrupt)
+	defer signal.Stop(quiet)
+
+	daemon := make(chan error, 1)
+	go func() { daemon <- run([]string{"-dir", dir, "-no-http", "-ipc=false", "run"}) }()
+
+	sock := filepath.Join(dir, "go-jobserver.sock")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, 30*time.Second, 10*time.Millisecond, "the daemon must publish its socket")
+
+	idOut, err := capture(t, func() error {
+		return run([]string{"-dir", dir, "queue", "--", "sh", "-c", "while :; do :; done"})
+	})
+	require.NoError(t, err)
+	id := strings.TrimSpace(idOut)
+
+	// The shipped daemon reports the host's use, and the use of the job it is running, while that job burns.
+	var stats jobserver.Stats
+	require.Eventually(t, func() bool {
+		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "stats", "-json"}) })
+		if err != nil {
+			return false
+		}
+		return json.Unmarshal([]byte(raw), &stats) == nil && stats.CPU.Jobs[id] > 0
+	}, 30*time.Second, 50*time.Millisecond, "stats must report the CPU the job uses")
+	assert.GreaterOrEqual(t, stats.CPU.CPUs, 1)
+	assert.Greater(t, stats.CPU.Budget, 0.0)
+	assert.GreaterOrEqual(t, stats.CPU.HostBusy, 0.0)
+
+	_, err = capture(t, func() error { return run([]string{"-dir", dir, "interrupt", id}) })
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+		if err != nil {
+			return false
+		}
+		var j jobserver.Job
+		return json.Unmarshal([]byte(raw), &j) == nil && j.State.Terminal()
+	}, 30*time.Second, 50*time.Millisecond, "the interrupted job must reach a terminal state")
+
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	select {
+	case err := <-daemon:
+		require.NoError(t, err, "the daemon must shut down cleanly")
+	case <-time.After(30 * time.Second):
+		require.FailNow(t, "the daemon never returned")
+	}
+}
+
+func TestCLIStatsPrintsTheCPUReport(t *testing.T) {
+	dir := shortDir(t)
+	startDaemon(t, dir)
+	out, err := capture(t, func() error { return run([]string{"-dir", dir, "stats"}) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "budget")
+	assert.Contains(t, out, "measured")
+	assert.Contains(t, out, "host")
 }
