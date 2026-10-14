@@ -29,9 +29,7 @@ type LeaseRequest struct {
 
 // Limits bound what one lease may use, whatever the rest of the host does.
 type Limits struct {
-	// MaxCPUs is how many CPUs the lease may use. A target that can be capped
-	// is capped there. A target that cannot be capped is revoked once it stays
-	// above the limit for Grace.
+	// MaxCPUs is how many CPUs the lease may use. A target that can be capped is capped there.
 	MaxCPUs float64 `json:"max_cpus,omitempty"`
 	// MaxCPUSeconds is how much CPU time the lease may use in all. The lease is revoked past it.
 	MaxCPUSeconds float64 `json:"max_cpu_seconds,omitempty"`
@@ -65,7 +63,7 @@ type QueueState struct {
 	Kind string `json:"kind"`
 	// Key is the group name for WaitGroup, and the kind otherwise.
 	Key string `json:"key"`
-	// Holders are the IDs of the leases holding what this one waits for.
+	// Holders are the IDs of the leases holding what this waits for.
 	Holders []string `json:"holders,omitempty"`
 	// Position is the lease's place among the leases waiting on the same thing, from one.
 	Position int `json:"position"`
@@ -86,11 +84,9 @@ func (q QueueState) equal(o QueueState) bool {
 }
 
 // An Actuator measures and controls work the governor cannot see as a process
-// tree, such as a container on another daemon. Every call is made from the
-// governor's goroutine, outside the scheduler's locks.
+// tree, such as a container on another daemon.
 type Actuator interface {
-	// Usage reports how many CPUs the work used since the previous call. ok
-	// is false when there is no reading yet.
+	// Usage reports how many CPUs the work used since the call. ok is false when there is no reading yet.
 	Usage() (cpus float64, ok bool)
 	// Apply turns on one mechanism of the policy.
 	Apply(m Mechanism, policy JobPolicy) (Outcome, string)
@@ -166,8 +162,7 @@ func (l *Lease) AttachActuator(a Actuator) {
 	l.actuator = a
 }
 
-// Revoked is closed when the scheduler decides the work must end. The holder
-// stops the work and then releases the lease.
+// Revoked is closed when the scheduler decides the work must end.
 func (l *Lease) Revoked() <-chan struct{} { return l.revoked }
 
 // RevokeReason says why the lease was revoked. It is empty until then.

@@ -14,8 +14,7 @@ import (
 // OpenBatchBoost is added to the priority of a queued lease whose batch has started.
 const OpenBatchBoost = 1_000_000
 
-// BatchGrace is how long a batch stays open after its last member ends, so
-// members that arrive later still go first.
+// BatchGrace is how long a batch stays open after its last member ends, so members that arrive later still go first.
 const BatchGrace = 10 * time.Minute
 
 type batchState struct {
@@ -27,7 +26,7 @@ type batchState struct {
 // tells each lease still queued where it stands. Caller holds s.mu.
 //
 // A lease fits when its group has a free slot, and, unless it is GroupOnly,
-// when the count cap has room and its cost fits the CPU budget. The CPU budget
+// when the count cap has room. Its cost fits the CPU budget. The CPU budget
 // never holds back the only lease: work larger than the whole budget still
 // runs on an otherwise idle scheduler.
 func (s *Scheduler) planLocked() {

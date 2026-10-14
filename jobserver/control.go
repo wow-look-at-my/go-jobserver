@@ -104,7 +104,6 @@ func revertMechanism(c Control, cpus int) controlResult {
 // cores.
 func applyAffinity(pid int, cpus []int) controlResult {
 	if hostOS() == "windows" {
-		// The syscall layer serves this over SetProcessAffinityMask once the toolchain's runtime carries the call.
 		prior, had := affinityPrior(pid)
 		if err := setAffinitySyscall(pid, cpus); err == nil {
 			return controlResult{outcome: OutcomeApplied, detail: "cpus " + joinInts(cpus),
@@ -166,7 +165,6 @@ func controlCall(call func() error, applied Outcome, detail string, prior []int,
 // spelling the revert has to write.
 func applyNice(pid, nice int, host hostFacts) controlResult {
 	if hostOS() == "windows" {
-		// The syscall layer serves this over SetPriorityClass once the toolchain's runtime carries the call.
 		var prior []int
 		if was, err := processNice(pid); err == nil {
 			if value, ok := niceToWrite(host.NiceSpelling, was); ok {

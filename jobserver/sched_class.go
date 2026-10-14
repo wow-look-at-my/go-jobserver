@@ -120,8 +120,9 @@ func (b *classBook) listLocked() []ClassStats {
 	return out
 }
 
-// save writes the history through a temporary file, so a crash leaves the old file or the new one.
-// Saves are serialized and each one writes the newest history, so an older one never lands last.
+// save writes the history through a temporary file, so a crash leaves the
+// file or the new one. Saves are serialized and each writes the newest
+// history, so an older one never lands last.
 func (b *classBook) save() {
 	if b.path == "" {
 		return

@@ -161,8 +161,7 @@ func (s *Server) Config() Config { return s.cfg }
 // Store returns the server's store.
 func (s *Server) Store() *Store { return s.store }
 
-// Scheduler returns the scheduler that admits the server's jobs. Work another
-// program runs itself goes through the same one.
+// Scheduler returns the scheduler that admits the server's jobs.
 func (s *Server) Scheduler() *Scheduler { return s.sched }
 
 // Start runs the scheduler and brings up every configured transport. It
@@ -353,8 +352,7 @@ func (s *Server) tick() {
 }
 
 // leaseFor is what the scheduler admits a job as. The job's own cost comes
-// first: what it declared, then what its last attempt measured. A job with
-// neither is priced by its name's history, then by the default.
+// first: what it declared, then what its last attempt measured.
 func (s *Server) leaseFor(j *Job) LeaseRequest {
 	policy := j.Policy.clone()
 	policy.Cost = j.ExpectedCost(0)

@@ -1,6 +1,6 @@
 # go-jobserver
 
-A dependency-ordered job queue that runs as a daemon. Jobs have unique IDs, declare their inputs and outputs, wait for the jobs they depend on, and are skipped when identical work has. Already been done. Every state change is journaled, so a restart resumes exactly where the daemon stopped.
+A dependency-ordered job queue that runs as a daemon. Jobs have unique IDs, declare their inputs and outputs, wait for the jobs they depend on, and are skipped when same work has. Already been done. Every state change is journaled, so a start resumes exactly where the daemon stopped.
 
 ```
 go-jobserver queue --output app -- make app
@@ -49,7 +49,7 @@ A job created with `-draft` waits until `go-jobserver activate <id>`. A dependen
 
 ### Dependency graph
 
-Dependencies are checked when a job is created and whenever one is added. A cycle is refused with `dependency cycle`. The scheduler runs a job once every dependency is `completed` or `cached`.
+Dependencies are checked when a job is created and when one is added. A cycle is refused with `dependency cycle`. The scheduler runs a job once every dependency is `completed` or `cached`.
 
 ```sh
 go-jobserver queue -draft -name extract -- untar.sh
@@ -129,9 +129,9 @@ On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao p
 
 ### Before a job starts
 
-Each job declares what it expects to cost, and the daemon keeps a running total of what the jobs it started have claimed. A job that will push the total over `-budget` (one per CPU by default) stays `active` and starts when enough of the running jobs have finished. A job larger than the whole budget still runs on an otherwise idle daemon, so nothing is starved forever.
+Each job declares what it expects to cost, and the daemon keeps a running total of what the jobs it started claimed. A job that will push the total over `-budget` (one per CPU by default) stays `active` and starts when enough of the running jobs finished. A job larger than the whole budget still runs on an otherwise idle daemon, so nothing is starved forever.
 
-The cost a job declares is used first. A job that declares none is priced at what its last run measured, then at what earlier jobs of the same name measured, and a job with neither is priced at `-cost` (one by default). The per-name history is kept in `classes.json` in the server directory.
+The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured, and default) prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
 
 ```sh
 go-jobserver queue -cpu 4 -- make -j4
@@ -140,7 +140,7 @@ go-jobserver -budget 6 run
 
 ### While a job runs
 
-When the running jobs together exceed the budget, the daemon applies the controls each job enables to the jobs that use more than they were admitted at. When none does, it applies them to every running job. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
+The daemon applies the controls each job enables to the jobs that use more than they were admitted at. This holds when the running jobs together exceed the budget. When none does, it applies them to every running job. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
@@ -148,7 +148,9 @@ When the running jobs together exceed the budget, the daemon applies the control
 | `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | the host's shell |
 | `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | asked first |
 
-`affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` asks the host before it stops anything. A host whose stop signal ends a process reports success for that signal, so the two cannot be told apart from the answer alone. The daemon finds out on a process of its own. The first job that enables `freeze` makes it run one, stop it, resume it, and watch whether it lives through that. When the answer is that the stop signal ends a process, freeze reports `not-applicable` with that reason and the job is left running. Every attempt is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
+`affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` asks the host before it stops anything. A host whose stop signal ends a process reports success for that signal, so the two cannot be told apart from the answer alone.
+
+The daemon finds out on a process of its own. The first job that enables `freeze` makes it run one, stop it, resume it, and watch whether it lives through that. When the answer is that the stop signal ends a process, freeze reports `not-applicable` with that reason and the job is left running. Every try is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
 
 macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy. The same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. macOS reports that policy for the process that asks for it. The daemon cannot read back the policy a job's process was under, and taking the mechanism back clears it. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
 
@@ -171,11 +173,11 @@ One cosmo binary carries the Linux CPU-mask calls to every host it runs on. The 
 
 A Windows host has no syscall this binary can reach for a process's CPU set or its priority class. `affinity` and `priority` there go through the host's own shell instead - the same shape as a unix supervisor that reaches for `renice`. Both read the state the process is in before they change it. A revert puts that back, and a host that refuses the request answers in its own words, which travel with the outcome. A host with no PowerShell at all reports `not-applicable`, which is the same answer any host gives for a facility it does not have.
 
-Windows `freeze` is the one that has to wait. The signal this binary can send there ends a process instead of stopping it. The probe above detects exactly that, so freeze reports `not-applicable` with that reason and the job keeps running. A toolchain whose NT syscall layer serves that signal will be found by the same probe, and freeze will start working with no change here.
+Windows `freeze` is the one that has to wait. The signal this binary can send there ends a process instead of stopping it. The probe above detects exactly that, so freeze reports `not-applicable` with that reason and the job keeps running. The same probe will find a toolchain whose NT syscall layer serves that signal, and freeze will start working with no change here.
 
 ### Picking processes
 
-Every mechanism can be limited by process. A selector is a comma-separated list of process IDs and process names.
+Process can limit every mechanism. A selector is a comma-separated list of process IDs and process names.
 
 ```sh
 # freeze everything but this job's ffmpeg helper
@@ -201,7 +203,7 @@ Per-mechanism selectors are also part of the job spec, so the JSON transports ca
 }
 ```
 
-`go-jobserver policy -freeze -exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `-no-cpu` turns sampling off entirely.
+`go-jobserver policy -freeze -exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `-no-cpu` turns sampling off fully.
 
 ## Scheduling work another program runs
 
@@ -230,7 +232,9 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room and its cost fits the CPU budget. Queued leases go in priority order, then arrival order. Once one member of a batch holds a slot, the rest of that batch go ahead of everything else for `BatchGrace`. A lease's cost is what it declares, then its class's measured history, then the default. Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its position and a reason.
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases go in priority order, then arrival order. Once one member of a batch holds a slot, the rest of that batch go ahead of everything else for `BatchGrace`. A lease's cost is what it declares, then its class's measured history, then the default.
+
+Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its position and a reason.
 
 **Governance.** Every sample, the governor measures each holder through its process tree or its `Actuator`. It then acts on the readings:
 
@@ -240,9 +244,9 @@ case <-done:
 | a lease uses more than `Limits.MaxCPUs` | `Actuator.Cap` at the limit, and revoked after `Limits.Grace` when it cannot be capped |
 | a lease passes `Limits.MaxCPUSeconds` | revoked |
 
-Release reverts every control, and records the lease's measured use in its class's history, so the next lease of that class is admitted at what this one used.
+Release reverts every control, and records the lease's measured use in its class's history. The next lease of that class is admitted at what this used.
 
-An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used, and `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
+An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used. `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
 
 ## Durability
 

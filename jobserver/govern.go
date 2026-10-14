@@ -26,17 +26,13 @@ type CPUReport struct {
 	Note string `json:"note,omitempty"`
 }
 
-// offenderSlack is how far above its cost a lease may run before it counts as
-// the cause of an oversubscription.
+// offenderSlack is how far above its cost a lease may run before it counts as the cause of an oversubscription.
 const offenderSlack = 0.05
 
 // MechCap is the control a Limits.MaxCPUs bound applies to an actuator.
 const MechCap Mechanism = "cap"
 
 // A governor samples what the holders use. It enforces each lease's limits.
-// When the holders together exceed the budget, it applies the controls each
-// lease's policy enables, to the leases that use more than they were admitted
-// at, or to every lease when none does.
 type governor struct {
 	sched   *Scheduler
 	mu      sync.Mutex

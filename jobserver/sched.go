@@ -158,9 +158,7 @@ func (s *Scheduler) MaxConcurrent() int {
 	return s.maxRuns
 }
 
-// SetMaxConcurrent moves the count cap. Zero means no cap. Holders above a
-// lowered cap finish normally, and nothing new starts until the count is
-// under it.
+// SetMaxConcurrent moves the count cap. Zero means no cap.
 func (s *Scheduler) SetMaxConcurrent(n int) {
 	if n < 0 {
 		n = 0
