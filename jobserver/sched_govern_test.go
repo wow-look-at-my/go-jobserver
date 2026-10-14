@@ -112,9 +112,10 @@ func TestGovernorThrottlesEveryLeaseWhenNoneIsAboveItsCost(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 1})
 	var acts []*fakeActuator
 	for _, id := range []string{"a", "b"} {
-		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}}, nil)
+		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}}, nil)
 		require.NoError(t, err)
-		a := newFakeActuator(0.8)
+		// Each is within its cost, and together they are over the budget.
+		a := newFakeActuator(0.52)
 		l.AttachActuator(a)
 		acts = append(acts, a)
 	}

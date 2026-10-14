@@ -12,7 +12,9 @@ type LeaseInfo struct {
 	Group    string    `json:"group,omitempty"`
 	Priority int       `json:"priority,omitempty"`
 	Batch    string    `json:"batch,omitempty"`
-	Since    time.Time `json:"since"`
+	// GroupOnly marks a lease that takes only its group slot.
+	GroupOnly bool      `json:"group_only,omitempty"`
+	Since     time.Time `json:"since"`
 	// Cost is the CPUs the lease is admitted, or would be admitted, at.
 	Cost float64 `json:"cost"`
 	// CPUs is what the governor last measured the lease using.
@@ -91,7 +93,7 @@ func (l *Lease) info(wait *QueueState) LeaseInfo {
 	}
 	return LeaseInfo{
 		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: l.req.Priority,
-		Batch: l.req.Batch, Since: since, Cost: l.cost, CPUs: l.cpus,
+		Batch: l.req.Batch, GroupOnly: l.req.GroupOnly, Since: since, Cost: l.cost, CPUs: l.cpus,
 		CPUSeconds: l.cpuSeconds, Revoked: l.reason, Wait: wait,
 	}
 }
