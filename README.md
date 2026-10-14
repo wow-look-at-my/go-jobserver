@@ -131,7 +131,7 @@ On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao p
 
 Each job declares what it expects to cost, and the daemon keeps a running total of what the jobs it started have claimed. A job that will push the total over `-budget` (one per CPU by default) stays `active` and starts when enough of the running jobs have finished. A job larger than the whole budget still runs on an otherwise idle daemon, so nothing is starved forever.
 
-The cost a job declares is used first. A job that declares none is priced at what its last run measured, and a job that has never run is priced at `-cost` (one by default).
+The cost a job declares is used first. A job that declares none is priced at what its last run measured, then at what earlier jobs of the same name measured, and a job with neither is priced at `-cost` (one by default). The per-name history is kept in `classes.json` in the server directory.
 
 ```sh
 go-jobserver queue -cpu 4 -- make -j4
@@ -140,7 +140,7 @@ go-jobserver -budget 6 run
 
 ### While a job runs
 
-When the running jobs together exceed the budget, the daemon applies the controls each job enables to that job's processes. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
+When the running jobs together exceed the budget, the daemon applies the controls each job enables to the jobs that use more than they were admitted at. When none does, it applies them to every running job. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
@@ -203,12 +203,54 @@ Per-mechanism selectors are also part of the job spec, so the JSON transports ca
 
 `go-jobserver policy -freeze -exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `-no-cpu` turns sampling off entirely.
 
+## Scheduling work another program runs
+
+The daemon's admission and CPU governance live in `jobserver.Scheduler`, and the daemon's own jobs are only one client of it. A program that runs its own work, such as containers, takes a **lease** for each piece of work and hands the scheduler what to measure. [webhook-runner](https://github.com/wow-look-at-my/webhook-runner) admits every hook run this way.
+
+```go
+sched := jobserver.NewScheduler(jobserver.SchedulerConfig{
+	MaxConcurrent: 64,                // the count cap
+	CPUBudget:     8,                 // CPUs the holders may use together
+	DefaultCost:   0.25,              // a lease with no cost and no history
+	HistoryPath:   "classes.json",    // per-class measured cost
+})
+sched.Start()
+sched.SetGroups(map[string]int{"deploy": 1})
+
+lease, err := sched.Acquire(ctx, jobserver.LeaseRequest{
+	ID: runID, Class: "build", Group: "deploy", Priority: 5, Batch: "wf-123",
+	Policy: jobserver.JobPolicy{Priority: jobserver.PrioritySettings{Enabled: true, Nice: 10}},
+	Limits: jobserver.Limits{MaxCPUs: 4, MaxCPUSeconds: 3600},
+}, func(q jobserver.QueueState) { /* where the lease waits, and why */ })
+defer lease.Release()
+lease.AttachProcess(pid)       // or lease.AttachActuator(a), for work that is not a process tree here
+select {
+case <-lease.Revoked():        // the scheduler ended the work: lease.RevokeReason() says why
+case <-done:
+}
+```
+
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room and its cost fits the CPU budget. Queued leases go in priority order, then arrival order. Once one member of a batch holds a slot, the rest of that batch go ahead of everything else for `BatchGrace`. A lease's cost is what it declares, then its class's measured history, then the default. Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its position and a reason.
+
+**Governance.** Every sample, the governor measures each holder through its process tree or its `Actuator`. It then acts on the readings:
+
+| condition | action |
+| --- | --- |
+| the holders exceed the budget | the policy's mechanisms on the leases above their admitted cost, or on all of them when none is |
+| a lease uses more than `Limits.MaxCPUs` | `Actuator.Cap` at the limit, and revoked after `Limits.Grace` when it cannot be capped |
+| a lease passes `Limits.MaxCPUSeconds` | revoked |
+
+Release reverts every control, and records the lease's measured use in its class's history, so the next lease of that class is admitted at what this one used.
+
+An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used, and `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
+
 ## Durability
 
 Everything lives under the server directory.
 
 ```
 journal.log          every state change, append-only
+classes.json         measured CPU cost per job name
 logs/<id>.log        one job's captured output
 go-jobserver.sock    the file socket
 spool/               jobs dropped in as files
@@ -264,8 +306,13 @@ go-toolchain
 | `jobserver/measure.go` | the process table, the process tree and CPU rates |
 | `jobserver/control.go` | the mechanisms, the host each is available on, and their outcomes |
 | `jobserver/affinity_linux.go` | the CPU mask, where the kernel has one |
-| `jobserver/govern.go` | the sampling loop and the response to oversubscription |
-| `jobserver/server.go` | the daemon: the scheduling loop, the CPU budget and lifecycle control |
+| `jobserver/sched.go` | the Scheduler: the count cap, groups, CPU budget, Acquire and TryAcquire |
+| `jobserver/sched_plan.go` | admission order: priority, open batches, arrival, and what each lease waits on |
+| `jobserver/sched_class.go` | the per-class cost history |
+| `jobserver/sched_status.go` | the Scheduler's status snapshot |
+| `jobserver/lease.go` | a lease, its limits and the Actuator interface |
+| `jobserver/govern.go` | the sampling loop, the limits and the response to oversubscription |
+| `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |
