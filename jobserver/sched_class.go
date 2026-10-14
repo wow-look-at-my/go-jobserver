@@ -21,7 +21,7 @@ type ClassStats struct {
 	// Revoked is how many of them the scheduler ended for exceeding a limit.
 	Revoked int `json:"revoked"`
 	// CPUSeconds is the CPU time every measured run used, together.
-	CPUSeconds float64 `json:"cpu_seconds"`
+	CPUSeconds float64   `json:"cpu_seconds"`
 	Last       time.Time `json:"last"`
 }
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/wow-look-at-my/go-containers/set"
