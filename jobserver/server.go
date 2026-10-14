@@ -79,7 +79,9 @@ type Server struct {
 	cfg    Config
 	store  *Store
 	runner Runner
-	gov    *governor
+	sched  *Scheduler
+	// gov is the scheduler's governor.
+	gov *governor
 
 	mu      sync.Mutex
 	running map[string]*runHandle
@@ -134,73 +136,33 @@ func New(cfg Config) (*Server, error) {
 		quit:    make(chan struct{}),
 		start:   time.Now(),
 	}
-	s.gov = newGovernor(s)
+	s.sched = NewScheduler(SchedulerConfig{
+		MaxConcurrent:  cfg.MaxConcurrent,
+		CPUBudget:      cfg.CPUBudget,
+		DefaultCost:    cfg.DefaultCost,
+		SampleInterval: cfg.SampleInterval,
+		DisableCPU:     cfg.DisableCPU,
+		HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
+		Logf:           cfg.Logf,
+	})
+	s.gov = s.sched.gov
 	return s, nil
 }
 
-// budget is how many CPUs the running jobs may use together.
-func (s *Server) budget() float64 {
-	if s.cfg.CPUBudget > 0 {
-		return s.cfg.CPUBudget
-	}
-	return float64(s.cfg.cpuCount())
-}
+// classHistoryName is the file the scheduler keeps its per-class cost history in.
+const classHistoryName = "classes.json"
 
 // cpuCount is how many logical CPUs the host has.
 func (c Config) cpuCount() int { return runtime.NumCPU() }
-
-// sampleCPUs is the CPU count the latest sample saw.
-func (s *Server) sampleCPUs() int {
-	s.gov.mu.Lock()
-	defer s.gov.mu.Unlock()
-	if s.gov.sample.CPUs > 0 {
-		return s.gov.sample.CPUs
-	}
-	return s.cfg.cpuCount()
-}
-
-// runningRoots maps each running job to the process at the head of its
-// process tree.
-func (s *Server) runningRoots() map[string]int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]int, len(s.running))
-	for id, h := range s.running {
-		if h.pid > 0 {
-			out[id] = h.pid
-		}
-	}
-	return out
-}
-
-// reserved is how many CPUs the running jobs have claimed between them.
-func (s *Server) reserved() float64 {
-	var total float64
-	for _, id := range s.runningIDs() {
-		if j, ok := s.store.Job(id); ok {
-			total += j.ExpectedCost(s.cfg.DefaultCost)
-		}
-	}
-	return total
-}
-
-// runningIDs lists the running jobs.
-func (s *Server) runningIDs() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.running))
-	for id := range s.running {
-		out = append(out, id)
-	}
-	sort.Strings(out)
-	return out
-}
 
 // Config returns the settings the server was built with.
 func (s *Server) Config() Config { return s.cfg }
 
 // Store returns the server's store.
 func (s *Server) Store() *Store { return s.store }
+
+// Scheduler returns the scheduler that admits the server's jobs.
+func (s *Server) Scheduler() *Scheduler { return s.sched }
 
 // Start runs the scheduler and brings up every configured transport. It
 // returns once each transport is listening.
@@ -209,10 +171,7 @@ func (s *Server) Start() error {
 	go s.loop()
 	s.wg.Add(1)
 	go s.syncLoop()
-	if !s.cfg.DisableCPU {
-		s.wg.Add(1)
-		go s.gov.loop()
-	}
+	s.sched.Start()
 	if s.cfg.SpoolDir != "" {
 		s.wg.Add(1)
 		go s.watchSpool()
@@ -241,6 +200,10 @@ type runHandle struct {
 	done   chan struct{}
 	// pid is the running job's process, once the runner has started it.
 	pid int
+	// lease is the job's admission. The scheduler revokes it to end the run.
+	lease *Lease
+	// revoked says why the scheduler ended the run.
+	revoked string
 }
 
 // An interruptTimeout bounds how long Interrupt waits for a run to stop.
@@ -267,7 +230,7 @@ func (s *Server) Close() error {
 	}
 	close(s.quit)
 	s.wg.Wait()
-	s.gov.releaseAll()
+	s.sched.Close()
 	var err error
 	for _, c := range closes {
 		if cerr := c.Close(); cerr == nil {
@@ -357,12 +320,7 @@ func (s *Server) tick() {
 	}
 	jobs = s.store.Jobs()
 	byID := Index(jobs)
-	budget := s.budget()
-	reserved := s.reserved()
 	for _, id := range Ready(jobs) {
-		if !s.capacity() {
-			break
-		}
 		j, ok := s.store.Job(id)
 		if !ok {
 			continue
@@ -376,30 +334,29 @@ func (s *Server) tick() {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
 			if !j.Force {
-				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" {
-					s.reuse(j, src, identity)
+				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" && s.reuse(j, src, identity) {
 					continue
 				}
 			}
 		}
-		// A job that would not fit beside the running ones keeps its place in the queue and starts later.
-		cost := j.ExpectedCost(s.cfg.DefaultCost)
-		if reserved > 0 && reserved+cost > budget {
+		// A job the scheduler cannot start now keeps its place in the queue and starts later.
+		l, granted, err := s.sched.TryAcquire(s.leaseFor(j))
+		if err != nil {
+			s.cfg.Logf("go-jobserver: admit %s: %v", id, err)
 			continue
 		}
-		reserved += cost
-		s.dispatch(j.ID)
+		if granted {
+			s.dispatch(j.ID, l)
+		}
 	}
 }
 
-// capacity reports whether another job may start.
-func (s *Server) capacity() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cfg.MaxConcurrent <= 0 {
-		return true
-	}
-	return len(s.running) < s.cfg.MaxConcurrent
+// leaseFor is what the scheduler admits a job as. The job's own cost comes
+// first: what it declared, then what its last attempt measured.
+func (s *Server) leaseFor(j *Job) LeaseRequest {
+	policy := j.Policy.clone()
+	policy.Cost = j.ExpectedCost(0)
+	return LeaseRequest{ID: j.ID, Class: j.Name, Policy: policy}
 }
 
 // identityOf computes a job's dedup identity, hashing its declared inputs.
@@ -409,12 +366,12 @@ func (s *Server) identityOf(j *Job, byID map[string]*Job) (string, error) {
 	return JobIdentity(&resolved, byID), nil
 }
 
-// reuse records that a job's work was already done by another.
-func (s *Server) reuse(j *Job, srcID, identity string) {
+// reuse records that a job's work was already done by another. It reports
+// false when that job is gone, so the job runs after all.
+func (s *Server) reuse(j *Job, srcID, identity string) bool {
 	src, ok := s.store.Job(srcID)
 	if !ok {
-		s.dispatch(j.ID)
-		return
+		return false
 	}
 	if err := s.store.SetIdentity(j.ID, identity, srcID); err != nil {
 		s.cfg.Logf("go-jobserver: cache %s: %v", j.ID, err)
@@ -423,23 +380,27 @@ func (s *Server) reuse(j *Job, srcID, identity string) {
 		s.cfg.Logf("go-jobserver: cache %s: %v", j.ID, err)
 	}
 	s.Wake()
+	return true
 }
 
-// dispatch starts one job's run in the background.
-func (s *Server) dispatch(id string) {
+// dispatch starts one job's run in the background under the lease the
+// scheduler granted it.
+func (s *Server) dispatch(id string, l *Lease) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		l.Release()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &runHandle{cancel: cancel, done: make(chan struct{})}
+	h := &runHandle{cancel: cancel, done: make(chan struct{}), lease: l}
 	s.running[id] = h
 	s.mu.Unlock()
 
 	j, ok := s.store.Job(id)
 	if !ok {
 		s.finishRun(id)
+		l.Release()
 		cancel()
 		close(h.done)
 		return
@@ -447,6 +408,7 @@ func (s *Server) dispatch(id string) {
 	if err := s.store.Start(id); err != nil {
 		s.cfg.Logf("go-jobserver: start %s: %v", id, err)
 		s.finishRun(id)
+		l.Release()
 		cancel()
 		close(h.done)
 		return
@@ -456,18 +418,43 @@ func (s *Server) dispatch(id string) {
 		defer s.wg.Done()
 		defer close(h.done)
 		defer func() {
-			// The governor gives the job's processes their normal scheduling back and records what its tree consumed.
-			s.gov.finish(id)
+			// runOnce settles the lease before it records the outcome. This covers a run that never got that far.
+			l.Release()
 			s.finishRun(id)
 			cancel()
 			s.Wake()
 		}()
-		s.runOnce(ctx, j, func(pid int) {
+		// A revoked lease ends the run, and the job records why.
+		go func() {
+			select {
+			case <-l.Revoked():
+				s.mu.Lock()
+				h.revoked = l.RevokeReason()
+				s.mu.Unlock()
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		s.runOnce(ctx, j, h, func(pid int) {
 			s.mu.Lock()
 			h.pid = pid
 			s.mu.Unlock()
+			l.AttachProcess(pid)
 		})
 	}()
+}
+
+// settle records what a job's process tree used and gives its slot back.
+// Release also gives the job's processes their normal scheduling back.
+func (s *Server) settle(id string, l *Lease) {
+	measured, used := l.Measured(), l.CPUSeconds()
+	l.Release()
+	if !measured {
+		return
+	}
+	if err := s.store.FinishCPU(id, used); err != nil {
+		s.cfg.Logf("go-jobserver: cpu %s: %v", id, err)
+	}
 }
 
 // finishRun forgets a job's cancellation handle.
@@ -478,7 +465,7 @@ func (s *Server) finishRun(id string) {
 }
 
 // runOnce runs a job and records everything that happened.
-func (s *Server) runOnce(ctx context.Context, j *Job, started func(pid int)) {
+func (s *Server) runOnce(ctx context.Context, j *Job, h *runHandle, started func(pid int)) {
 	w, err := s.store.LogWriter(j.ID)
 	if err != nil {
 		s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
@@ -490,8 +477,13 @@ func (s *Server) runOnce(ctx context.Context, j *Job, started func(pid int)) {
 	}
 	n := w.N()
 	// Record what the job's tree consumed, and give its processes their normal scheduling back, before the outcome is recorded.
-	s.gov.finish(j.ID)
+	s.settle(j.ID, h.lease)
+	s.mu.Lock()
+	revoked := h.revoked
+	s.mu.Unlock()
 	switch {
+	case revoked != "":
+		s.finish(j.ID, StateFailed, -1, "revoked by the scheduler: "+revoked, nil, n)
 	case ctx.Err() != nil:
 		s.finish(j.ID, StateCancelled, -1, "interrupted", nil, n)
 	case runErr != nil:
@@ -670,13 +662,16 @@ func (s *Server) Stats() Stats {
 	st.Running = len(s.running)
 	s.mu.Unlock()
 	if s.cfg.DisableCPU {
-		st.CPU = CPUReport{Budget: s.budget(), CPUs: s.cfg.cpuCount(), Note: "cpu sampling is off"}
+		st.CPU = CPUReport{Budget: s.sched.Budget(), CPUs: s.cfg.cpuCount(), Note: "cpu sampling is off"}
 		return st
 	}
 	st.CPU = s.gov.report()
 	st.Controls = s.gov.controls()
 	return st
 }
+
+// SchedulerStatus reports what holds a slot, what waits and why.
+func (s *Server) SchedulerStatus() SchedulerStatus { return s.sched.Status() }
 
 // Readings returns the daemon's latest CPU measurement.
 func (s *Server) Readings() CPUReport { return s.gov.report() }
@@ -692,6 +687,8 @@ func (s *Server) SetPolicy(id string, policy JobPolicy) (*Job, error) {
 	if err := s.store.SetPolicy(id, policy); err != nil {
 		return nil, err
 	}
+	// A running job's governor reads its lease, so the new policy has to reach that too.
+	s.sched.SetPolicy(CanonicalID(id), policy)
 	s.Wake()
 	return mustJob(s.store, id)
 }
