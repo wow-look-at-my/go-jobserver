@@ -249,3 +249,14 @@ func TestClassHistoryPricesTheNextRunAndSurvivesARestart(t *testing.T) {
 	assert.InDelta(t, 1, list[0].Peak, 1e-9)
 	assert.InDelta(t, 5, list[0].CPUSeconds, 1e-9)
 }
+
+func TestSchedulerKeepsAFreeSlotWhenTheContextIsAlreadyDone(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 50; i++ {
+		l, err := s.Acquire(ctx, LeaseRequest{}, nil)
+		require.NoError(t, err, "a slot granted at once must not be lost to a done context")
+		l.Release()
+	}
+}

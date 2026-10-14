@@ -215,6 +215,15 @@ func (s *Scheduler) Acquire(ctx context.Context, req LeaseRequest, onQueue func(
 	if err != nil {
 		return nil, err
 	}
+	// A lease the first plan granted is kept even when ctx is already done.
+	select {
+	case <-l.ready:
+		if l.err != nil {
+			return nil, l.err
+		}
+		return l, nil
+	default:
+	}
 	select {
 	case <-l.ready:
 		if l.err != nil {
