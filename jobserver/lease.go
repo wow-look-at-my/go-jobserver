@@ -15,8 +15,8 @@ type LeaseRequest struct {
 	Class string `json:"class,omitempty"`
 	// Group is a named group whose limit the lease counts against. Empty means none.
 	Group string `json:"group,omitempty"`
-	// Key orders admission. After Key come a started batch before an unstarted one, then
-	// arrival.
+	// Key orders admission row by row, lower first. A short key reads as zeros past its end.
+	// A started batch comes after Key, then arrival.
 	Key []int64 `json:"key,omitempty"`
 	// Batch ties leases together. Once one member starts, the rest go ahead of leases with the same Key.
 	Batch string `json:"batch,omitempty"`
