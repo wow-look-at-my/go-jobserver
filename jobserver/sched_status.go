@@ -10,8 +10,8 @@ type LeaseInfo struct {
 	ID       string `json:"id"`
 	Class    string `json:"class,omitempty"`
 	Group    string `json:"group,omitempty"`
-	Priority int    `json:"priority,omitempty"`
-	Batch    string `json:"batch,omitempty"`
+	Key      []int64 `json:"key,omitempty"`
+	Batch    string  `json:"batch,omitempty"`
 	// GroupOnly marks a lease that takes only its group slot.
 	GroupOnly bool      `json:"group_only,omitempty"`
 	Since     time.Time `json:"since"`
@@ -92,7 +92,7 @@ func (l *Lease) info(wait *QueueState) LeaseInfo {
 		since = l.started
 	}
 	return LeaseInfo{
-		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: l.req.Priority,
+		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Key: l.req.Key,
 		Batch: l.req.Batch, GroupOnly: l.req.GroupOnly, Since: since, Cost: l.cost, CPUs: l.cpus,
 		CPUSeconds: l.cpuSeconds, Revoked: l.reason, Wait: wait,
 	}

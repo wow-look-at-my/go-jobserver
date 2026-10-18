@@ -220,7 +220,7 @@ sched.Start()
 sched.SetGroups(map[string]int{"deploy": 1})
 
 lease, err := sched.Acquire(ctx, jobserver.LeaseRequest{
-	ID: runID, Class: "build", Group: "deploy", Priority: 5, Batch: "wf-123",
+	ID: runID, Class: "build", Group: "deploy", Key: []int64{-5}, Batch: "wf-123",
 	Policy: jobserver.JobPolicy{Priority: jobserver.PrioritySettings{Enabled: true, Nice: 10}},
 	Limits: jobserver.Limits{MaxCPUs: 4, MaxCPUSeconds: 3600},
 }, func(q jobserver.QueueState) { /* where the lease waits, and why */ })
@@ -232,7 +232,15 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases go in priority order, then arrival order. Once one member of a batch holds a slot, the rest of that batch go ahead of everything else for `BatchGrace`. A lease's cost is what it declares, then its class's measured history, then the default.
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases are sorted by a tuple, compared row by row, lower first:
+
+| Row | Value |
+| --- | --- |
+| `Key` | the caller's rows, in order. A missing row is 0. |
+| batch | 0 while a member of the lease's batch holds a slot, or did within `BatchGrace`. 1 otherwise. |
+| arrival | the order the lease was queued. |
+
+A lease that starts a new batch pulls the rest of that batch in right behind it. A lease's cost is what it declares, then its class's measured history, then the default.
 
 Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its position and a reason.
 
@@ -311,7 +319,7 @@ go-toolchain
 | `jobserver/control.go` | the mechanisms, the host each is available on, and their outcomes |
 | `jobserver/affinity_linux.go` | the CPU mask, where the kernel has one |
 | `jobserver/sched.go` | the Scheduler: the count cap, groups, CPU budget, Acquire and TryAcquire |
-| `jobserver/sched_plan.go` | admission order: priority, open batches, arrival, and what each lease waits on |
+| `jobserver/sched_plan.go` | admission order: the key tuple, open batches, arrival, and what each lease waits on |
 | `jobserver/sched_class.go` | the per-class cost history |
 | `jobserver/sched_status.go` | the Scheduler's status snapshot |
 | `jobserver/lease.go` | a lease, its limits and the Actuator interface |

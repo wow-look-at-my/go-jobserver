@@ -15,9 +15,10 @@ type LeaseRequest struct {
 	Class string `json:"class,omitempty"`
 	// Group is a named group whose limit the lease counts against. Empty means none.
 	Group string `json:"group,omitempty"`
-	// Priority orders admission: higher first. Equal priorities go in arrival order.
-	Priority int `json:"priority,omitempty"`
-	// Batch ties leases together. Once one member starts, the rest go ahead of everything else.
+	// Key orders admission. Keys compare row by row, lower first, and a missing row is 0.
+	// After Key come a started batch before an unstarted one, then arrival.
+	Key []int64 `json:"key,omitempty"`
+	// Batch ties leases together. Once one member starts, the rest go ahead of leases with the same Key.
 	Batch string `json:"batch,omitempty"`
 	// GroupOnly takes only the group slot. The count cap and the CPU budget never hold it back.
 	GroupOnly bool `json:"group_only,omitempty"`

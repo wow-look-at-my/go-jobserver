@@ -210,7 +210,7 @@ func TestSchedulerStatusShowsHoldersWaitersAndGroups(t *testing.T) {
 	s.SetGroups(map[string]int{"g": 3})
 	l, err := s.Acquire(context.Background(), LeaseRequest{ID: "a", Class: "hook-a", Group: "g"}, nil)
 	require.NoError(t, err)
-	acquireAsync(s, context.Background(), LeaseRequest{ID: "b", Group: "g", Priority: 2}, nil)
+	acquireAsync(s, context.Background(), LeaseRequest{ID: "b", Group: "g", Key: []int64{-2}}, nil)
 	waitQueued(t, s, 1)
 
 	st := s.Status()

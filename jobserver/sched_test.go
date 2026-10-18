@@ -54,7 +54,7 @@ func TestSchedulerCapQueuesAndAdmitsByPriorityThenArrival(t *testing.T) {
 	}
 	low := acquireAsync(s, context.Background(), LeaseRequest{ID: "low"}, note("low"))
 	waitQueued(t, s, 1)
-	high := acquireAsync(s, context.Background(), LeaseRequest{ID: "high", Priority: 5}, note("high"))
+	high := acquireAsync(s, context.Background(), LeaseRequest{ID: "high", Key: []int64{-5}}, note("high"))
 	waitQueued(t, s, 2)
 
 	mu.Lock()
@@ -175,7 +175,7 @@ func TestSchedulerOpenBatchGoesFirst(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
 	member, err := s.Acquire(context.Background(), LeaseRequest{ID: "w1", Batch: "workflow"}, nil)
 	require.NoError(t, err)
-	other := acquireAsync(s, context.Background(), LeaseRequest{ID: "other", Priority: 10}, nil)
+	other := acquireAsync(s, context.Background(), LeaseRequest{ID: "other", Key: []int64{0, 0}}, nil)
 	waitQueued(t, s, 1)
 	next := acquireAsync(s, context.Background(), LeaseRequest{ID: "w2", Batch: "workflow"}, nil)
 	waitQueued(t, s, 2)
@@ -184,9 +184,49 @@ func TestSchedulerOpenBatchGoesFirst(t *testing.T) {
 	member.Release()
 	got := <-next
 	require.NotNil(t, got)
-	assert.Equal(t, "w2", got.ID(), "a started batch outranks any priority")
+	assert.Equal(t, "w2", got.ID(), "a started batch goes ahead of an equal key that arrived first; a missing row is 0")
 	got.Release()
 	require.NotNil(t, <-other)
+}
+
+func TestSchedulerKeyComparesRowByRowBeforeTheBatch(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
+	member, err := s.Acquire(context.Background(), LeaseRequest{ID: "w1", Batch: "workflow"}, nil)
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var order []string
+	start := func(req LeaseRequest) <-chan *Lease {
+		out := make(chan *Lease, 1)
+		go func() {
+			l, _ := s.Acquire(context.Background(), req, nil)
+			mu.Lock()
+			order = append(order, req.ID)
+			mu.Unlock()
+			out <- l
+			l.Release()
+		}()
+		return out
+	}
+	queued := 0
+	var done []<-chan *Lease
+	for _, req := range []LeaseRequest{
+		{ID: "w2", Key: []int64{0, 5}, Batch: "workflow"},
+		{ID: "second-row", Key: []int64{0, -1}},
+		{ID: "first-row", Key: []int64{-1, 99}},
+		{ID: "late", Key: []int64{1}},
+		{ID: "w3", Key: []int64{0, 5}, Batch: "workflow"},
+		{ID: "plain", Key: []int64{0, 5}},
+	} {
+		done = append(done, start(req))
+		queued++
+		waitQueued(t, s, queued)
+	}
+	member.Release()
+	for _, ch := range done {
+		require.NotNil(t, <-ch)
+	}
+	assert.Equal(t, []string{"first-row", "second-row", "w2", "w3", "plain", "late"}, order,
+		"the first row decides alone, a tie goes to the next row, then a started batch, then arrival")
 }
 
 func TestSchedulerCancelledWaitLeavesTheQueue(t *testing.T) {
