@@ -92,6 +92,8 @@ type Server struct {
 	wg     sync.WaitGroup
 	start  time.Time
 	closes []io.Closer
+	// spoolStuck maps each unmovable spool file to its modification time. Only the spool watcher uses it.
+	spoolStuck map[string]int64
 }
 
 // New opens the server's directory and replays its journal.
@@ -135,6 +137,8 @@ func New(cfg Config) (*Server, error) {
 		wake:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		start:   time.Now(),
+
+		spoolStuck: make(map[string]int64),
 	}
 	s.sched = NewScheduler(SchedulerConfig{
 		MaxConcurrent:  cfg.MaxConcurrent,
@@ -288,17 +292,22 @@ func (s *Server) syncLoop() {
 		case <-s.quit:
 			return
 		case <-t.C:
-			s.mu.Lock()
-			ids := make([]string, 0, len(s.running))
-			for id := range s.running {
-				ids = append(ids, id)
-			}
-			s.mu.Unlock()
-			for _, id := range ids {
-				if w, err := s.store.LogWriter(id); err == nil {
-					w.Sync()
-				}
-			}
+			s.syncLogs()
+		}
+	}
+}
+
+// syncLogs flushes the log of every running job to stable storage.
+func (s *Server) syncLogs() {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.running))
+	for id := range s.running {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		if err := s.store.SyncLog(id); err != nil {
+			s.cfg.Logf("go-jobserver: sync log %s: %v", id, err)
 		}
 	}
 }

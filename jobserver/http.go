@@ -45,6 +45,23 @@ func (s *Server) Mux() *http.ServeMux {
 	return mux
 }
 
+// Timeouts on a client.
+var (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = time.Minute
+	httpIdleTimeout       = 2 * time.Minute
+)
+
+// newHTTPServer builds the server that both the TCP and the file socket run.
+func (s *Server) newHTTPServer() *http.Server {
+	return &http.Server{
+		Handler:           s.Mux(),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
 // startHTTP listens on the configured address.
 func (s *Server) startHTTP() error {
 	if s.cfg.HTTPAddr == "" {
@@ -54,7 +71,7 @@ func (s *Server) startHTTP() error {
 	if err != nil {
 		return fmt.Errorf("go-jobserver: http: %w", err)
 	}
-	srv := &http.Server{Handler: s.Mux(), ReadHeaderTimeout: 10 * time.Second}
+	srv := s.newHTTPServer()
 	s.addCloser(&httpServer{ln: ln, srv: srv})
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -80,7 +97,7 @@ func (s *Server) startUnix() error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: s.Mux(), ReadHeaderTimeout: 10 * time.Second}
+	srv := s.newHTTPServer()
 	s.addCloser(&unixServer{ln: ln, srv: srv, path: s.cfg.UnixSocket})
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -227,39 +244,13 @@ type GraphRow struct {
 // pageData assembles the dashboard's view of the world.
 func (s *Server) pageData(*http.Request) pageData {
 	jobs := SortedJobs(s.List())
-	byID := Index(jobs)
+	children := Children(jobs)
+	depths := depthsFrom(jobs, children)
 	rows := make([]GraphRow, 0, len(jobs))
 	for _, j := range jobs {
-		row := GraphRow{Job: j, Depth: depthOf(j, byID, 0)}
-		for _, other := range jobs {
-			for _, d := range other.Deps {
-				if d == j.ID {
-					row.Children = append(row.Children, other.ID)
-				}
-			}
-		}
-		rows = append(rows, row)
+		rows = append(rows, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
 	}
 	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now()}
-}
-
-// depthOf is how many dependency levels deep a job sits, bounded to stop a
-// malformed graph from recursing forever.
-func depthOf(j *Job, byID map[string]*Job, depth int) int {
-	if depth > 64 || len(j.Deps) == 0 {
-		return depth
-	}
-	best := depth
-	for _, d := range j.Deps {
-		dep, ok := byID[d]
-		if !ok {
-			continue
-		}
-		if got := depthOf(dep, byID, depth+1); got > best {
-			best = got
-		}
-	}
-	return best
 }
 
 // apiList answers GET /api/jobs.

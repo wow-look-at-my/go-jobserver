@@ -438,3 +438,34 @@ func TestServerHoldsManyJobsInTheScheduler(t *testing.T) {
 	waitState(t, srv, ids[len(ids)-1], StateCompleted)
 	assert.Equal(t, 25, runner.count())
 }
+
+func TestServerClosesEachJobsLogWhenItFinishes(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.Runner = &fakeRunner{out: "hi\n"} })
+	for i := 0; i < 5; i++ {
+		j, _, err := srv.Enqueue(Spec{Command: []string{"x", strconv.Itoa(i)}})
+		require.NoError(t, err)
+		waitState(t, srv, j.ID, StateCompleted)
+	}
+
+	st := srv.Store()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	assert.Empty(t, st.logs, "finished jobs left their logs open")
+}
+
+func TestServerSyncPassKeepsAFinishedJobsLogClosed(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.Runner = &fakeRunner{} })
+	// The job finished after the sync pass listed the running jobs.
+	srv.mu.Lock()
+	srv.running["j-done"] = &runHandle{cancel: func() {}}
+	srv.mu.Unlock()
+	t.Cleanup(func() { srv.finishRun("j-done") })
+
+	srv.syncLogs()
+
+	st := srv.Store()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	assert.Empty(t, st.logs, "the sync pass opened a log")
+	assert.NoFileExists(t, st.LogPath("j-done"))
+}

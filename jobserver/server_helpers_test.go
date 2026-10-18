@@ -3,14 +3,41 @@ package jobserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// lineLog collects the status lines a server writes.
+type lineLog struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *lineLog) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+// containing returns the lines that hold a substring.
+func (l *lineLog) containing(sub string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.Contains(line, sub) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
 
 // fakeRunner stands in for a command. It records what ran, can hold a run
 // open until the test releases it, and writes declared outputs.

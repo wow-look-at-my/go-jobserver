@@ -424,34 +424,16 @@ func cmdList(g *globals, args []string) error {
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tSTATE\tDEPTH\tCOMMAND\tDEPS\tTOOK")
-	byID := jobserver.Index(resp.Jobs)
+	depths := jobserver.Depths(resp.Jobs)
 	for _, j := range resp.Jobs {
 		took := "-"
 		if !j.Started.IsZero() && !j.Finished.IsZero() {
 			took = j.Finished.Sub(j.Started).Round(time.Millisecond).String()
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", j.ID, j.State, depth(j, byID, 0),
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", j.ID, j.State, depths[j.ID],
 			strings.Join(j.Command, " "), strings.Join(j.Deps, ","), took)
 	}
 	return w.Flush()
-}
-
-// depth is how many dependency levels deep a job sits.
-func depth(j *jobserver.Job, byID map[string]*jobserver.Job, seen int) int {
-	if seen > 64 || len(j.Deps) == 0 {
-		return 0
-	}
-	best := 0
-	for _, d := range j.Deps {
-		dep, ok := byID[d]
-		if !ok {
-			continue
-		}
-		if got := depth(dep, byID, seen+1) + 1; got > best {
-			best = got
-		}
-	}
-	return best
 }
 
 // cmdStatus prints one job.

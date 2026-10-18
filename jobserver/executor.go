@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// waitDelay bounds how long a killed child may hold its output pipe open.
-const waitDelay = 5 * time.Second
+// waitDelay bounds how long a child may hold the output pipe open after the job ends. Tests shorten it.
+var waitDelay = 5 * time.Second
 
 // A Runner runs one job's command into out and reports its exit code.
 // started receives the child's process id once it is running.
@@ -51,6 +51,10 @@ func (ExecRunner) Run(ctx context.Context, j *Job, out io.Writer, started func(p
 	}
 	err := cmd.Wait()
 	if err == nil {
+		return 0, nil
+	}
+	// Wait reports ErrWaitDelay only after a zero exit: a child that holds the pipe open is no failure.
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
 		return 0, nil
 	}
 	var exitErr *exec.ExitError

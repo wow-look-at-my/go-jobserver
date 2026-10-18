@@ -554,7 +554,7 @@ func (s *Store) FinishCPU(id string, seconds float64) error {
 	return s.commit(record{kind: recCPU, id: j.ID, cpuSeconds: seconds})
 }
 
-// Finish records the end of an attempt.
+// Finish records the end of an attempt and closes the job's log file.
 func (s *Store) Finish(id string, st State, exitCode int, msg string, artifacts []Artifact, logBytes int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -568,14 +568,29 @@ func (s *Store) Finish(id string, st State, exitCode int, msg string, artifacts 
 	j.Error = msg
 	j.Artifacts = artifacts
 	j.LogBytes = logBytes
-	return s.commit(record{
+	err := s.commit(record{
 		kind: recFinish, id: j.ID, state: st, exitCode: exitCode,
 		finished: j.Finished.UnixNano(), errMsg: msg, logBytes: logBytes, artifacts: artifacts,
 	})
+	if cerr := s.closeLog(j.ID); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// closeLog closes a job's cached log file and forgets it. The caller holds the
+// lock.
+func (s *Store) closeLog(id string) error {
+	w, ok := s.logs[id]
+	if !ok {
+		return nil
+	}
+	delete(s.logs, id)
+	return w.Close()
 }
 
 // LogWriter returns the append handle for a job's output file, creating it on
-// first use.
+// first use. Finish closes the handle, so a later call opens a new one.
 func (s *Store) LogWriter(id string) (*LogWriter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -590,6 +605,22 @@ func (s *Store) LogWriter(id string) (*LogWriter, error) {
 	w := &LogWriter{f: f}
 	s.logs[id] = w
 	return w, nil
+}
+
+// SyncLog flushes a job's log if the store holds it open. Unlike LogWriter, it
+// never opens one, so a flush after the job ends leaves no file open.
+func (s *Store) SyncLog(id string) error {
+	s.mu.Lock()
+	w, ok := s.logs[CanonicalID(id)]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	// Finish can close the file between the lookup and the flush. Close flushed it.
+	if err := w.Sync(); !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) LogBytes(id string) int64 {
@@ -626,10 +657,8 @@ func (s *Store) RemoveLog(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id = CanonicalID(id)
-	if w, ok := s.logs[id]; ok {
-		w.Close()
-		delete(s.logs, id)
-	}
+	// The file goes next, so a failed flush loses nothing.
+	_ = s.closeLog(id)
 	err := os.Remove(s.LogPath(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

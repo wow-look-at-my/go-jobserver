@@ -179,6 +179,31 @@ func TestCLIListShowsJobs(t *testing.T) {
 	assert.Equal(t, jobserver.StateCompleted, listed[0].State)
 }
 
+func TestCLIListShowsTheDependencyDepth(t *testing.T) {
+	dir := shortDir(t)
+	srv := startDaemon(t, dir)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		spec := jobserver.Spec{Command: []string{"true"}, Draft: true}
+		if i > 0 {
+			spec.Deps = []string{ids[i-1]}
+		}
+		j, _, err := srv.Enqueue(spec)
+		require.NoError(t, err)
+		ids = append(ids, j.ID)
+	}
+
+	out, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
+	require.NoError(t, err)
+
+	depths := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
+		fields := strings.Fields(line)
+		depths[fields[0]] = fields[2]
+	}
+	assert.Equal(t, map[string]string{ids[0]: "0", ids[1]: "1", ids[2]: "2"}, depths)
+}
+
 func TestCLILogsPrintsTheOutput(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
