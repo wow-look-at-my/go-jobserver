@@ -106,8 +106,7 @@ type Lease struct {
 	ready  chan struct{}
 	err    error
 
-	// Planner state, under the scheduler's lock.
-	// rank holds one value per priority key, in key order.
+	// Planner state, under the scheduler's lock. rank holds one value per priority key, in key order.
 	rank    []float64
 	cost    float64
 	started time.Time
