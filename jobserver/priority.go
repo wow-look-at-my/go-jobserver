@@ -7,9 +7,7 @@ import (
 	"regexp"
 )
 
-// PriorityKey is one row of the admission order. The scheduler compares the
-// keys in the order SchedulerConfig.PriorityKeys lists them, lower first. A
-// lease that sets no value for a key gets the key's Default.
+// PriorityKey is one row of the admission order.
 type PriorityKey struct {
 	// Name is hyphenated lowercase words, such as "infra-priority".
 	Name        string  `json:"name"`
@@ -17,8 +15,7 @@ type PriorityKey struct {
 	Default     float64 `json:"default"`
 }
 
-// KeyOpenBatch is the key the scheduler fills itself. A key list that leaves
-// it out gets it at the end. A lease cannot set it.
+// KeyOpenBatch is the key the scheduler fills itself. A key list that leaves it out gets it at the end.
 const KeyOpenBatch = "open-batch"
 
 var (

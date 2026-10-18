@@ -236,7 +236,9 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases are sorted by priority keys. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`. A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
+
+A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
 
 `open-batch` (`KeyOpenBatch`) is the scheduler's own key: 0 while a member of the lease's batch holds a slot or did within `BatchGrace`, 1 otherwise. A list that leaves it out gets it last. `Status` reports the key list, and each lease's value for every key.
 
