@@ -4,15 +4,11 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"sort"
 	"strconv"
 	"time"
 
 	"github.com/wow-look-at-my/go-containers/set"
 )
-
-// OpenBatchBoost is added to the priority of a queued lease whose batch has started.
-const OpenBatchBoost = 1_000_000
 
 // BatchGrace is how long a batch stays open after its last member ends, so members that arrive later still go first.
 const BatchGrace = 10 * time.Minute
@@ -121,39 +117,52 @@ func (s *Scheduler) holderIDsLocked(st QueueState) []string {
 	return out
 }
 
-// orderLocked returns the queued leases in admission order: highest priority
-// first, with OpenBatchBoost added for a member of an open batch, then arrival
-// order. A pick that starts a new batch pulls the rest of that batch in right
-// behind it.
+// orderLocked returns the queued leases in admission order: the priority keys
+// compared top to bottom, lower first, then arrival. A pick that starts a new
+// batch pulls the rest of that batch in right behind it.
 func (s *Scheduler) orderLocked(now time.Time) []*Lease {
-	byPrio := map[int][]*Lease{}
+	type ranked struct {
+		lease *Lease
+		key   []float64
+	}
+	all := make([]ranked, 0, len(s.waiting))
 	for _, l := range s.waiting {
-		p := l.req.Priority
+		l.rank[s.priority.batch] = 1
 		if s.batchOpen(l.req.Batch, now) {
-			p += OpenBatchBoost
+			l.rank[s.priority.batch] = 0
 		}
-		byPrio[p] = append(byPrio[p], l)
+		all = append(all, ranked{lease: l, key: l.rank})
 	}
-	prios := make([]int, 0, len(byPrio))
-	for p := range byPrio {
-		prios = append(prios, p)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(prios)))
-	out := make([]*Lease, 0, len(s.waiting))
-	for _, p := range prios {
-		level := byPrio[p]
-		slices.SortFunc(level, func(a, b *Lease) int {
-			switch {
-			case a.seq < b.seq:
-				return -1
-			case a.seq > b.seq:
-				return 1
-			}
-			return 0
-		})
+	slices.SortStableFunc(all, func(a, b ranked) int {
+		if c := slices.Compare(a.key, b.key); c != 0 {
+			return c
+		}
+		return cmpSeq(a.lease, b.lease)
+	})
+	out := make([]*Lease, 0, len(all))
+	for start := 0; start < len(all); {
+		end := start + 1
+		for end < len(all) && slices.Equal(all[end].key, all[start].key) {
+			end++
+		}
+		level := make([]*Lease, 0, end-start)
+		for _, r := range all[start:end] {
+			level = append(level, r.lease)
+		}
 		out = append(out, groupBatches(level)...)
+		start = end
 	}
 	return out
+}
+
+func cmpSeq(a, b *Lease) int {
+	switch {
+	case a.seq < b.seq:
+		return -1
+	case a.seq > b.seq:
+		return 1
+	}
+	return 0
 }
 
 // groupBatches keeps ls in arrival order, except that each batch's members

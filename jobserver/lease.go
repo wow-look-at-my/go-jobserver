@@ -15,9 +15,9 @@ type LeaseRequest struct {
 	Class string `json:"class,omitempty"`
 	// Group is a named group whose limit the lease counts against. Empty means none.
 	Group string `json:"group,omitempty"`
-	// Priority orders admission: higher first. Equal priorities go in arrival order.
-	Priority int `json:"priority,omitempty"`
-	// Batch ties leases together. Once one member starts, the rest go ahead of everything else.
+	// Priority holds the lease's value per priority key, by name. A key it leaves out takes the key's default.
+	Priority map[string]float64 `json:"priority,omitempty"`
+	// Batch ties leases together. While one member holds a slot, the open-batch key moves the rest forward.
 	Batch string `json:"batch,omitempty"`
 	// GroupOnly takes only the group slot. The count cap and the CPU budget never hold it back.
 	GroupOnly bool `json:"group_only,omitempty"`
@@ -106,7 +106,8 @@ type Lease struct {
 	ready  chan struct{}
 	err    error
 
-	// Planner state, under the scheduler's lock.
+	// Planner state, under the scheduler's lock. rank holds one value per priority key, in key order.
+	rank    []float64
 	cost    float64
 	started time.Time
 	state   QueueState
