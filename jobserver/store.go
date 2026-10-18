@@ -602,7 +602,13 @@ func (s *Store) LogWriter(id string) (*LogWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &LogWriter{f: f}
+	// A reopened file already holds output, and N counts it.
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	w := &LogWriter{f: f, n: info.Size()}
 	s.logs[id] = w
 	return w, nil
 }
@@ -723,7 +729,7 @@ func (w *LogWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// N is how many bytes this writer has appended.
+// N is how many bytes the file holds: those it held when opened, and those appended since.
 func (w *LogWriter) N() int64 { return w.n }
 
 // Sync flushes the file to stable storage.

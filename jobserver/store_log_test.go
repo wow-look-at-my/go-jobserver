@@ -50,6 +50,27 @@ func TestALogOpenedAfterFinishAppendsToTheSameFile(t *testing.T) {
 	assert.Equal(t, "one\ntwo\n", string(out))
 }
 
+func TestAReopenedLogWriterCountsTheBytesAlreadyInTheFile(t *testing.T) {
+	st, err := OpenStore(t.TempDir())
+	require.NoError(t, err)
+	defer st.Close()
+	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	require.NoError(t, err)
+	first, err := st.LogWriter("j-1")
+	require.NoError(t, err)
+	_, err = first.Write([]byte("one\n"))
+	require.NoError(t, err)
+	require.NoError(t, st.Finish("j-1", StateCompleted, 0, "", nil, first.N()))
+
+	second, err := st.LogWriter("j-1")
+	require.NoError(t, err)
+	_, err = second.Write([]byte("two\n"))
+	require.NoError(t, err)
+
+	assert.EqualValues(t, 8, second.N())
+	assert.Equal(t, st.LogBytes("j-1"), second.N(), "the recorded size must match the file")
+}
+
 func TestSyncLogNeverOpensALog(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
 	require.NoError(t, err)
