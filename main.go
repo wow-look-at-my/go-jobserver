@@ -117,7 +117,7 @@ func (g *globals) bind(fs *flag.FlagSet) {
 	fs.Float64Var(&g.cost, "cost", g.cost, "CPU cost assumed for a job that declares none")
 	fs.DurationVar(&g.sample, "sample", g.sample, "how often CPU use is sampled")
 	fs.BoolVar(&g.noCPU, "no-cpu", g.noCPU, "do not sample CPU use")
-	fs.BoolVar(&g.hold, "hold", g.hold, "internal: wait for input, used to ask this host how it stops a process")
+	fs.BoolVar(&g.hold, "hold", g.hold, "internal: wait for input to end, then leave")
 	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
 	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
 	fs.BoolVar(&g.noSpool, "no-spool", g.noSpool, "do not watch a spool directory")

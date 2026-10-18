@@ -140,12 +140,16 @@ func TestGovernorHoldsEveryMechanismAJobEnables(t *testing.T) {
 func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
 	// The host's answers are asked for before the server starts.
 	host := hostHere(t)
-	srv := newTestServer(t, func(c *Config) {
+	srv := newTunedServer(t, func(c *Config) {
 		c.CPUBudget = 0.001
 		c.SampleInterval = 20 * time.Millisecond
+	}, func(s *Server) {
+		// This test is about the release itself, so no dwell, and the load of the machine that runs the suite cannot hold it back.
+		s.sched.cfg.ReleaseAfter = -1
+		s.sched.cfg.HostBusyHigh = -1
+		s.gov.probe = hostProbe{known: true, canFreeze: host.CanFreeze,
+			freezeWhy: host.FreezeDetail, spelling: host.NiceSpelling, niceWhy: host.NiceDetail}
 	})
-	srv.gov.probe = hostProbe{known: true, canFreeze: host.CanFreeze,
-		freezeWhy: host.FreezeDetail, spelling: host.NiceSpelling, niceWhy: host.NiceDetail}
 	j, _, err := srv.Enqueue(Spec{
 		Command: []string{"sh", "-c", "head -c 4000000000 /dev/zero > /dev/null; sleep 30"},
 		Policy: JobPolicy{
@@ -163,14 +167,40 @@ func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
 	// The heavy command finishes and the job goes quiet, which is where the
 	// daemon hands its processes back.
 	require.Eventually(t, func() bool {
-		for _, c := range srv.Events() {
+		events := srv.Events()
+		released := false
+		for _, c := range events {
 			if c.Job == j.ID && !c.Active {
-				return true
+				released = true
 			}
 		}
-		return false
+		if !released {
+			return false
+		}
+		for _, c := range srv.Controls() {
+			if refusedRevert(events, c) == nil {
+				return false
+			}
+		}
+		return true
 	}, 20*time.Second, 20*time.Millisecond, "the governor never released the control")
-	assert.Empty(t, srv.Controls(), "nothing may still be in effect once the job is under budget")
+	// Lowering a nice value needs privilege, so only a revert the host refused for that may leave a control in effect.
+	events := srv.Events()
+	for _, c := range srv.Controls() {
+		if back := refusedRevert(events, c); assert.NotNil(t, back, "%+v is still in effect", c) {
+			assert.Contains(t, back.Detail, "permission")
+		}
+	}
+}
+
+// refusedRevert finds the refused revert of a control in the history.
+func refusedRevert(events []Control, c Control) *Control {
+	for i, e := range events {
+		if e.Job == c.Job && e.Mechanism == c.Mechanism && e.PID == c.PID && !e.Active && e.Outcome == OutcomeRefused {
+			return &events[i]
+		}
+	}
+	return nil
 }
 
 func TestGovernorLeavesAJobAloneWhereFreezeCannotSuspend(t *testing.T) {

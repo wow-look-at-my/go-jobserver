@@ -113,18 +113,25 @@ type Lease struct {
 	state   QueueState
 	told    bool
 
-	mu          sync.Mutex
-	req         LeaseRequest
-	pid         int
-	actuator    Actuator
-	revoked     chan struct{}
-	reason      string
-	released    bool
-	cpuSeconds  float64
+	mu         sync.Mutex
+	req        LeaseRequest
+	pid        int
+	actuator   Actuator
+	revoked    chan struct{}
+	reason     string
+	released   bool
+	cpuSeconds float64
+	// measuredFor is how long the readings behind cpuSeconds cover.
+	measuredFor time.Duration
 	cpus        float64
 	measured    bool
 	overSince   time.Time
 	releaseOnce sync.Once
+
+	// ctl serializes the governor's control calls on this lease.
+	ctl sync.Mutex
+	// ended is set with ctl and the governor's mu both held, so either lock is enough to read it.
+	ended bool
 }
 
 func newLease(s *Scheduler, req LeaseRequest, seq uint64, since time.Time, notify func(QueueState)) *Lease {
@@ -206,12 +213,12 @@ func (l *Lease) Release() {
 		l.sched.gov.finish(l)
 		l.mu.Lock()
 		l.released = true
-		used, measured := l.cpuSeconds, l.measured
+		used, span, measured := l.cpuSeconds, l.measuredFor, l.measured
 		class, revoked := l.req.Class, l.reason != ""
 		l.mu.Unlock()
 		if measured {
-			wall := l.sched.now().Sub(l.started)
-			l.sched.classes.observe(class, used, wall, revoked)
+			// The time the lease held its slot unmeasured would read as idle time.
+			l.sched.classes.observe(class, used, span, revoked)
 		}
 		l.sched.release(l)
 	})

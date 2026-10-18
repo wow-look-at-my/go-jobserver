@@ -3,6 +3,7 @@ package jobserver
 import (
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,6 +86,116 @@ func (s *scriptedSource) procs() ([]Proc, error) {
 type failingSource struct{}
 
 func (failingSource) procs() ([]Proc, error) { return nil, errors.New("no process source here") }
+
+// countingSource serves one process table and counts how often it is read.
+type countingSource struct {
+	mu    sync.Mutex
+	table []Proc
+	scans int
+}
+
+func (c *countingSource) procs() ([]Proc, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.scans++
+	return append([]Proc(nil), c.table...), nil
+}
+
+func (c *countingSource) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.scans
+}
+
+// burn adds CPU time to one process of the table.
+func (c *countingSource) burn(pid int, d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.table {
+		if c.table[i].PID == pid {
+			c.table[i].CPU += d
+		}
+	}
+}
+
+func TestSamplerSkipsTheProcessTableWhileNoJobNeedsIt(t *testing.T) {
+	src := &countingSource{table: []Proc{{PID: 100, PPID: 1, PGID: 100, Name: "worker", CPU: time.Second}}}
+	host := &scriptedHost{cpus: 2}
+	clock := &testClock{at: time.Unix(0, 0)}
+	s := &sampler{src: src, host: host, now: clock.now}
+	next := func(roots map[string]int) Reading {
+		clock.add(time.Second)
+		return s.sample(roots)
+	}
+
+	first := next(nil)
+	assert.False(t, first.OK, "the first host read only sets the baseline")
+	assert.Equal(t, "measuring from the next sample", first.Note)
+	host.set(0.5)
+	second := next(nil)
+	require.True(t, second.OK, "with no job to measure, the host reading is the sample")
+	assert.True(t, second.HostOK)
+	assert.InDelta(t, 1, second.HostBusy, 1e-9)
+	assert.Nil(t, second.Table)
+	assert.Zero(t, src.count(), "no job needs the process table, so it is not read")
+
+	roots := map[string]int{"j-1": 100}
+	third := next(roots)
+	assert.Equal(t, 1, src.count())
+	assert.False(t, third.OK, "the first scan after a skip starts a new baseline")
+	assert.True(t, third.HostOK, "the host reading goes on through the new baseline")
+	src.burn(100, 500*time.Millisecond)
+	fourth := next(roots)
+	require.True(t, fourth.OK)
+	assert.InDelta(t, 0.5, fourth.Jobs["j-1"], 1e-9)
+
+	next(nil)
+	src.burn(100, 3*time.Second)
+	sixth := next(roots)
+	assert.False(t, sixth.OK, "a skip in between breaks the baseline again, so no rate spans the gap")
+	assert.Empty(t, sixth.Jobs)
+}
+
+func TestSamplerReadsTheTableWhenTheHostCannotBeRead(t *testing.T) {
+	src := &countingSource{table: []Proc{{PID: 100, PPID: 1, PGID: 100, Name: "worker"}}}
+	clock := &testClock{at: time.Unix(0, 0)}
+	s := &sampler{src: src, host: &scriptedHost{cpus: 2, err: errors.New("no counters here")}, now: clock.now}
+
+	clock.add(time.Second)
+	first := s.sample(nil)
+	assert.Equal(t, 1, src.count(), "without host counters the table is read, even with no job to measure")
+	assert.Contains(t, first.Note, "host cpu: no counters here")
+	src.burn(100, time.Second)
+	clock.add(time.Second)
+	second := s.sample(nil)
+	require.True(t, second.OK)
+	assert.False(t, second.HostOK)
+	assert.Zero(t, second.HostCPUs)
+	assert.InDelta(t, 1, second.HostBusy, 1e-9, "HostBusy is summed from the process table")
+}
+
+func TestSamplerCountsHostBusyFromTheHostsOwnCounters(t *testing.T) {
+	// The table sees one process, and the host's counters see the whole host.
+	src := &countingSource{table: []Proc{{PID: 7, PPID: 1, PGID: 7, Name: "job"}}}
+	host := &snapshotHost{reads: []hostStat{
+		{busy: 1000, total: 4000, cpus: 4},
+		{busy: 1300, total: 4400, cpus: 4},
+	}}
+	clock := &testClock{at: time.Unix(0, 0)}
+	s := &sampler{src: src, host: host, now: clock.now}
+	roots := map[string]int{"j": 7}
+
+	clock.add(time.Second)
+	s.sample(roots)
+	src.burn(7, 100*time.Millisecond)
+	clock.add(time.Second)
+	second := s.sample(roots)
+	require.True(t, second.OK)
+	require.True(t, second.HostOK)
+	assert.Equal(t, 4, second.HostCPUs)
+	assert.InDelta(t, 3, second.HostBusy, 1e-9, "300 of 400 ticks were busy, on 4 CPUs")
+	assert.InDelta(t, 0.1, second.Jobs["j"], 1e-9)
+}
 
 func TestSamplerTurnsTwoSnapshotsIntoRates(t *testing.T) {
 	base := time.Unix(0, 0)

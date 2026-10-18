@@ -119,9 +119,9 @@ Jobs that each want four CPUs on a four-CPU machine do not run faster together t
 
 ### Measuring
 
-Every `-sample` interval (one second by default) the daemon reads the host's process table, once, and turns consecutive reads into rates.
+Every `-sample` interval (one second by default) the daemon reads the host's CPU counters and, while a running job is a process tree, the host's process table. It turns consecutive reads into rates.
 
-- How many CPUs were busy **across the whole host**, counted from process CPU time. Kernel time spent outside a process is not part of it.
+- How many CPUs were busy **across the whole host**. On Linux this comes from the `cpu` line of `/proc/stat`, which counts every process and kernel thread in every namespace. It is right inside a container too. Elsewhere it is counted from process CPU time, which misses kernel time spent outside a process.
 - How many CPUs **each running job's process tree** used. The tree is the job's child plus its descendants plus everything sharing its process group, so a job that spawns helpers is measured as one.
 - The daemon accumulates each job's total, and records it on the job as `cpu_seconds` when the job ends.
 
@@ -140,7 +140,21 @@ go-jobserver -budget 6 run
 
 ### While a job runs
 
-The daemon applies the controls each job enables to the jobs that use more than they were admitted at. This holds when the running jobs together exceed the budget. When none does, it applies them to every running job. It takes them back when the total is back under budget. Mechanisms, each enabled or disabled per job:
+The daemon applies the controls each job enables to the jobs that use more than they were admitted at. This holds when the running jobs together exceed the budget, and when the host is saturated. When no job is above its cost, it applies them to every running job. A job the daemon cannot read yet counts at its admitted cost, but at most the whole budget.
+
+The controls come off only after the load stayed low for a while. A throttled load that dips under the budget does not switch them on and off again. A control the host refuses is tried again at a fixed interval, for as long as the job runs. Each mark is a `SchedulerConfig` field with a default:
+
+```go
+jobserver.SchedulerConfig{
+	HostBusyHigh:  jobserver.DefaultHostBusyHigh,  // 0.90: the host is saturated at this share of its CPUs
+	HostBusyLow:   jobserver.DefaultHostBusyLow,   // 0.75: it stops being saturated below this share
+	ReleaseBelow:  jobserver.DefaultReleaseBelow,  // 0.85: share of the budget the load must fall to
+	ReleaseAfter:  jobserver.DefaultReleaseAfter,  // 15s: how long the load must stay there
+	RetryInterval: jobserver.DefaultRetryInterval, // 10s: wait before a refused control is tried again
+}
+```
+
+A negative `HostBusyHigh` turns the host check off. A negative `ReleaseAfter` or `RetryInterval` means no wait. The daemon runs on the defaults. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
@@ -152,7 +166,9 @@ The daemon applies the controls each job enables to the jobs that use more than 
 
 The daemon finds out on a process of its own. The first job that enables `freeze` makes it run one, stop it, resume it, and watch whether it lives through that. When the answer is that the stop signal ends a process, freeze reports `not-applicable` with that reason and the job is left running. Every try is recorded with its outcome, and `go-jobserver stats` and the dashboard show the controls in effect.
 
-macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy. The same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. macOS reports that policy for the process that asks for it. The daemon cannot read back the policy a job's process was under, and taking the mechanism back clears it. Putting a nice value back means lowering it, which POSIX reserves for a privileged process. A daemon running unprivileged reports `refused` when it takes `priority` back.
+macOS keeps no per-process CPU mask. Its `affinity` is Apple's background policy. The same state `taskpolicy -b` sets, which keeps the process's work off the performance cores. macOS reports that policy for the process that asks for it. The daemon cannot read back the policy a job's process was under, and taking the mechanism back clears it. Putting a nice value back means lowering it, which POSIX reserves for a privileged process.
+
+A daemon running unprivileged reports `refused` when it takes `priority` back.
 
 ### What the control layer calls
 
@@ -250,11 +266,11 @@ Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its posit
 
 | condition | action |
 | --- | --- |
-| the holders exceed the budget | the policy's mechanisms on the leases above their admitted cost, or on all of them when none is |
+| the holders exceed the budget, or the host is saturated | the policy's mechanisms on the leases above their admitted cost, or on all of them when none is |
 | a lease uses more than `Limits.MaxCPUs` | `Actuator.Cap` at the limit, and revoked after `Limits.Grace` when it cannot be capped |
 | a lease passes `Limits.MaxCPUSeconds` | revoked |
 
-Release reverts every control, and records the lease's measured use in its class's history. The next lease of that class is admitted at what this used.
+Release reverts every control, and records the lease's measured use in its class's history: its CPU time over the time it was measured. The next lease of that class is admitted at what this used.
 
 An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used. `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
 
@@ -325,7 +341,10 @@ go-toolchain
 | `jobserver/sched_class.go` | the per-class cost history |
 | `jobserver/sched_status.go` | the Scheduler's status snapshot |
 | `jobserver/lease.go` | a lease, its limits and the Actuator interface |
-| `jobserver/govern.go` | the sampling loop, the limits and the response to oversubscription |
+| `jobserver/govern.go` | the sampling loop and the measure of each holder |
+| `jobserver/govern_plan.go` | the limits, the budget decision, and the plans to throttle and release |
+| `jobserver/govern_ctl.go` | the control calls, made outside the governor's lock, and their retries |
+| `jobserver/hostcpu.go` | the host's own CPU counters |
 | `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |

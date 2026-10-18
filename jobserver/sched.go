@@ -44,7 +44,31 @@ type SchedulerConfig struct {
 	Logf func(format string, args ...any)
 	// PriorityKeys is the admission order, compared top to bottom. NewScheduler panics on an invalid list.
 	PriorityKeys []PriorityKey
+	// ReleaseBelow is the share of the budget the load must fall to before the budget controls come off. Zero means DefaultReleaseBelow.
+	ReleaseBelow float64
+	// ReleaseAfter is how long the load must stay there first. Zero means DefaultReleaseAfter, and a negative value means no wait.
+	ReleaseAfter time.Duration
+	// HostBusyHigh is the host's busy share that throttles as if over budget. Zero means DefaultHostBusyHigh. Negative is off.
+	HostBusyHigh float64
+	// HostBusyLow is the share of the host's CPUs the host must fall below to stop counting as saturated. Zero means DefaultHostBusyLow.
+	HostBusyLow float64
+	// RetryInterval is the wait before a failed control is tried again. Zero means DefaultRetryInterval. Negative is no wait.
+	RetryInterval time.Duration
 }
+
+// The defaults for the governor's SchedulerConfig fields.
+const (
+	// DefaultReleaseBelow is the share of the budget the load must fall to before the budget controls come off.
+	DefaultReleaseBelow = 0.85
+	// DefaultReleaseAfter is how long the load must stay there first.
+	DefaultReleaseAfter = 15 * time.Second
+	// DefaultHostBusyHigh is the share of the host's CPUs in use at which the host counts as saturated.
+	DefaultHostBusyHigh = 0.90
+	// DefaultHostBusyLow is the share the host must fall below to stop counting as saturated.
+	DefaultHostBusyLow = 0.75
+	// DefaultRetryInterval is how long a control that did not take effect waits before the next try.
+	DefaultRetryInterval = 10 * time.Second
+)
 
 // Scheduler admits leases and governs the ones that hold a slot.
 type Scheduler struct {
@@ -84,6 +108,27 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.ReleaseBelow <= 0 {
+		cfg.ReleaseBelow = DefaultReleaseBelow
+	}
+	if cfg.ReleaseAfter == 0 {
+		cfg.ReleaseAfter = DefaultReleaseAfter
+	}
+	if cfg.RetryInterval == 0 {
+		cfg.RetryInterval = DefaultRetryInterval
+	}
+	if cfg.HostBusyHigh == 0 {
+		cfg.HostBusyHigh = DefaultHostBusyHigh
+	}
+	if cfg.HostBusyLow <= 0 {
+		cfg.HostBusyLow = DefaultHostBusyLow
+	}
+	if cfg.HostBusyHigh > 0 && cfg.HostBusyLow >= cfg.HostBusyHigh {
+		low := cfg.HostBusyHigh * DefaultHostBusyLow / DefaultHostBusyHigh
+		cfg.Logf("go-jobserver: the host busy low mark %s is not below the high mark %s, so it is %s",
+			fmtCPUs(cfg.HostBusyLow), fmtCPUs(cfg.HostBusyHigh), fmtCPUs(low))
+		cfg.HostBusyLow = low
 	}
 	priority, err := newPriorityTable(cfg.PriorityKeys)
 	if err != nil {

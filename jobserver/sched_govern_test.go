@@ -12,17 +12,20 @@ import (
 
 // fakeActuator reports a set CPU use and records what the governor asks of it.
 type fakeActuator struct {
-	mu      sync.Mutex
-	cpus    float64
-	noRead  bool
-	capOut  Outcome
-	applied map[Mechanism]bool
-	calls   []string
-	capped  float64
+	mu        sync.Mutex
+	cpus      float64
+	noRead    bool
+	capOut    Outcome
+	applyOut  Outcome
+	revertOut Outcome
+	applied   map[Mechanism]bool
+	calls     []string
+	capped    float64
 }
 
 func newFakeActuator(cpus float64) *fakeActuator {
-	return &fakeActuator{cpus: cpus, capOut: OutcomeApplied, applied: map[Mechanism]bool{}}
+	return &fakeActuator{cpus: cpus, capOut: OutcomeApplied, applyOut: OutcomeApplied,
+		revertOut: OutcomeReverted, applied: map[Mechanism]bool{}}
 }
 
 func (f *fakeActuator) Usage() (float64, bool) {
@@ -34,16 +37,22 @@ func (f *fakeActuator) Usage() (float64, bool) {
 func (f *fakeActuator) Apply(m Mechanism, _ JobPolicy) (Outcome, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.applied[m] = true
 	f.calls = append(f.calls, "apply "+string(m))
+	if f.applyOut != OutcomeApplied {
+		return f.applyOut, "the target said no"
+	}
+	f.applied[m] = true
 	return OutcomeApplied, "ok"
 }
 
 func (f *fakeActuator) Revert(m Mechanism) (Outcome, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.applied, m)
 	f.calls = append(f.calls, "revert "+string(m))
+	if f.revertOut != OutcomeReverted {
+		return f.revertOut, "the target said no"
+	}
+	delete(f.applied, m)
 	return OutcomeReverted, "ok"
 }
 
@@ -76,10 +85,41 @@ func (f *fakeActuator) capAt() float64 {
 	return f.capped
 }
 
+// count is how many times the governor made one call, such as "apply priority".
+func (f *fakeActuator) count(call string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeActuator) callList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeActuator) setBlind(blind bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.noRead = blind
+}
+
+func (f *fakeActuator) setOutcomes(apply, revert Outcome) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applyOut, f.revertOut = apply, revert
+}
+
 var throttlePolicy = JobPolicy{Priority: PrioritySettings{Enabled: true, Nice: 10}}
 
 func TestGovernorThrottlesOnlyTheLeaseAboveItsCost(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, ReleaseAfter: -1})
 	quiet, err := s.Acquire(context.Background(), LeaseRequest{ID: "quiet", Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}}, nil)
 	require.NoError(t, err)
 	hog, err := s.Acquire(context.Background(), LeaseRequest{ID: "hog", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}}, nil)
