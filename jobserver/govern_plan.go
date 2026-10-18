@@ -79,7 +79,6 @@ func (g *governor) planBudgetLocked(live []target, reading Reading, budget float
 		rate, ok := g.rates[t.l]
 		if !ok {
 			// A holder the meter cannot see counts at its admitted cost, at most the budget.
-			// Admission lets one lease larger than the budget run alone.
 			rate = min(t.l.cost, budget)
 		}
 		load += rate
