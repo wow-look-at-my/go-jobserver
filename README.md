@@ -80,7 +80,7 @@ The CLI prefers the file socket and falls back to the go-ipc service, so any pro
 
 ### Spool files
 
-A file dropped into the spool directory becomes a job and is then moved to `spool/done/`. A file that cannot be read moves to `spool/failed/` with a `.error` sidecar.
+A file dropped into the spool directory becomes a job and is then moved to `spool/done/`. A file that cannot be read moves to `spool/failed/` with a `.error` sidecar. A file that cannot be moved stays in the spool. The daemon logs that once, and reads the file again only after it changes.
 
 - `deploy.json` - a full spec: `{"name":"deploy","command":["make","deploy"],"outputs":["bin/app"]}`
 - `list.json` - a bare argv array: `["ls","-l"]`
@@ -106,6 +106,8 @@ Every route answers JSON, and `POST /api/<op>` takes the same request envelope t
 | `GET /api/stats` | counters for the server |
 
 Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy` and `stats`.
+
+A client has several seconds to send its request headers. The client also has a minute to send the whole request, and a couple of minutes of quiet between requests on one connection. A response has no time limit. A slow reader can fetch a large log. The TCP port and the file socket share these limits.
 
 ## Pause, resume and interruption
 
@@ -350,4 +352,5 @@ go-toolchain
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |
 | `jobserver/spool.go` | the spool directory watcher |
+| `jobserver/graph.go` | each job's dependency depth and its children, for the dashboard and `list` |
 | `jobserver/client.go` | the client the CLI and other programs use |

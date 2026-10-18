@@ -114,7 +114,7 @@ func revertControl(a Actuator, c Control, cpus int) Control {
 
 // settleLocked files one control call. A call that did not take starts or
 // continues a streak, and waits RetryInterval for the next try. It reports
-// whether the call starts a streak, which is the one failure to log.
+// whether the call starts a streak, which is the failure to log.
 func (g *governor) settleLocked(l *Lease, k controlKey, took bool, c Control, now time.Time) bool {
 	g.appendHistoryLocked(c)
 	tries := g.failed[l]
