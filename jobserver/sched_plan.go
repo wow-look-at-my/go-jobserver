@@ -133,7 +133,7 @@ func (s *Scheduler) orderLocked(now time.Time) []*Lease {
 	}
 	all := make([]ranked, 0, len(s.waiting))
 	for _, l := range s.waiting {
-		// A missing row is 0. The batch row follows the longest key, so every lease compares it at one position.
+		// The batch row follows the longest key, so every lease compares it at one position.
 		key := make([]int64, width+1)
 		copy(key, l.req.Key)
 		if !s.batchOpen(l.req.Batch, now) {
