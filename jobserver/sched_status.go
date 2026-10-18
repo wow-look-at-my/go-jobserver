@@ -7,12 +7,12 @@ import (
 
 // LeaseInfo is one lease as the status surface shows it.
 type LeaseInfo struct {
-	ID    string  `json:"id"`
-	Class string  `json:"class,omitempty"`
-	Group string  `json:"group,omitempty"`
+	ID    string `json:"id"`
+	Class string `json:"class,omitempty"`
+	Group string `json:"group,omitempty"`
 	// Priority is the lease's value for every priority key, defaults included.
 	Priority map[string]float64 `json:"priority"`
-	Batch string  `json:"batch,omitempty"`
+	Batch    string             `json:"batch,omitempty"`
 	// GroupOnly marks a lease that takes only its group slot.
 	GroupOnly bool      `json:"group_only,omitempty"`
 	Since     time.Time `json:"since"`

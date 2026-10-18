@@ -17,9 +17,8 @@ type PriorityKey struct {
 	Default     float64 `json:"default"`
 }
 
-// KeyOpenBatch is the key the scheduler fills itself. It is 0 while a member
-// of the lease's batch holds a slot or did within BatchGrace, else 1. A key
-// list that leaves it out gets it at the end. A lease cannot set it.
+// KeyOpenBatch is the key the scheduler fills itself. A key list that leaves
+// it out gets it at the end. A lease cannot set it.
 const KeyOpenBatch = "open-batch"
 
 var (

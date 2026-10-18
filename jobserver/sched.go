@@ -91,13 +91,13 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	s := &Scheduler{
 		priority: priority,
-		cfg:     cfg,
-		groups:  map[string]int{},
-		maxRuns: cfg.MaxConcurrent,
-		budget:  cfg.CPUBudget,
-		batches: map[string]*batchState{},
-		now:     time.Now,
-		quit:    make(chan struct{}),
+		cfg:      cfg,
+		groups:   map[string]int{},
+		maxRuns:  cfg.MaxConcurrent,
+		budget:   cfg.CPUBudget,
+		batches:  map[string]*batchState{},
+		now:      time.Now,
+		quit:     make(chan struct{}),
 	}
 	s.classes = openClassBook(cfg.HistoryPath, cfg.Logf)
 	s.gov = newGovernor(s)
