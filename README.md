@@ -215,12 +215,16 @@ sched := jobserver.NewScheduler(jobserver.SchedulerConfig{
 	CPUBudget:     8,                 // CPUs the holders may use together
 	DefaultCost:   0.25,              // a lease with no cost and no history
 	HistoryPath:   "classes.json",    // per-class measured cost
+	PriorityKeys: []jobserver.PriorityKey{ // admission order, top row first, lower first
+		{Name: "urgency", Description: "how soon the caller needs it"},
+		{Name: jobserver.KeyOpenBatch},
+	},
 })
 sched.Start()
 sched.SetGroups(map[string]int{"deploy": 1})
 
 lease, err := sched.Acquire(ctx, jobserver.LeaseRequest{
-	ID: runID, Class: "build", Group: "deploy", Key: []int64{-5}, Batch: "wf-123",
+	ID: runID, Class: "build", Group: "deploy", Priority: map[string]float64{"urgency": -5}, Batch: "wf-123",
 	Policy: jobserver.JobPolicy{Priority: jobserver.PrioritySettings{Enabled: true, Nice: 10}},
 	Limits: jobserver.Limits{MaxCPUs: 4, MaxCPUSeconds: 3600},
 }, func(q jobserver.QueueState) { /* where the lease waits, and why */ })
@@ -232,13 +236,9 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases are sorted by a tuple, compared row by row, lower first:
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Queued leases are sorted by priority keys. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`. A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
 
-| Row | Value |
-| --- | --- |
-| `Key` | the caller's rows, in order. A missing row is 0. |
-| batch | 0 while a member of the lease's batch holds a slot, or did within `BatchGrace`. 1 otherwise. |
-| arrival | the order the lease was queued. |
+`open-batch` (`KeyOpenBatch`) is the scheduler's own key: 0 while a member of the lease's batch holds a slot or did within `BatchGrace`, 1 otherwise. A list that leaves it out gets it last. `Status` reports the key list, and each lease's value for every key.
 
 A lease that starts a new batch pulls the rest of that batch in right behind it. A lease's cost is what it declares, then its class's measured history, then the default.
 

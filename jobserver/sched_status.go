@@ -10,7 +10,8 @@ type LeaseInfo struct {
 	ID    string  `json:"id"`
 	Class string  `json:"class,omitempty"`
 	Group string  `json:"group,omitempty"`
-	Key   []int64 `json:"key,omitempty"`
+	// Priority is the lease's value for every priority key, defaults included.
+	Priority map[string]float64 `json:"priority"`
 	Batch string  `json:"batch,omitempty"`
 	// GroupOnly marks a lease that takes only its group slot.
 	GroupOnly bool      `json:"group_only,omitempty"`
@@ -46,6 +47,8 @@ type SchedulerStatus struct {
 	Holding  []LeaseInfo `json:"holding"`
 	Waiting  []LeaseInfo `json:"waiting"`
 	Groups   []GroupInfo `json:"groups"`
+	// PriorityKeys is the admission order, compared top to bottom.
+	PriorityKeys []PriorityKey `json:"priority_keys"`
 }
 
 // Status reports what holds a slot, what waits and why, and each group's use.
@@ -54,7 +57,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := SchedulerStatus{MaxConcurrent: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}}
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, PriorityKeys: s.PriorityKeys()}
 	groups := map[string]*GroupInfo{}
 	for name, limit := range s.groups {
 		groups[name] = &GroupInfo{Name: name, Limit: limit}
@@ -92,7 +95,7 @@ func (l *Lease) info(wait *QueueState) LeaseInfo {
 		since = l.started
 	}
 	return LeaseInfo{
-		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Key: l.req.Key,
+		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: l.sched.priority.values(l.rank),
 		Batch: l.req.Batch, GroupOnly: l.req.GroupOnly, Since: since, Cost: l.cost, CPUs: l.cpus,
 		CPUSeconds: l.cpuSeconds, Revoked: l.reason, Wait: wait,
 	}

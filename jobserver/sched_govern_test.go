@@ -210,7 +210,7 @@ func TestSchedulerStatusShowsHoldersWaitersAndGroups(t *testing.T) {
 	s.SetGroups(map[string]int{"g": 3})
 	l, err := s.Acquire(context.Background(), LeaseRequest{ID: "a", Class: "hook-a", Group: "g"}, nil)
 	require.NoError(t, err)
-	acquireAsync(s, context.Background(), LeaseRequest{ID: "b", Group: "g", Key: []int64{-2}}, nil)
+	acquireAsync(s, context.Background(), LeaseRequest{ID: "b", Group: "g"}, nil)
 	waitQueued(t, s, 1)
 
 	st := s.Status()
@@ -223,6 +223,8 @@ func TestSchedulerStatusShowsHoldersWaitersAndGroups(t *testing.T) {
 	require.Len(t, st.Waiting, 1)
 	require.NotNil(t, st.Waiting[0].Wait)
 	assert.Equal(t, WaitCap, st.Waiting[0].Wait.Kind)
+	assert.Equal(t, map[string]float64{KeyOpenBatch: 1}, st.Waiting[0].Priority, "status shows every key, defaults included")
+	assert.Equal(t, []string{KeyOpenBatch}, keyNames(st.PriorityKeys))
 	assert.Equal(t, []GroupInfo{{Name: "g", Limit: 3, Active: 1, Waiting: 1}}, st.Groups)
 
 	assert.True(t, s.SetPolicy("a", throttlePolicy))

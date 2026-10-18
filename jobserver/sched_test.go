@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -38,8 +39,11 @@ func waitQueued(t *testing.T, s *Scheduler, n int) {
 		5*time.Second, 5*time.Millisecond, "expected %d queued leases", n)
 }
 
+// testKeys is a key list with a nonzero default, so a test can tell a default from a value.
+var testKeys = []PriorityKey{{Name: "urgency"}, {Name: "weight", Description: "a second row", Default: 5}}
+
 func TestSchedulerCapQueuesAndAdmitsByPriorityThenArrival(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
+	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1, PriorityKeys: testKeys})
 	first, err := s.Acquire(context.Background(), LeaseRequest{ID: "first"}, nil)
 	require.NoError(t, err)
 
@@ -54,7 +58,7 @@ func TestSchedulerCapQueuesAndAdmitsByPriorityThenArrival(t *testing.T) {
 	}
 	low := acquireAsync(s, context.Background(), LeaseRequest{ID: "low"}, note("low"))
 	waitQueued(t, s, 1)
-	high := acquireAsync(s, context.Background(), LeaseRequest{ID: "high", Key: []int64{-5}}, note("high"))
+	high := acquireAsync(s, context.Background(), LeaseRequest{ID: "high", Priority: map[string]float64{"urgency": -5}}, note("high"))
 	waitQueued(t, s, 2)
 
 	mu.Lock()
@@ -172,10 +176,10 @@ func TestSchedulerCPUBudgetHoldsWhatDoesNotFit(t *testing.T) {
 }
 
 func TestSchedulerOpenBatchGoesFirst(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
+	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1, PriorityKeys: testKeys})
 	member, err := s.Acquire(context.Background(), LeaseRequest{ID: "w1", Batch: "workflow"}, nil)
 	require.NoError(t, err)
-	other := acquireAsync(s, context.Background(), LeaseRequest{ID: "other", Key: []int64{0, 0}}, nil)
+	other := acquireAsync(s, context.Background(), LeaseRequest{ID: "other", Priority: map[string]float64{"weight": 5}}, nil)
 	waitQueued(t, s, 1)
 	next := acquireAsync(s, context.Background(), LeaseRequest{ID: "w2", Batch: "workflow"}, nil)
 	waitQueued(t, s, 2)
@@ -184,13 +188,13 @@ func TestSchedulerOpenBatchGoesFirst(t *testing.T) {
 	member.Release()
 	got := <-next
 	require.NotNil(t, got)
-	assert.Equal(t, "w2", got.ID(), "a started batch goes ahead of an equal key that arrived first; a missing row is 0")
+	assert.Equal(t, "w2", got.ID(), "a started batch goes ahead of equal values that arrived first; a value left out takes the default")
 	got.Release()
 	require.NotNil(t, <-other)
 }
 
-func TestSchedulerKeyComparesRowByRowBeforeTheBatch(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
+func TestSchedulerKeysCompareTopToBottom(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1, PriorityKeys: testKeys})
 	member, err := s.Acquire(context.Background(), LeaseRequest{ID: "w1", Batch: "workflow"}, nil)
 	require.NoError(t, err)
 	var mu sync.Mutex
@@ -210,12 +214,12 @@ func TestSchedulerKeyComparesRowByRowBeforeTheBatch(t *testing.T) {
 	queued := 0
 	var done []<-chan *Lease
 	for _, req := range []LeaseRequest{
-		{ID: "w2", Key: []int64{0, 5}, Batch: "workflow"},
-		{ID: "second-row", Key: []int64{0, -1}},
-		{ID: "first-row", Key: []int64{-1, 99}},
-		{ID: "late", Key: []int64{1}},
-		{ID: "w3", Key: []int64{0, 5}, Batch: "workflow"},
-		{ID: "plain", Key: []int64{0, 5}},
+		{ID: "w2", Batch: "workflow"},
+		{ID: "second-row", Priority: map[string]float64{"weight": -1}},
+		{ID: "first-row", Priority: map[string]float64{"urgency": -1, "weight": 99}},
+		{ID: "late", Priority: map[string]float64{"urgency": 0.5}},
+		{ID: "w3", Priority: map[string]float64{"urgency": 0}, Batch: "workflow"},
+		{ID: "plain"},
 	} {
 		done = append(done, start(req))
 		queued++
@@ -226,7 +230,55 @@ func TestSchedulerKeyComparesRowByRowBeforeTheBatch(t *testing.T) {
 		require.NotNil(t, <-ch)
 	}
 	assert.Equal(t, []string{"first-row", "second-row", "w2", "w3", "plain", "late"}, order,
-		"the first row decides alone, a tie goes to the next row, then a started batch, then arrival")
+		"the first key decides alone, a tie goes to the next key, then a started batch, then arrival")
+}
+
+func TestSchedulerPlacesOpenBatchWhereTheKeyListSays(t *testing.T) {
+	keys := []PriorityKey{{Name: KeyOpenBatch}, {Name: "urgency"}}
+	s := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1, PriorityKeys: keys})
+	member, err := s.Acquire(context.Background(), LeaseRequest{ID: "w1", Batch: "workflow"}, nil)
+	require.NoError(t, err)
+	urgent := acquireAsync(s, context.Background(), LeaseRequest{ID: "urgent", Priority: map[string]float64{"urgency": -100}}, nil)
+	waitQueued(t, s, 1)
+	next := acquireAsync(s, context.Background(), LeaseRequest{ID: "w2", Batch: "workflow"}, nil)
+	waitQueued(t, s, 2)
+	member.Release()
+	got := <-next
+	require.NotNil(t, got)
+	assert.Equal(t, "w2", got.ID(), "open-batch listed first outranks every later key")
+	got.Release()
+	require.NotNil(t, <-urgent)
+	assert.Equal(t, []string{KeyOpenBatch, "urgency"}, keyNames(s.PriorityKeys()))
+}
+
+func TestSchedulerRefusesUnknownAndNonFinitePriorities(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{PriorityKeys: testKeys})
+	_, err := s.Acquire(context.Background(), LeaseRequest{ID: "a", Priority: map[string]float64{"nope": 1}}, nil)
+	require.ErrorIs(t, err, ErrUnknownPriorityKey)
+	_, err = s.Acquire(context.Background(), LeaseRequest{ID: "b", Priority: map[string]float64{KeyOpenBatch: 0}}, nil)
+	require.ErrorIs(t, err, ErrUnknownPriorityKey, "the scheduler fills open-batch itself")
+	_, err = s.Acquire(context.Background(), LeaseRequest{ID: "c", Priority: map[string]float64{"urgency": math.NaN()}}, nil)
+	require.ErrorIs(t, err, ErrBadPriorityValue)
+	assert.Equal(t, []string{"urgency", "weight", KeyOpenBatch}, keyNames(s.PriorityKeys()), "a list without open-batch gets it last")
+}
+
+func TestNewSchedulerPanicsOnABadKeyList(t *testing.T) {
+	for _, keys := range [][]PriorityKey{
+		{{Name: "Not_Hyphenated"}},
+		{{Name: "dup"}, {Name: "dup"}},
+		{{Name: "-lead"}},
+		{{Name: "inf", Default: math.Inf(1)}},
+	} {
+		assert.Panics(t, func() { NewScheduler(SchedulerConfig{DisableCPU: true, PriorityKeys: keys}) }, "%v", keys)
+	}
+}
+
+func keyNames(keys []PriorityKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k.Name)
+	}
+	return out
 }
 
 func TestSchedulerCancelledWaitLeavesTheQueue(t *testing.T) {

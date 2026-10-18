@@ -117,28 +117,21 @@ func (s *Scheduler) holderIDsLocked(st QueueState) []string {
 	return out
 }
 
-// orderLocked returns the queued leases in admission order: by Key, then a
-// lease whose batch has started before one whose batch has not, then arrival.
-// A pick that starts a new batch pulls the rest of that batch in right behind
-// it.
+// orderLocked returns the queued leases in admission order: the priority keys
+// compared top to bottom, lower first, then arrival. A pick that starts a new
+// batch pulls the rest of that batch in right behind it.
 func (s *Scheduler) orderLocked(now time.Time) []*Lease {
 	type ranked struct {
 		lease *Lease
-		key   []int64
-	}
-	width := 0
-	for _, l := range s.waiting {
-		width = max(width, len(l.req.Key))
+		key   []float64
 	}
 	all := make([]ranked, 0, len(s.waiting))
 	for _, l := range s.waiting {
-		// The batch row follows the longest key, so every lease compares it at one position.
-		key := make([]int64, width+1)
-		copy(key, l.req.Key)
-		if !s.batchOpen(l.req.Batch, now) {
-			key[width] = 1
+		l.rank[s.priority.batch] = 1
+		if s.batchOpen(l.req.Batch, now) {
+			l.rank[s.priority.batch] = 0
 		}
-		all = append(all, ranked{lease: l, key: key})
+		all = append(all, ranked{lease: l, key: l.rank})
 	}
 	slices.SortStableFunc(all, func(a, b ranked) int {
 		if c := slices.Compare(a.key, b.key); c != 0 {

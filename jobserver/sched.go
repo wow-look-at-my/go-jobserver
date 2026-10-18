@@ -42,6 +42,8 @@ type SchedulerConfig struct {
 	HistoryPath string
 	// Logf receives the scheduler's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
+	// PriorityKeys is the admission order, compared top to bottom. NewScheduler panics on an invalid list.
+	PriorityKeys []PriorityKey
 }
 
 // Scheduler admits leases and governs the ones that hold a slot.
@@ -59,8 +61,9 @@ type Scheduler struct {
 	batches map[string]*batchState
 	now     func() time.Time
 
-	classes *classBook
-	gov     *governor
+	classes  *classBook
+	gov      *governor
+	priority priorityTable
 
 	quit      chan struct{}
 	wg        sync.WaitGroup
@@ -82,7 +85,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	priority, err := newPriorityTable(cfg.PriorityKeys)
+	if err != nil {
+		panic(err)
+	}
 	s := &Scheduler{
+		priority: priority,
 		cfg:     cfg,
 		groups:  map[string]int{},
 		maxRuns: cfg.MaxConcurrent,
@@ -293,8 +301,13 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 			}
 		}
 	}
+	rank, err := s.priority.rank(req.Priority)
+	if err != nil {
+		return nil, err
+	}
 	s.seq++
 	l := newLease(s, req, s.seq, s.now().UTC(), onQueue)
+	l.rank = rank
 	l.cost = s.costOf(req)
 	s.waiting = append(s.waiting, l)
 	s.planLocked()
