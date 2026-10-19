@@ -32,59 +32,18 @@ func (s *Scheduler) planLocked() {
 		return
 	}
 	now := s.now()
-	budget := s.budgetLocked()
-	running, reserved, unmeasured := 0, 0.0, 0.0
-	inGroup := map[string]int{}
-	for _, h := range s.holding {
-		if h.req.Group != "" {
-			inGroup[h.req.Group]++
-		}
-		if !h.req.GroupOnly {
-			running++
-			reserved += h.cost
-			if !h.Measured() {
-				unmeasured += h.cost
-			}
-		}
-	}
+	p := s.planStateLocked()
 	type wait struct {
 		l  *Lease
 		st QueueState
 	}
 	var queued []wait
 	for _, l := range s.orderLocked(now) {
-		if g := l.req.Group; g != "" {
-			if limit := s.groups[g]; inGroup[g] >= limit {
-				queued = append(queued, wait{l, QueueState{Kind: WaitGroup, Key: g,
-					Reason: fmt.Sprintf("group %s: %d of %d running", g, inGroup[g], limit)}})
-				continue
-			}
+		if st, ok := s.fitLocked(p, l.req, l.cost); !ok {
+			queued = append(queued, wait{l, st})
+			continue
 		}
-		if !l.req.GroupOnly {
-			if s.maxRuns > 0 && running >= s.maxRuns {
-				queued = append(queued, wait{l, QueueState{Kind: WaitCap, Key: WaitCap,
-					Reason: fmt.Sprintf("run cap: %d of %d running", running, s.maxRuns)}})
-				continue
-			}
-			if reserved > 0 && reserved+l.cost > bookable(budget) {
-				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
-					Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
-						fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
-				continue
-			}
-			if running > 0 && s.host.cpus > 0 && float64(s.host.runnable)+unmeasured+l.cost > bookable(float64(s.host.cpus)) {
-				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
-					Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
-						s.host.runnable, s.host.cpus, fmtCPUs(l.cost))}})
-				continue
-			}
-			running++
-			reserved += l.cost
-			unmeasured += l.cost
-		}
-		if l.req.Group != "" {
-			inGroup[l.req.Group]++
-		}
+		p.take(l.req, l.cost)
 		l.started = now
 		s.holding = append(s.holding, l)
 		s.admitBatch(l.req.Batch, now)
@@ -106,6 +65,103 @@ func (s *Scheduler) planLocked() {
 			w.l.notify(w.st)
 		}
 	}
+}
+
+// planState is what the holders take, counted the way one plan pass counts it.
+type planState struct {
+	budget     float64
+	running    int
+	reserved   float64
+	unmeasured float64
+	inGroup    map[string]int
+}
+
+func (s *Scheduler) planStateLocked() *planState {
+	p := &planState{budget: s.budgetLocked(), inGroup: map[string]int{}}
+	for _, h := range s.holding {
+		if h.req.Group != "" {
+			p.inGroup[h.req.Group]++
+		}
+		if !h.req.GroupOnly {
+			p.running++
+			p.reserved += h.cost
+			if !h.Measured() {
+				p.unmeasured += h.cost
+			}
+		}
+	}
+	return p
+}
+
+// fitLocked says whether a lease for req at cost starts against p, and where
+// it waits when it does not. It is the place the admission gates live.
+func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (QueueState, bool) {
+	if g := req.Group; g != "" {
+		if limit := s.groups[g]; p.inGroup[g] >= limit {
+			return QueueState{Kind: WaitGroup, Key: g,
+				Reason: fmt.Sprintf("group %s: %d of %d running", g, p.inGroup[g], limit)}, false
+		}
+	}
+	if req.GroupOnly {
+		return QueueState{}, true
+	}
+	if s.maxRuns > 0 && p.running >= s.maxRuns {
+		return QueueState{Kind: WaitCap, Key: WaitCap,
+			Reason: fmt.Sprintf("run cap: %d of %d running", p.running, s.maxRuns)}, false
+	}
+	if p.reserved > 0 && p.reserved+cost > bookable(p.budget) {
+		return QueueState{Kind: WaitCPU, Key: WaitCPU,
+			Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
+				fmtCPUs(p.reserved), fmtCPUs(p.budget), fmtCPUs(cost))}, false
+	}
+	if p.running > 0 && s.host.cpus > 0 && float64(s.host.runnable)+p.unmeasured+cost > bookable(float64(s.host.cpus)) {
+		return QueueState{Kind: WaitCPU, Key: WaitCPU,
+			Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
+				s.host.runnable, s.host.cpus, fmtCPUs(cost))}, false
+	}
+	return QueueState{}, true
+}
+
+// take counts a granted lease in p.
+func (p *planState) take(req LeaseRequest, cost float64) {
+	if !req.GroupOnly {
+		p.running++
+		p.reserved += cost
+		p.unmeasured += cost
+	}
+	if req.Group != "" {
+		p.inGroup[req.Group]++
+	}
+}
+
+// An Admission is what would happen to a lease asked.
+type Admission struct {
+	// Cost is the CPUs the lease would be admitted at: declared, then measured for its class, then the default.
+	Cost float64 `json:"cost"`
+	// Starts is true when the lease would take a slot at once.
+	Starts bool `json:"starts"`
+	// Wait is where it would queue when it does not start. Position and Holders are not set.
+	Wait *QueueState `json:"wait,omitempty"`
+}
+
+// Admits says whether a lease for req would start now, through the same gates
+// a plan pass applies. It queues nothing and changes nothing. A lease queued
+// ahead that cannot start holds nothing back, because the pass is first fit.
+func (s *Scheduler) Admits(req LeaseRequest) (Admission, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.Group != "" {
+		if _, ok := s.groups[req.Group]; !ok {
+			return Admission{}, fmt.Errorf("%w: %q", ErrUnknownGroup, req.Group)
+		}
+	}
+	a := Admission{Cost: s.costOf(req)}
+	st, ok := s.fitLocked(s.planStateLocked(), req, a.Cost)
+	a.Starts = ok
+	if !ok {
+		a.Wait = &st
+	}
+	return a, nil
 }
 
 // sampled takes the host's load at a sample and plans again, so a queued job
