@@ -20,6 +20,8 @@ type CPUReport struct {
 	HostBusy float64 `json:"host_busy"`
 	// HostCPUs is how many CPUs the host's own counters cover. Zero means they were not read.
 	HostCPUs int `json:"host_cpus"`
+	// HostRunnable is how many tasks wanted a CPU at the last sample.
+	HostRunnable int `json:"host_runnable"`
 	// HostError says why the host's own CPU counters cannot be read.
 	HostError string `json:"host_error,omitempty"`
 	// OverBudget reports whether Measured is above Budget.
@@ -49,8 +51,6 @@ type governor struct {
 	mu      sync.Mutex
 	sampler *sampler
 	sample  Reading
-	// samples counts the samples taken.
-	samples uint64
 	// rates is what each lease used at the latest sample.
 	rates map[*Lease]float64
 	// unmeasured is how many running jobs had no CPU measurement at the latest sample.
@@ -121,9 +121,8 @@ func (l *Lease) key() string {
 	return fmt.Sprintf("#%d", l.seq)
 }
 
-// tick takes one sample, hands it to the scheduler, enforces limits, and brings
-// the budget controls in line. It decides with mu held, and makes the control
-// calls after.
+// tick takes one sample, enforces limits, and brings the budget controls in
+// line. It decides with mu held, and makes the control calls after.
 func (g *governor) tick() {
 	g.tickMu.Lock()
 	defer g.tickMu.Unlock()
@@ -149,7 +148,6 @@ func (g *governor) tick() {
 	g.mu.Lock()
 	live := g.recordSampleLocked(targets, rates, reading, now)
 	errLine, okLine := g.watchHostLoadLocked(reading, now)
-	seen := g.usageLocked(reading)
 	plan, limited, revoke := g.planLimitsLocked(live, now)
 	plan = append(plan, g.planBudgetLocked(live, reading, budget, now)...)
 	g.mu.Unlock()
@@ -160,7 +158,7 @@ func (g *governor) tick() {
 	if okLine != "" {
 		g.sched.cfg.Logf("%s", okLine)
 	}
-	g.sched.sampled(seen)
+	g.sched.sampled(hostLoad{cpus: reading.HostCPUs, runnable: reading.HostRunnable})
 	for _, a := range plan {
 		g.perform(a, facts, now)
 	}
@@ -226,7 +224,6 @@ func (g *governor) measure(targets []target, reading Reading, now time.Time) map
 // not ended.
 func (g *governor) recordSampleLocked(targets []target, rates map[*Lease]float64, reading Reading, now time.Time) []target {
 	g.sample = reading
-	g.samples++
 	g.rates = map[*Lease]float64{}
 	g.unmeasured = 0
 	var live []target
@@ -246,18 +243,6 @@ func (g *governor) recordSampleLocked(targets []target, rates map[*Lease]float64
 		g.rates[t.l] = rate
 	}
 	return live
-}
-
-// usageLocked copies the latest sample for the scheduler.
-func (g *governor) usageLocked(r Reading) usage {
-	u := usage{n: g.samples, rates: make(map[*Lease]float64, len(g.rates))}
-	for l, rate := range g.rates {
-		u.rates[l] = rate
-	}
-	if r.HostOK && r.HostCPUs > 0 {
-		u.hostBusy, u.hostCPUs = r.HostBusy, r.HostCPUs
-	}
-	return u
 }
 
 // asksTheHost reports whether a process-tree lease enables a mechanism whose
@@ -302,15 +287,16 @@ func (g *governor) report() CPUReport {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	out := CPUReport{
-		At:         g.sample.At,
-		CPUs:       g.sample.CPUs,
-		Budget:     budget,
-		HostBusy:   g.sample.HostBusy,
-		HostCPUs:   g.sample.HostCPUs,
-		HostError:  g.hostErr,
-		Unmeasured: g.unmeasured,
-		Jobs:       map[string]float64{},
-		Note:       g.sample.Note,
+		At:           g.sample.At,
+		CPUs:         g.sample.CPUs,
+		Budget:       budget,
+		HostBusy:     g.sample.HostBusy,
+		HostCPUs:     g.sample.HostCPUs,
+		HostRunnable: g.sample.HostRunnable,
+		HostError:    g.hostErr,
+		Unmeasured:   g.unmeasured,
+		Jobs:         map[string]float64{},
+		Note:         g.sample.Note,
 	}
 	if out.CPUs == 0 {
 		out.CPUs = runtime.NumCPU()

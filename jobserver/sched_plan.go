@@ -22,18 +22,18 @@ type batchState struct {
 // tells each lease still queued where it stands. Caller holds s.mu.
 //
 // A lease fits when its group has a free slot, and, unless it is GroupOnly,
-// when the count cap has room. Its cost fits the CPU budget plus a tenth, or
-// the CPUs are idle (see idleFits). The CPU budget never holds back the only
-// lease: work larger than the whole budget still runs on an otherwise idle
-// scheduler.
+// when the count cap has room. Its cost fits bookable. The host must also
+// have room: the tasks that want a CPU. That host is with the jobs not
+// measured yet and this counted at their cost, stay within bookable for the
+// host's CPUs. Neither CPU limit holds back the only lease, so work larger
+// than the whole budget still runs on an otherwise idle scheduler.
 func (s *Scheduler) planLocked() {
 	if len(s.waiting) == 0 {
 		return
 	}
 	now := s.now()
 	budget := s.budgetLocked()
-	running, reserved := 0, 0.0
-	inUse, unmeasuredCost := s.useLocked()
+	running, reserved, unmeasured := 0, 0.0, 0.0
 	inGroup := map[string]int{}
 	for _, h := range s.holding {
 		if h.req.Group != "" {
@@ -42,6 +42,9 @@ func (s *Scheduler) planLocked() {
 		if !h.req.GroupOnly {
 			running++
 			reserved += h.cost
+			if !h.Measured() {
+				unmeasured += h.cost
+			}
 		}
 	}
 	type wait struct {
@@ -63,19 +66,21 @@ func (s *Scheduler) planLocked() {
 					Reason: fmt.Sprintf("run cap: %d of %d running", running, s.maxRuns)}})
 				continue
 			}
-			if reserved > 0 && reserved+l.cost > budget*overbook {
-				if !s.idleFits(l.cost, reserved, inUse, unmeasuredCost, budget) {
-					queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
-						Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
-							fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
-					continue
-				}
-				s.filled = s.used.n
+			if reserved > 0 && reserved+l.cost > bookable(budget) {
+				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
+					Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
+						fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
+				continue
+			}
+			if running > 0 && s.host.cpus > 0 && float64(s.host.runnable)+unmeasured+l.cost > bookable(float64(s.host.cpus)) {
+				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
+					Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
+						s.host.runnable, s.host.cpus, fmtCPUs(l.cost))}})
+				continue
 			}
 			running++
 			reserved += l.cost
-			inUse += l.cost
-			unmeasuredCost += l.cost
+			unmeasured += l.cost
 		}
 		if l.req.Group != "" {
 			inGroup[l.req.Group]++
@@ -103,52 +108,12 @@ func (s *Scheduler) planLocked() {
 	}
 }
 
-// useLocked adds up the CPUs the running jobs use now. A job that is not
-// measured yet counts at its cost, and unmeasured is the part of the sum that
-// comes from costs.
-func (s *Scheduler) useLocked() (inUse, unmeasured float64) {
-	for _, h := range s.holding {
-		if h.req.GroupOnly {
-			continue
-		}
-		if rate, ok := s.used.rates[h]; ok {
-			inUse += rate
-			continue
-		}
-		inUse += h.cost
-		unmeasured += h.cost
-	}
-	return inUse, unmeasured
-}
-
-// idleFits reports whether a job whose cost does not fit the booked CPUs may
-// start because CPUs are idle. The CPUs must have stayed idle for idleSamples
-// samples, and the last such start must be as old. The host and the budget
-// must both have room for the job, which is its cost or idleRoom, whichever
-// is less.
-func (s *Scheduler) idleFits(cost, reserved, inUse, unmeasured, budget float64) bool {
-	u := s.used
-	if u.hostCPUs == 0 || s.idleRun < idleSamples || u.n-s.filled < idleSamples {
-		return false
-	}
-	room := min(cost, idleRoom)
-	return reserved+cost <= budget*fillLimit &&
-		inUse+room <= budget &&
-		u.hostBusy+unmeasured+room <= float64(u.hostCPUs)
-}
-
-// sampled takes what the CPUs did at a sample, counts the samples in a row at
-// which they sat idle, and plans again.
-func (s *Scheduler) sampled(u usage) {
+// sampled takes the host's load at a sample and plans again, so a queued job
+// starts as soon as the host has room.
+func (s *Scheduler) sampled(h hostLoad) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.used = u
-	inUse, unmeasured := s.useLocked()
-	if u.hostCPUs > 0 && min(float64(u.hostCPUs)-u.hostBusy-unmeasured, s.budgetLocked()-inUse) >= idleRoom {
-		s.idleRun++
-	} else {
-		s.idleRun = 0
-	}
+	s.host = h
 	s.planLocked()
 }
 

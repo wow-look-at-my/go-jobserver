@@ -60,28 +60,17 @@ const (
 	DefaultRetryInterval = 10 * time.Second
 )
 
-// overbook is how far past the budget the scheduler books CPUs.
-const overbook = 1.1
+// bookable is how many CPUs of cost the scheduler books for a budget. The
+// budget plus CPUs, or plus the whole budget when that is less.
+func bookable(budget float64) float64 {
+	return budget + min(budget, 2)
+}
 
-// fillLimit is how many budgets of CPUs the scheduler may book when it starts a job only because CPUs are idle.
-const fillLimit = 2.0
-
-// idleRoom is how many CPUs must be idle for a job that starts only because CPUs are idle.
-const idleRoom = 0.5
-
-// idleSamples is how many samples in a row the CPUs must be idle, and how many samples pass between such starts.
-const idleSamples = 5
-
-// usage is what the CPUs did at the last sample.
-type usage struct {
-	// n counts the samples, so a rule can act once for each sample.
-	n uint64
-	// rates is how many CPUs each running job used.
-	rates map[*Lease]float64
-	// hostBusy is how many CPUs the whole host used.
-	hostBusy float64
-	// hostCPUs is how many CPUs the host has. It is zero when the sample did not read the host's own counters.
-	hostCPUs int
+// hostLoad is how many tasks wanted a CPU at the last sample, on a host with
+// cpus CPUs. cpus is zero.
+type hostLoad struct {
+	cpus     int
+	runnable int
 }
 
 // Scheduler starts leases and governs the ones that run.
@@ -98,12 +87,8 @@ type Scheduler struct {
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time
-	// used is what the CPUs did at the last sample.
-	used usage
-	// filled is the sample at which the last job started only because CPUs were idle.
-	filled uint64
-	// idleRun is how many samples in a row the CPUs were idle.
-	idleRun int
+	// host is the host's load at the last sample.
+	host hostLoad
 
 	classes  *classBook
 	gov      *governor

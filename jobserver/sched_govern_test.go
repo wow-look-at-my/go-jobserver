@@ -119,19 +119,19 @@ func (f *fakeActuator) setOutcomes(apply, revert Outcome) {
 var throttlePolicy = JobPolicy{Priority: PrioritySettings{Enabled: true, Nice: 10}}
 
 func TestGovernorThrottlesOnlyTheLeaseAboveItsCost(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 1, RevertAfter: -1})
 	quiet, err := s.Acquire(context.Background(), LeaseRequest{ID: "quiet", Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}}, nil)
 	require.NoError(t, err)
 	hog, err := s.Acquire(context.Background(), LeaseRequest{ID: "hog", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}}, nil)
 	require.NoError(t, err)
-	qa, ha := newFakeActuator(0.9), newFakeActuator(3)
+	qa, ha := newFakeActuator(0.3), newFakeActuator(3)
 	quiet.AttachActuator(qa)
 	hog.AttachActuator(ha)
 
 	s.gov.tick()
 	report := s.Readings()
 	assert.True(t, report.OverBudget)
-	assert.InDelta(t, 3.9, report.Measured, 1e-9)
+	assert.InDelta(t, 3.3, report.Measured, 1e-9)
 	assert.True(t, ha.isApplied(MechPriority), "the lease above its cost is the one throttled")
 	assert.False(t, qa.isApplied(MechPriority), "a lease within its cost is left alone")
 	require.Len(t, s.Controls(), 1)
@@ -152,10 +152,10 @@ func TestGovernorThrottlesEveryLeaseWhenNoneIsAboveItsCost(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2})
 	var acts []*fakeActuator
 	for _, id := range []string{"a", "b"} {
-		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 0.6, Priority: throttlePolicy.Priority}}, nil)
+		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 1.1, Priority: throttlePolicy.Priority}}, nil)
 		require.NoError(t, err)
-		// Each is within its cost, and together they are over the target.
-		a := newFakeActuator(0.62)
+		// Each is within its cost, and together they are over the booked CPUs.
+		a := newFakeActuator(1.12)
 		l.AttachActuator(a)
 		acts = append(acts, a)
 	}

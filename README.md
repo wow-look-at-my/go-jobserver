@@ -132,7 +132,9 @@ On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao p
 
 #### An unreadable host load is a configuration error
 
-The daemon needs the host's own CPU counters. Without them it cannot see work that is not one of its jobs. It cannot see idle CPUs. Under load it keeps starting work. It can destabilize the system. So the daemon treats this as a configuration error and does not run on quietly:
+The daemon needs the host's own CPU counters. Without them it cannot see work that is not one of its jobs. It cannot see how many tasks want a CPU. It cannot hold a job back for a host that is already full. Under load it keeps starting work. It can destabilize the system.
+
+So the daemon treats this as a configuration error and does not run on quietly:
 
 - It logs an error at the first sample that cannot read the counters, and again every few minutes until it can. The interval is fixed. The line says why the load is unknown. The scheduler writes it to `ErrorLogf`, or to `Logf` when there is no `ErrorLogf`.
 - The CPU status carries the reason as `host_error`. The dashboard shows a banner, and `host load unknown` where it shows the host's load.
@@ -140,19 +142,21 @@ The daemon needs the host's own CPU counters. Without them it cannot see work th
 
 ### Before a job starts
 
-Each job declares what it costs: the CPUs it expects to use. The daemon adds up the costs of the jobs it started. A job starts when its cost fits under the budget plus a tenth. Until then it stays `active`. It starts when a running job finishes. `-budget` sets the budget.
+Each job declares what it costs: the CPUs it expects to use. The daemon adds up the costs of the jobs it started. A job starts when its cost fits under the budget plus two CPUs. Until then it stays `active`. It starts the moment a running job finishes. `-budget` sets the budget.
 
 The default is one CPU for each CPU of the host. A job that costs more than the whole budget still runs when nothing else runs, so no job waits forever.
 
-The extra tenth is on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. With the budget set to the whole machine, the extra tenth keeps every CPU busy. Start such jobs at a low priority, for example with `nice`, so the rest of the host stays responsive while every CPU is busy.
+The daemon also looks at the host. A job waits when this sum passes the host's CPUs plus two:
 
-A cost can also be too high. The daemon starts a waiting job even though the costs already fill the budget plus a tenth. This happens when CPUs stay idle for several samples in a row. It waits as long again before it starts another, so it sees what the first one uses. It starts such a job only while all of these hold:
+- The tasks that want a CPU right now. That includes work that is not a job.
+- The cost of the jobs the daemon started that are not measured yet.
+- The cost of the job that waits.
 
-- The host's own CPU counters show idle CPUs for the job: its cost, or half a CPU, whichever is less. A host whose counters cannot be read never satisfies this.
-- The CPUs the running jobs use now, plus that much, stay within the budget. A job that is not measured yet counts at its cost.
-- The costs of the running jobs, plus the job's cost, stay within twice the budget.
+Ninja's `-l` does the same with the load average. The load average lags by about a minute, so the daemon counts the tasks that want a CPU right now. This limit does not look at the budget.
 
-A short dip in use does not start a job. Only idle CPUs that stay idle do.
+A job always starts when none runs. A busy host cannot starve the daemon.
+
+The two extra CPUs are on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. Ninja does the same: its default is more jobs than the host has CPUs. With a small budget the extra is the budget itself, so a budget of one CPU books two. With the budget set to the whole machine, the extra CPUs keep every CPU busy. Start such jobs at a low priority, for example with `nice`, so the rest of the host stays responsive while every CPU is busy.
 
 The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured. `-cost` prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
 
@@ -165,9 +169,9 @@ go-jobserver -budget 6 run
 
 Every sample, the daemon adds up the CPUs the running jobs use. A job that is not measured yet counts as using its cost. A job that costs more than the whole budget counts as using the whole budget, because the daemon let it run alone.
 
-- At or below the budget plus a tenth, the daemon leaves the jobs alone. That level is the target.
-- Above the target, the daemon applies the controls each job enables. It applies them to the jobs that use more than their cost, or to every running job when none does.
-- The controls come off when the load stayed at or below the budget for `RevertAfter`. Between the budget and the target they stay as they are. A load that moves around the target does not switch them on and off.
+- At or below the budget plus two CPUs, the daemon leaves the jobs alone.
+- Above that, the daemon applies the controls each job enables. It applies them to the jobs that use more than their cost, or to every running job when none does.
+- The controls come off when the load stayed at or below the budget for `RevertAfter`. Between the budget and the budget plus two CPUs they stay as they are. A load that moves around the upper line does not switch them on and off.
 
 A control the host refuses is tried again every `RetryInterval`, for as long as the job runs. A negative `RevertAfter` or `RetryInterval` means no wait. Both are `SchedulerConfig` fields. The daemon runs on the defaults:
 
@@ -276,7 +280,7 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget plus a tenth, or CPUs are idle (see "Before a job starts"). Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget plus two CPUs (see "Before a job starts"). Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
 
 A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
 
@@ -290,7 +294,7 @@ Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its posit
 
 | condition | action |
 | --- | --- |
-| the running jobs use more than the budget plus a tenth | the policy's mechanisms on the leases that use more than their cost, or on all of them when none does |
+| the running jobs use more than the budget plus two CPUs | the policy's mechanisms on the leases that use more than their cost, or on all of them when none does |
 | a lease uses more than `Limits.MaxCPUs` | `Actuator.Cap` at the limit, and revoked after `Limits.Grace` when it cannot be capped |
 | a lease passes `Limits.MaxCPUSeconds` | revoked |
 

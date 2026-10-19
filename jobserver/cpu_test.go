@@ -16,7 +16,7 @@ func TestSchedulerHoldsAJobThatWouldOversubscribeTheBudget(t *testing.T) {
 	srv := newTestServer(t, func(c *Config) {
 		c.Runner = runner
 		c.CPUBudget = 2
-		c.DefaultCost = 2
+		c.DefaultCost = 3
 		c.MaxConcurrent = 4
 	})
 	first, _, err := srv.Enqueue(Spec{Command: []string{"first"}})

@@ -14,6 +14,8 @@ type hostStat struct {
 	total uint64
 	// cpus is how many per-CPU lines the read had.
 	cpus int
+	// running is how many tasks wanted a CPU at the read, the reader included.
+	running int
 }
 
 // A hostSource reads the host's own CPU counters. They count every process
@@ -42,14 +44,23 @@ func newHostSource() hostSource {
 	return procStatSource{path: "/proc/stat"}
 }
 
-// parseHostStat reads the aggregate cpu line of /proc/stat and counts the
-// per-CPU lines. The columns are user, nice, system, idle, iowait, irq,
-// softirq, steal, guest and guest_nice. An old kernel stops early.
+// parseHostStat reads the aggregate cpu line of /proc/stat, counts the
+// per-CPU lines and reads the procs_running line. The columns are user, nice,
+// system, idle, iowait, irq, softirq, steal, guest and guest_nice. An old
+// kernel stops early.
 func parseHostStat(text string) (hostStat, error) {
 	var st hostStat
-	found := false
+	found, running := false, false
 	for _, line := range strings.Split(text, "\n") {
 		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "procs_running" {
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n < 0 {
+				return hostStat{}, fmt.Errorf("jobserver: the procs_running line %q is not a count", line)
+			}
+			st.running, running = n, true
+			continue
+		}
 		if len(fields) == 0 || !strings.HasPrefix(fields[0], "cpu") {
 			continue
 		}
@@ -82,6 +93,9 @@ func parseHostStat(text string) (hostStat, error) {
 	}
 	if st.cpus == 0 {
 		return hostStat{}, errors.New("jobserver: no per-CPU lines")
+	}
+	if !running {
+		return hostStat{}, errors.New("jobserver: no procs_running line")
 	}
 	return st, nil
 }

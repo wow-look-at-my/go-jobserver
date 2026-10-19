@@ -33,6 +33,8 @@ type Reading struct {
 	HostCPUs int
 	// HostOK reports whether HostBusy comes from the host's own counters.
 	HostOK bool
+	// HostRunnable is how many tasks wanted a CPU at the sample, not counting the reader. It is zero when HostCPUs is.
+	HostRunnable int
 	// HostErr says why the host's own counters cannot be read. It is empty when they can.
 	HostErr string
 	// Window is how long the rates were measured over.
@@ -386,6 +388,7 @@ func (s *sampler) readHost(r *Reading) bool {
 	prev, had := s.hostPrev, s.hostBase
 	s.hostPrev, s.hostBase = st, true
 	r.HostCPUs = st.cpus
+	r.HostRunnable = max(st.running-1, 0)
 	if !had || st.total <= prev.total || st.busy < prev.busy {
 		return true
 	}

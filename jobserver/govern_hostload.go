@@ -33,7 +33,7 @@ func (g *governor) watchHostLoadLocked(r Reading, now time.Time) (errLine, okLin
 // hostLoadError is the error for a host whose load go-jobserver cannot read.
 func hostLoadError(why string, unknown time.Duration) string {
 	line := fmt.Sprintf("go-jobserver: CONFIGURATION ERROR: the host's CPU load is unknown (%s). "+
-		"go-jobserver cannot see work outside its own jobs, and it cannot see idle CPUs. "+
+		"go-jobserver cannot see work outside its own jobs, and it cannot see how many tasks want a CPU. "+
 		"Under load it keeps starting work, and it can destabilize the system. "+
 		"It needs the host's own CPU counters.", why)
 	if unknown > 0 {

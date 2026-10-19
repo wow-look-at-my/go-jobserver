@@ -178,15 +178,15 @@ func TestControlsComeOffOnlyOnceTheLoadHasStayedAtTheBudgetForRevertAfter(t *tes
 		s.gov.tick()
 	}
 
-	step(0, 3)
-	require.True(t, a.isApplied(MechPriority), "above the budget plus a tenth, the control goes on")
-	// The throttled job uses less and then more: under the budget, between the budget and the target, and over the target.
+	step(0, 5)
+	require.True(t, a.isApplied(MechPriority), "above the budget plus two CPUs, the control goes on")
+	// The throttled job uses less and then more: under the budget, between the budget and the booked CPUs, and over them.
 	step(time.Second, 1.5)
-	step(time.Second, 2.1)
+	step(time.Second, 3)
 	step(time.Second, 1)
 	step(2*time.Second, 1)
 	step(2*time.Second, 1)
-	step(time.Second, 2.5)
+	step(time.Second, 4.5)
 	step(time.Second, 1)
 	step(4*time.Second, 1)
 	assert.Equal(t, 1, a.count("apply priority"))
@@ -203,14 +203,14 @@ func TestControlsComeOffOnlyOnceTheLoadHasStayedAtTheBudgetForRevertAfter(t *tes
 func TestANegativeRevertAfterRevertsAtTheFirstSampleAtTheBudget(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
 	hog := admit(t, s, hogRequest)
-	a := newFakeActuator(3)
+	a := newFakeActuator(5)
 	hog.AttachActuator(a)
 
 	s.gov.tick()
 	require.True(t, a.isApplied(MechPriority))
-	a.set(2.1)
+	a.set(3)
 	s.gov.tick()
-	assert.True(t, a.isApplied(MechPriority), "between the budget and the target, the control stays")
+	assert.True(t, a.isApplied(MechPriority), "between the budget and the booked CPUs, the control stays")
 	a.set(2)
 	s.gov.tick()
 	assert.False(t, a.isApplied(MechPriority), "with no wait, the first sample at the budget reverts")
@@ -228,23 +228,23 @@ func TestNewSchedulerFillsTheGovernorDefaults(t *testing.T) {
 }
 
 func TestAJobNotMeasuredYetCountsAtItsCost(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 3})
-	seen := admit(t, s, LeaseRequest{ID: "seen", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}})
-	unseen := admit(t, s, LeaseRequest{ID: "unseen", Policy: JobPolicy{Cost: 2, Priority: throttlePolicy.Priority}})
-	sa, ua := newFakeActuator(0.5), newFakeActuator(5)
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 8})
+	seen := admit(t, s, LeaseRequest{ID: "seen", Policy: JobPolicy{Cost: 3.5, Priority: throttlePolicy.Priority}})
+	unseen := admit(t, s, LeaseRequest{ID: "unseen", Policy: JobPolicy{Cost: 5, Priority: throttlePolicy.Priority}})
+	sa, ua := newFakeActuator(3.5), newFakeActuator(5)
 	ua.noRead = true
 	seen.AttachActuator(sa)
 	unseen.AttachActuator(ua)
 	// Both were started under the larger budget.
-	s.SetCPUBudget(1)
+	s.SetCPUBudget(4)
 
 	s.gov.tick()
 	report := s.Readings()
-	assert.InDelta(t, 0.5, report.Measured, 1e-9, "a job with no measurement is not part of what was measured")
+	assert.InDelta(t, 3.5, report.Measured, 1e-9, "a job with no measurement is not part of what was measured")
 	assert.Equal(t, 1, report.Unmeasured)
 	assert.NotContains(t, report.Jobs, "unseen")
 	assert.False(t, report.OverBudget, "what was measured is within the budget")
-	assert.True(t, ua.isApplied(MechPriority), "at its cost, the job puts the load over the target")
+	assert.True(t, ua.isApplied(MechPriority), "at the budget, the job puts the load over the booked CPUs")
 	assert.True(t, sa.isApplied(MechPriority), "with no job above its cost, every job is throttled")
 	assert.False(t, unseen.Measured())
 	assert.Zero(t, unseen.CPUSeconds())
@@ -334,7 +334,7 @@ func TestANegativeRetryIntervalTriesAtEverySample(t *testing.T) {
 
 func TestARefusedRevertKeepsTheControlInEffectUntilItTakes(t *testing.T) {
 	var logs logLines
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1, Logf: logs.logf})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 1, RevertAfter: -1, Logf: logs.logf})
 	clock := &testClock{at: time.Now()}
 	s.now = clock.now
 	l := admit(t, s, LeaseRequest{ID: "sticky", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}})
@@ -366,7 +366,7 @@ func TestARefusedRevertKeepsTheControlInEffectUntilItTakes(t *testing.T) {
 }
 
 func TestAnEndingLeaseTriesItsRefusedRevertOnceAndDropsIt(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 1, RevertAfter: -1})
 	l := admit(t, s, hogRequest)
 	a := newFakeActuator(3)
 	a.revertOut = OutcomeRefused

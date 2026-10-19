@@ -69,10 +69,9 @@ func (g *governor) graceLocked(over []limited, now time.Time, revoke map[*Lease]
 	}
 }
 
-// planBudgetLocked weighs the load against the budget. Above the budget plus
-// a tenth, it plans the controls. Once the load has stayed at or below the
-// budget for RevertAfter, it plans the reverts. In between, the controls stay
-// as they are.
+// planBudgetLocked weighs the load against the budget. Above bookable, it
+// plans the controls. Once the load has stayed at or below the budget for
+// RevertAfter, it plans the reverts. In between, the controls stay as they are.
 func (g *governor) planBudgetLocked(live []target, reading Reading, budget float64, now time.Time) []action {
 	load := 0.0
 	for _, t := range live {
@@ -84,7 +83,7 @@ func (g *governor) planBudgetLocked(live []target, reading Reading, budget float
 		load += rate
 	}
 	switch {
-	case load > budget*overbook:
+	case load > bookable(budget):
 		g.lowSince = time.Time{}
 		return g.planThrottleLocked(live, reading, now)
 	case load <= budget:
