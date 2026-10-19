@@ -144,7 +144,7 @@ Each job declares what it costs: the CPUs it expects to use. The daemon adds up 
 
 The default is one CPU for each CPU of the host. A job that costs more than the whole budget still runs when nothing else runs, so no job waits forever.
 
-The extra tenth is on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. With the budget set to the whole machine, the extra tenth keeps every CPU busy. The controls below keep the rest of the host responsive while it does.
+The extra tenth is on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. With the budget set to the whole machine, the extra tenth keeps every CPU busy. Start such jobs at a low priority, for example with `nice`, so the rest of the host stays responsive while every CPU is busy.
 
 A cost can also be too high. When CPUs are idle, the daemon starts a waiting job even though the costs already fill the budget plus a tenth. It does this only while all of these hold:
 
@@ -178,7 +178,7 @@ jobserver.SchedulerConfig{
 }
 ```
 
-The control to use for a busy host is `priority`. It lowers the job's priority and takes no CPU from a host that has none to spare. The host stays responsive while every CPU stays busy. `freeze` and `affinity` hold a job back. They can leave CPUs idle. Mechanisms, each enabled or disabled per job:
+No host can use more CPUs than it has. With the budget set to the whole machine, the load never passes the target, so the controls never go on. Of the controls, `priority` keeps CPUs busy: it lowers the job's priority and takes no CPU from a host that has none to spare. `freeze` and `affinity` hold a job back. They can leave CPUs idle. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
