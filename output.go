@@ -19,6 +19,7 @@ func printCPU(cpu jobserver.CPUReport) {
 		fmt.Printf("         the daemon cannot see work outside its own jobs or how many tasks want a CPU, and can destabilize the system under load\n")
 	} else {
 		fmt.Printf("host     %.2f\n", cpu.HostBusy)
+		fmt.Printf("runnable %d\n", cpu.HostRunnable)
 	}
 	fmt.Printf("over     %v\n", cpu.OverBudget)
 	if cpu.Note != "" {

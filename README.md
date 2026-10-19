@@ -182,7 +182,7 @@ jobserver.SchedulerConfig{
 }
 ```
 
-No host can use more CPUs than it has. With the budget set to the whole machine, the load never passes the target, so the controls never go on. Of the controls, `priority` keeps CPUs busy: it lowers the job's priority and takes no CPU from a host that has none to spare. `freeze` and `affinity` hold a job back. They can leave CPUs idle. Mechanisms, each enabled or disabled per job:
+No host can use more CPUs than it has. With the budget set to the whole machine, the load never passes the budget plus two CPUs, so the controls never go on. Of the controls, `priority` keeps CPUs busy: it lowers the job's priority and takes no CPU from a host that has none to spare. `freeze` and `affinity` hold a job back. They can leave CPUs idle. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |

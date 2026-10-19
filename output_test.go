@@ -22,10 +22,11 @@ func TestStatsPrintsAnUnreadableHostLoadAsAnError(t *testing.T) {
 
 func TestStatsPrintsAReadableHostLoadAsANumber(t *testing.T) {
 	out, err := capture(t, func() error {
-		printCPU(jobserver.CPUReport{CPUs: 4, HostBusy: 1.5})
+		printCPU(jobserver.CPUReport{CPUs: 4, HostBusy: 1.5, HostRunnable: 6})
 		return nil
 	})
 	require.NoError(t, err)
 	assert.Contains(t, out, "host     1.50")
+	assert.Contains(t, out, "runnable 6")
 	assert.NotContains(t, out, "error")
 }
