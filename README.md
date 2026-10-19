@@ -133,7 +133,7 @@ On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao p
 
 A daemon that does not know the host's load cannot protect the host. It sees only its own jobs. It cannot tell when other work saturates the machine, and under load it keeps starting work. The daemon treats that as an active configuration error and does not run on quietly:
 
-- It logs an error line at the first sample that cannot read the counters, and again every `HostBlindEvery` (a few minutes by default) while the load stays unknown. The line names why, and says that the system can be destabilized under load. The scheduler writes it to `ErrorLogf`, which falls back to `Logf`.
+- It logs an error line at the first sample that cannot read the counters, and again every few minutes while the load stays unknown. The interval is fixed. The line names why, and says that the system can be destabilized under load. The scheduler writes it to `ErrorLogf`, which falls back to `Logf`.
 - The CPU status carries the reason as `host_error`, and the dashboard shows a banner and `host load unknown` where it shows the host's load.
 - A single line says when the counters can be read again.
 
@@ -158,12 +158,11 @@ The controls come off only after the load stayed low for a while. A throttled lo
 
 ```go
 jobserver.SchedulerConfig{
-	HostBusyHigh:   jobserver.DefaultHostBusyHigh,   // 0.90: the host is saturated at this share of its CPUs
-	HostBusyLow:    jobserver.DefaultHostBusyLow,    // 0.75: it stops being saturated below this share
-	ReleaseBelow:   jobserver.DefaultReleaseBelow,   // 0.85: share of the budget the load must fall to
-	ReleaseAfter:   jobserver.DefaultReleaseAfter,   // 15s: how long the load must stay there
-	RetryInterval:  jobserver.DefaultRetryInterval,  // 10s: wait before a refused control is tried again
-	HostBlindEvery: jobserver.DefaultHostBlindEvery, // 5m: how often the unreadable-host-load error repeats
+	HostBusyHigh:  jobserver.DefaultHostBusyHigh,  // 0.90: the host is saturated at this share of its CPUs
+	HostBusyLow:   jobserver.DefaultHostBusyLow,   // 0.75: it stops being saturated below this share
+	ReleaseBelow:  jobserver.DefaultReleaseBelow,  // 0.85: share of the budget the load must fall to
+	ReleaseAfter:  jobserver.DefaultReleaseAfter,  // 15s: how long the load must stay there
+	RetryInterval: jobserver.DefaultRetryInterval, // 10s: wait before a refused control is tried again
 }
 ```
 

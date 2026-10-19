@@ -27,31 +27,18 @@ func TestAnUnreadableHostLoadIsAnErrorThatRepeats(t *testing.T) {
 	assert.NotContains(t, line, "has been unknown", "the first line has no duration to report")
 	assert.Equal(t, "this host has no /proc/stat", s.Readings().HostError)
 
-	clock.add(DefaultHostBlindEvery - time.Second)
+	clock.add(hostBlindEvery - time.Second)
 	s.gov.tick()
 	assert.Len(t, errs.lines, 1, "the error waits for its interval")
 	clock.add(time.Second)
 	s.gov.tick()
 	require.Len(t, errs.lines, 2, "the error comes again when the interval has passed")
 	assert.Contains(t, errs.lines[1], "unknown for 5m0s")
-	clock.add(DefaultHostBlindEvery)
+	clock.add(hostBlindEvery)
 	s.gov.tick()
 	require.Len(t, errs.lines, 3)
 	assert.Contains(t, errs.lines[2], "unknown for 10m0s")
 	assert.Empty(t, infos.containing("CONFIGURATION ERROR"), "an error line goes to ErrorLogf only")
-}
-
-func TestTheErrorIntervalIsConfigurable(t *testing.T) {
-	var errs lineLog
-	s := newTestScheduler(t, SchedulerConfig{ErrorLogf: errs.logf, HostBlindEvery: time.Minute})
-	clock := &testClock{at: time.Now()}
-	s.now = clock.now
-
-	s.gov.tick()
-	clock.add(time.Minute)
-	s.gov.tick()
-	require.Len(t, errs.lines, 2)
-	assert.Contains(t, errs.lines[1], "repeats every 1m0s")
 }
 
 func TestTheErrorGoesToLogfWhenThereIsNoErrorLogf(t *testing.T) {
