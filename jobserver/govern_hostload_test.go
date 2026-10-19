@@ -27,14 +27,14 @@ func TestAnUnreadableHostLoadIsAnErrorThatRepeats(t *testing.T) {
 	assert.NotContains(t, line, "has been unknown", "the first line has no duration to report")
 	assert.Equal(t, "this host has no /proc/stat", s.Readings().HostError)
 
-	clock.add(hostBlindEvery - time.Second)
+	clock.add(hostLoadErrorEvery - time.Second)
 	s.gov.tick()
 	assert.Len(t, errs.lines, 1, "the error waits for its interval")
 	clock.add(time.Second)
 	s.gov.tick()
 	require.Len(t, errs.lines, 2, "the error comes again when the interval has passed")
 	assert.Contains(t, errs.lines[1], "unknown for 5m0s")
-	clock.add(hostBlindEvery)
+	clock.add(hostLoadErrorEvery)
 	s.gov.tick()
 	require.Len(t, errs.lines, 3)
 	assert.Contains(t, errs.lines[2], "unknown for 10m0s")
@@ -86,15 +86,6 @@ func TestAReadableHostIsNoError(t *testing.T) {
 		s.gov.tick()
 	}
 	assert.Empty(t, errs.lines, "a first read that only sets the baseline is no failure")
-	assert.Empty(t, s.Readings().HostError)
-}
-
-func TestAHostCheckTurnedOffNeedsNoHostLoad(t *testing.T) {
-	var errs lineLog
-	s := newTestScheduler(t, SchedulerConfig{HostBusyHigh: -1, ErrorLogf: errs.logf})
-
-	s.gov.tick()
-	assert.Empty(t, errs.lines)
 	assert.Empty(t, s.Readings().HostError)
 }
 

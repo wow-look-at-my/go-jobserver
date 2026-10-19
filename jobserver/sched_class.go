@@ -79,7 +79,7 @@ func (b *classBook) cost(class string) (float64, bool) {
 }
 
 // observe records one measured run of a class and saves the history. span is
-// how long the run's readings cover.
+// how long the run's measurements cover.
 func (b *classBook) observe(class string, cpuSeconds float64, span time.Duration, revoked bool) {
 	if class == "" || span <= 0 {
 		return

@@ -121,7 +121,7 @@ type Lease struct {
 	reason     string
 	released   bool
 	cpuSeconds float64
-	// measuredFor is how long the readings behind cpuSeconds cover.
+	// measuredFor is how long the measurements behind cpuSeconds cover.
 	measuredFor time.Duration
 	cpus        float64
 	measured    bool

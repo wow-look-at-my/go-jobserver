@@ -55,7 +55,7 @@ func (g *governor) perform(a action, facts hostFacts, now time.Time) {
 	default:
 		g.dropLocked(l, k)
 	}
-	first := g.settleLocked(l, k, took, c, now)
+	first := g.recordCallLocked(l, k, took, c, now)
 	g.mu.Unlock()
 	if first {
 		g.sched.cfg.Logf("go-jobserver: %s on %s%s did not take (%s: %s); trying again %s",
@@ -112,10 +112,10 @@ func revertControl(a Actuator, c Control, cpus int) Control {
 		Outcome: res.outcome, Detail: res.detail, At: time.Now()}
 }
 
-// settleLocked files one control call. A call that did not take starts or
+// recordCallLocked files one control call. A call that did not take starts or
 // continues a streak, and waits RetryInterval for the next try. It reports
 // whether the call starts a streak, which is the failure to log.
-func (g *governor) settleLocked(l *Lease, k controlKey, took bool, c Control, now time.Time) bool {
+func (g *governor) recordCallLocked(l *Lease, k controlKey, took bool, c Control, now time.Time) bool {
 	g.appendHistoryLocked(c)
 	tries := g.failed[l]
 	if took {
@@ -168,9 +168,9 @@ func (g *governor) mayTryLocked(l *Lease, k controlKey, now time.Time) bool {
 	return !failed || every < 0 || now.Sub(at) >= every
 }
 
-// wantsLocked reports whether a budget control should be applied now: it is
-// not in effect yet, and it may be tried.
-func (g *governor) wantsLocked(l *Lease, k controlKey, now time.Time) bool {
+// shouldApplyLocked reports whether a budget control should be applied now: it
+// is not in effect yet, and it may be tried.
+func (g *governor) shouldApplyLocked(l *Lease, k controlKey, now time.Time) bool {
 	return !g.isActiveLocked(l, k) && g.mayTryLocked(l, k, now)
 }
 

@@ -69,40 +69,39 @@ func (g *governor) graceLocked(over []limited, now time.Time, revoke map[*Lease]
 	}
 }
 
-// planBudgetLocked weighs the load against the budget. Over it, or on a
-// saturated host, it plans the controls. Once the load has stayed at the
-// release mark for ReleaseAfter, it plans the reverts. In between, the
-// controls stay as they are.
+// planBudgetLocked weighs the load against the budget. Above the budget plus
+// a tenth, it plans the controls. Once the load has stayed at or below the
+// budget for RevertAfter, it plans the reverts. In between, the controls stay
+// as they are.
 func (g *governor) planBudgetLocked(live []target, reading Reading, budget float64, now time.Time) []action {
 	load := 0.0
 	for _, t := range live {
 		rate, ok := g.rates[t.l]
 		if !ok {
-			// A holder the meter cannot see counts at its admitted cost, at most the budget.
+			// A job not measured yet counts at its cost. A job that costs more than the budget runs alone, so it counts at the budget.
 			rate = min(t.l.cost, budget)
 		}
 		load += rate
 	}
 	switch {
-	case load > budget || g.hostHot:
-		g.calmSince = time.Time{}
+	case load > budget*overbook:
+		g.lowSince = time.Time{}
 		return g.planThrottleLocked(live, reading, now)
-	case load <= budget*g.sched.cfg.ReleaseBelow:
-		if g.calmSince.IsZero() {
-			g.calmSince = now
+	case load <= budget:
+		if g.lowSince.IsZero() {
+			g.lowSince = now
 		}
-		if wait := g.sched.cfg.ReleaseAfter; wait < 0 || now.Sub(g.calmSince) >= wait {
-			return g.planReleaseLocked(now)
+		if wait := g.sched.cfg.RevertAfter; wait < 0 || now.Sub(g.lowSince) >= wait {
+			return g.planRevertLocked(now)
 		}
 	default:
-		g.calmSince = time.Time{}
+		g.lowSince = time.Time{}
 	}
 	return nil
 }
 
-// planThrottleLocked plans the enabled mechanisms for the leases behind an
-// oversubscription: the ones above their admitted cost, or all of them when
-// none is.
+// planThrottleLocked plans the enabled mechanisms for the jobs that use more
+// than their cost. When no job does, it plans them for all of the jobs.
 func (g *governor) planThrottleLocked(live []target, reading Reading, now time.Time) []action {
 	var offenders []target
 	for _, t := range live {
@@ -118,7 +117,7 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 	for _, t := range offenders {
 		for _, m := range t.req.Policy.Enabled() {
 			if t.a != nil {
-				if g.wantsLocked(t.l, controlKey{m: m}, now) {
+				if g.shouldApplyLocked(t.l, controlKey{m: m}, now) {
 					plan = append(plan, action{t: t, kind: doApply, m: m})
 				}
 				continue
@@ -130,7 +129,7 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 				index = newProcIndex(reading.Table)
 			}
 			for _, p := range t.req.Policy.settings(m).selected(index.tree(t.pid)) {
-				if g.wantsLocked(t.l, controlKey{m: m, pid: p.PID}, now) {
+				if g.shouldApplyLocked(t.l, controlKey{m: m, pid: p.PID}, now) {
 					plan = append(plan, action{t: t, kind: doApply, m: m, proc: p})
 				}
 			}
@@ -139,8 +138,8 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 	return plan
 }
 
-// planReleaseLocked plans a revert of every budget control in effect.
-func (g *governor) planReleaseLocked(now time.Time) []action {
+// planRevertLocked plans a revert of every budget control in effect.
+func (g *governor) planRevertLocked(now time.Time) []action {
 	var plan []action
 	for l, cs := range g.active {
 		_, _, a := l.snapshot()

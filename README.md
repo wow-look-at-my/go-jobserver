@@ -121,29 +121,40 @@ Jobs that each want four CPUs on a four-CPU machine do not run faster together t
 
 ### Measuring
 
-Every `-sample` interval (one second by default) the daemon reads the host's CPU counters and, while a running job is a process tree, the host's process table. It turns consecutive reads into rates.
+Every `-sample` interval (one second by default) the daemon measures:
 
-- How many CPUs were busy **across the whole host**. On Linux this comes from the `cpu` line of `/proc/stat`, which counts every process and kernel thread in every namespace. It is right inside a container too. A host with no `/proc/stat` has no such counters. The daemon cannot know that host's load, which is a configuration error (see below). The number it shows is only an estimate from process CPU time. That estimate misses kernel time and every process outside the daemon's own namespace.
-- How many CPUs **each running job's process tree** used. The tree is the job's child plus its descendants plus everything sharing its process group, so a job that spawns helpers is measured as one.
-- The daemon accumulates each job's total, and records it on the job as `cpu_seconds` when the job ends.
+- How many CPUs the **whole host** used. On Linux this comes from `/proc/stat`. That file counts every process and kernel thread in every container. It is right inside a container too. A host without `/proc/stat` has no such counters. The daemon then cannot read the host's load, which is a configuration error (see below). The number it shows is only an estimate from process CPU time. The estimate misses kernel time and every process outside the daemon's own namespace.
+- How many CPUs **each running job** used. For a job that is a process tree, that means the job's child, its descendants and every process in its process group. So a job that starts helpers is measured as one.
 
-On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. On a host with neither, the reading says so instead of reporting a zero.
+The daemon adds up each job's CPU time. It records the total on the job as `cpu_seconds` when the job ends.
+
+On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. A host with neither says so in the status instead of reporting zero.
 
 #### An unreadable host load is a configuration error
 
-A daemon that does not know the host's load cannot protect the host. It sees only its own jobs. It cannot tell when other work saturates the machine, and under load it keeps starting work. The daemon treats that as an active configuration error and does not run on quietly:
+The daemon needs the host's own CPU counters. Without them it cannot see work that is not one of its jobs. It cannot see idle CPUs. Under load it keeps starting work. It can destabilize the system. So the daemon treats this as a configuration error and does not run on quietly:
 
-- It logs an error line at the first sample that cannot read the counters, and again every few minutes while the load stays unknown. The interval is fixed. The line names why, and says that the system can be destabilized under load. The scheduler writes it to `ErrorLogf`, which falls back to `Logf`.
-- The CPU status carries the reason as `host_error`, and the dashboard shows a banner and `host load unknown` where it shows the host's load.
-- A single line says when the counters can be read again.
-
-A negative `HostBusyHigh` turns the host check off, and the host's load is not needed then, so there is no error.
+- It logs an error at the first sample that cannot read the counters, and again every few minutes until it can. The interval is fixed. The line says why the load is unknown. The scheduler writes it to `ErrorLogf`, or to `Logf` when there is no `ErrorLogf`.
+- The CPU status carries the reason as `host_error`. The dashboard shows a banner, and `host load unknown` where it shows the host's load.
+- One line says when the counters can be read again.
 
 ### Before a job starts
 
-Each job declares what it expects to cost, and the daemon keeps a running total of what the jobs it started claimed. A job that will push the total over `-budget` (one per CPU by default) stays `active` and starts when enough of the running jobs finished. A job larger than the whole budget still runs on an otherwise idle daemon, so nothing is starved forever.
+Each job declares what it costs: the CPUs it expects to use. The daemon adds up the costs of the jobs it started. A job starts when its cost fits under the budget plus a tenth. Until then it stays `active`. It starts when a running job finishes. `-budget` sets the budget.
 
-The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured, and default) prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
+The default is one CPU for each CPU of the host. A job that costs more than the whole budget still runs when nothing else runs, so no job waits forever.
+
+The extra tenth is on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. With the budget set to the whole machine, the extra tenth keeps every CPU busy. The controls below keep the rest of the host responsive while it does.
+
+A cost can also be too high. When CPUs are idle, the daemon starts a waiting job even though the costs already fill the budget plus a tenth. It does this only while all of these hold:
+
+- The host's own CPU counters show idle CPUs for the job's cost. A host whose counters cannot be read never satisfies this.
+- The CPUs the running jobs use now, plus the job's cost, stay within the budget. A job that is not measured yet counts at its cost.
+- The costs of the running jobs, plus the job's cost, stay within twice the budget.
+
+It starts at most one such job at each sample, so it sees what that job uses before it starts the next.
+
+The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured. `-cost` prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
 
 ```sh
 go-jobserver queue -cpu 4 -- make -j4
@@ -152,21 +163,22 @@ go-jobserver -budget 6 run
 
 ### While a job runs
 
-The daemon applies the controls each job enables to the jobs that use more than they were admitted at. This holds when the running jobs together exceed the budget, and when the host is saturated. When no job is above its cost, it applies them to every running job. A job the daemon cannot read yet counts at its admitted cost, but at most the whole budget.
+Every sample, the daemon adds up the CPUs the running jobs use. A job that is not measured yet counts as using its cost. A job that costs more than the whole budget counts as using the whole budget, because the daemon let it run alone.
 
-The controls come off only after the load stayed low for a while. A throttled load that dips under the budget does not switch them on and off again. A control the host refuses is tried again at a fixed interval, for as long as the job runs. Each mark is a `SchedulerConfig` field with a default:
+- At or below the budget plus a tenth, the daemon leaves the jobs alone. That level is the target.
+- Above the target, the daemon applies the controls each job enables. It applies them to the jobs that use more than their cost, or to every running job when none does.
+- The controls come off when the load stayed at or below the budget for `RevertAfter`. Between the budget and the target they stay as they are. A load that moves around the target does not switch them on and off.
+
+A control the host refuses is tried again every `RetryInterval`, for as long as the job runs. A negative `RevertAfter` or `RetryInterval` means no wait. Both are `SchedulerConfig` fields. The daemon runs on the defaults:
 
 ```go
 jobserver.SchedulerConfig{
-	HostBusyHigh:  jobserver.DefaultHostBusyHigh,  // 0.90: the host is saturated at this share of its CPUs
-	HostBusyLow:   jobserver.DefaultHostBusyLow,   // 0.75: it stops being saturated below this share
-	ReleaseBelow:  jobserver.DefaultReleaseBelow,  // 0.85: share of the budget the load must fall to
-	ReleaseAfter:  jobserver.DefaultReleaseAfter,  // 15s: how long the load must stay there
+	RevertAfter:   jobserver.DefaultRevertAfter,   // 5s: how long the load must stay at the budget before the controls come off
 	RetryInterval: jobserver.DefaultRetryInterval, // 10s: wait before a refused control is tried again
 }
 ```
 
-A negative `HostBusyHigh` turns the host check off. A negative `ReleaseAfter` or `RetryInterval` means no wait. The daemon runs on the defaults. Mechanisms, each enabled or disabled per job:
+The control to use for a busy host is `priority`. It lowers the job's priority and takes no CPU from a host that has none to spare. The host stays responsive while every CPU stays busy. `freeze` and `affinity` hold a job back. They can leave CPUs idle. Mechanisms, each enabled or disabled per job:
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
@@ -240,7 +252,7 @@ The daemon's admission and CPU governance live in `jobserver.Scheduler`, and the
 ```go
 sched := jobserver.NewScheduler(jobserver.SchedulerConfig{
 	MaxConcurrent: 64,                // the count cap
-	CPUBudget:     8,                 // CPUs the holders may use together
+	CPUBudget:     8,                 // CPUs the running jobs may use together
 	DefaultCost:   0.25,              // a lease with no cost and no history
 	HistoryPath:   "classes.json",    // per-class measured cost
 	PriorityKeys: []jobserver.PriorityKey{ // admission order, top row first, lower first
@@ -264,7 +276,7 @@ case <-done:
 }
 ```
 
-**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget. Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
+**Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget plus a tenth, or CPUs are idle (see "Before a job starts"). Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
 
 A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
 
@@ -274,15 +286,15 @@ A lease that starts a new batch pulls the rest of that batch in right behind it.
 
 Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its position and a reason.
 
-**Governance.** Every sample, the governor measures each holder through its process tree or its `Actuator`. It then acts on the readings:
+**Governance.** Every sample, the governor measures each running job through its process tree or its `Actuator`. It then acts on what it measured:
 
 | condition | action |
 | --- | --- |
-| the holders exceed the budget, or the host is saturated | the policy's mechanisms on the leases above their admitted cost, or on all of them when none is |
+| the running jobs use more than the budget plus a tenth | the policy's mechanisms on the leases that use more than their cost, or on all of them when none does |
 | a lease uses more than `Limits.MaxCPUs` | `Actuator.Cap` at the limit, and revoked after `Limits.Grace` when it cannot be capped |
 | a lease passes `Limits.MaxCPUSeconds` | revoked |
 
-Release reverts every control, and records the lease's measured use in its class's history: its CPU time over the time it was measured. The next lease of that class is admitted at what this used.
+When a lease is released, the scheduler reverts its controls and records what it used in the history of its class. Its CPU time over the time it was measured. The next lease of that class costs that much.
 
 An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used. `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
 
@@ -353,8 +365,9 @@ go-toolchain
 | `jobserver/sched_class.go` | the per-class cost history |
 | `jobserver/sched_status.go` | the Scheduler's status snapshot |
 | `jobserver/lease.go` | a lease, its limits and the Actuator interface |
-| `jobserver/govern.go` | the sampling loop and the measure of each holder |
-| `jobserver/govern_plan.go` | the limits, the budget decision, and the plans to throttle and release |
+| `jobserver/govern.go` | the sampling loop and the measurement of each running job |
+| `jobserver/govern_plan.go` | the limits, the budget decision, and the plans to throttle and revert |
+| `jobserver/govern_hostload.go` | the error for a host whose load is unknown |
 | `jobserver/govern_ctl.go` | the control calls, made outside the governor's lock, and their retries |
 | `jobserver/hostcpu.go` | the host's own CPU counters |
 | `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |

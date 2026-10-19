@@ -22,9 +22,10 @@ type batchState struct {
 // tells each lease still queued where it stands. Caller holds s.mu.
 //
 // A lease fits when its group has a free slot, and, unless it is GroupOnly,
-// when the count cap has room. Its cost fits the CPU budget. The CPU budget
-// never holds back the only lease: work larger than the whole budget still
-// runs on an otherwise idle scheduler.
+// when the count cap has room. Its cost fits the CPU budget plus a tenth, or
+// the CPUs are idle (see idleFits). The CPU budget never holds back the only
+// lease: work larger than the whole budget still runs on an otherwise idle
+// scheduler.
 func (s *Scheduler) planLocked() {
 	if len(s.waiting) == 0 {
 		return
@@ -32,6 +33,8 @@ func (s *Scheduler) planLocked() {
 	now := s.now()
 	budget := s.budgetLocked()
 	running, reserved := 0, 0.0
+	// inUse is what the running jobs use now.
+	inUse, unmeasuredCost := 0.0, 0.0
 	inGroup := map[string]int{}
 	for _, h := range s.holding {
 		if h.req.Group != "" {
@@ -40,6 +43,12 @@ func (s *Scheduler) planLocked() {
 		if !h.req.GroupOnly {
 			running++
 			reserved += h.cost
+			if rate, ok := s.used.rates[h]; ok {
+				inUse += rate
+			} else {
+				inUse += h.cost
+				unmeasuredCost += h.cost
+			}
 		}
 	}
 	type wait struct {
@@ -61,14 +70,19 @@ func (s *Scheduler) planLocked() {
 					Reason: fmt.Sprintf("run cap: %d of %d running", running, s.maxRuns)}})
 				continue
 			}
-			if reserved > 0 && reserved+l.cost > budget {
-				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
-					Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
-						fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
-				continue
+			if reserved > 0 && reserved+l.cost > budget*overbook {
+				if !s.idleFits(l.cost, reserved, inUse, unmeasuredCost, budget) {
+					queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
+						Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
+							fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
+					continue
+				}
+				s.filled = s.used.n
 			}
 			running++
 			reserved += l.cost
+			inUse += l.cost
+			unmeasuredCost += l.cost
 		}
 		if l.req.Group != "" {
 			inGroup[l.req.Group]++
@@ -94,6 +108,27 @@ func (s *Scheduler) planLocked() {
 			w.l.notify(w.st)
 		}
 	}
+}
+
+// idleFits reports whether a job whose cost does not fit the booked CPUs may
+// start because CPUs are idle. The host's own counters must show room for the
+// cost, and so must the budget.
+func (s *Scheduler) idleFits(cost, reserved, inUse, unmeasuredCost, budget float64) bool {
+	if s.used.hostCPUs == 0 || s.filled == s.used.n {
+		return false
+	}
+	return reserved+cost <= budget*fillLimit &&
+		inUse+cost <= budget &&
+		s.used.hostBusy+unmeasuredCost+cost <= float64(s.used.hostCPUs)
+}
+
+// sampled takes what the CPUs did at a sample and plans again, so a queued
+// job starts within a sample of the CPUs going idle.
+func (s *Scheduler) sampled(u usage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.used = u
+	s.planLocked()
 }
 
 // holderIDsLocked lists the holders a queued lease waits behind: its group's

@@ -165,7 +165,7 @@ func TestALeaseReleasedDuringItsApplyEndsWithNothingInEffect(t *testing.T) {
 	assert.Equal(t, 0, s.Status().Running)
 }
 
-func TestControlsComeOffOnlyOnceTheLoadHasStayedLowForReleaseAfter(t *testing.T) {
+func TestControlsComeOffOnlyOnceTheLoadHasStayedAtTheBudgetForRevertAfter(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2})
 	clock := &testClock{at: time.Now()}
 	s.now = clock.now
@@ -179,144 +179,78 @@ func TestControlsComeOffOnlyOnceTheLoadHasStayedLowForReleaseAfter(t *testing.T)
 	}
 
 	step(0, 3)
-	require.True(t, a.isApplied(MechPriority), "over the budget, the control goes on")
-	// Throttled work uses less and then more: across the release mark, and across the budget.
+	require.True(t, a.isApplied(MechPriority), "above the budget plus a tenth, the control goes on")
+	// The throttled job uses less and then more: under the budget, between the budget and the target, and over the target.
 	step(time.Second, 1.5)
-	step(time.Second, 1.9)
+	step(time.Second, 2.1)
+	step(time.Second, 1)
+	step(2*time.Second, 1)
+	step(2*time.Second, 1)
 	step(time.Second, 2.5)
 	step(time.Second, 1)
-	step(7*time.Second, 1)
-	step(7*time.Second, 1)
+	step(4*time.Second, 1)
 	assert.Equal(t, 1, a.count("apply priority"))
-	assert.Zero(t, a.count("revert priority"), "the control stays on until the load has stayed low for ReleaseAfter")
+	assert.Zero(t, a.count("revert priority"), "the control stays on until the load has stayed at the budget for RevertAfter")
 
 	step(time.Second, 1)
-	assert.Equal(t, 1, a.count("revert priority"), "the calm has held for ReleaseAfter")
+	assert.Equal(t, 1, a.count("revert priority"), "the load has stayed at the budget for RevertAfter")
 	step(time.Second, 1)
 	assert.Equal(t, 1, a.count("revert priority"))
 	assert.Equal(t, 1, a.count("apply priority"))
 	assert.Empty(t, s.Controls())
 }
 
-func TestANegativeReleaseAfterRevertsAtTheFirstCalmSample(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, ReleaseBelow: 0.5, ReleaseAfter: -1})
+func TestANegativeRevertAfterRevertsAtTheFirstSampleAtTheBudget(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
 	hog := admit(t, s, hogRequest)
 	a := newFakeActuator(3)
 	hog.AttachActuator(a)
 
 	s.gov.tick()
 	require.True(t, a.isApplied(MechPriority))
-	a.set(1.5)
+	a.set(2.1)
 	s.gov.tick()
-	assert.True(t, a.isApplied(MechPriority), "within the budget but above its release mark, the control stays")
-	a.set(0.9)
+	assert.True(t, a.isApplied(MechPriority), "between the budget and the target, the control stays")
+	a.set(2)
 	s.gov.tick()
-	assert.False(t, a.isApplied(MechPriority), "with no wait, the first sample at the release mark reverts")
+	assert.False(t, a.isApplied(MechPriority), "with no wait, the first sample at the budget reverts")
 	assert.Equal(t, 1, a.count("revert priority"))
-}
-
-func TestASaturatedHostThrottlesWorkThatIsWithinItsBudget(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 8})
-	clock := &testClock{at: time.Now()}
-	s.now = clock.now
-	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
-	ci := admit(t, s, LeaseRequest{ID: "ci", Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}})
-	a := newFakeActuator(1)
-	ci.AttachActuator(a)
-	step := func(by time.Duration, share float64) {
-		clock.add(by)
-		host.set(share)
-		s.gov.tick()
-	}
-
-	step(0, 0.2)
-	assert.False(t, s.Readings().HostSaturated, "the first host read is only a baseline")
-	step(time.Second, 0.95)
-	report := s.Readings()
-	assert.True(t, report.HostSaturated)
-	assert.Equal(t, 4, report.HostCPUs)
-	assert.InDelta(t, 3.8, report.HostBusy, 1e-9)
-	assert.False(t, report.OverBudget, "the work itself is within its budget")
-	assert.True(t, a.isApplied(MechPriority), "a saturated host throttles as if over budget")
-
-	step(time.Second, 0.8)
-	assert.True(t, s.Readings().HostSaturated, "the host stays saturated until it falls below the low mark")
-	step(time.Second, 0.5)
-	assert.False(t, s.Readings().HostSaturated)
-	assert.True(t, a.isApplied(MechPriority), "the control waits for the calm to hold")
-	step(DefaultReleaseAfter, 0.5)
-	assert.False(t, a.isApplied(MechPriority), "after the calm has held, the control comes off")
-	assert.Equal(t, 1, a.count("apply priority"))
-}
-
-func TestANegativeHostBusyHighTurnsTheHostCheckOff(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 8, HostBusyHigh: -1})
-	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
-	ci := admit(t, s, LeaseRequest{ID: "ci", Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}})
-	a := newFakeActuator(1)
-	ci.AttachActuator(a)
-
-	host.set(1)
-	s.gov.tick()
-	s.gov.tick()
-	report := s.Readings()
-	assert.InDelta(t, 4, report.HostBusy, 1e-9, "the host is still measured")
-	assert.False(t, report.HostSaturated)
-	assert.False(t, a.isApplied(MechPriority))
 }
 
 func TestNewSchedulerFillsTheGovernorDefaults(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{})
-	assert.InDelta(t, DefaultReleaseBelow, s.cfg.ReleaseBelow, 1e-9)
-	assert.Equal(t, DefaultReleaseAfter, s.cfg.ReleaseAfter)
-	assert.InDelta(t, DefaultHostBusyHigh, s.cfg.HostBusyHigh, 1e-9)
-	assert.InDelta(t, DefaultHostBusyLow, s.cfg.HostBusyLow, 1e-9)
+	assert.Equal(t, DefaultRevertAfter, s.cfg.RevertAfter)
 	assert.Equal(t, DefaultRetryInterval, s.cfg.RetryInterval)
 
-	off := newTestScheduler(t, SchedulerConfig{ReleaseAfter: -1, HostBusyHigh: -1, RetryInterval: -1})
-	assert.Negative(t, off.cfg.ReleaseAfter, "a negative value is kept: it means no wait")
-	assert.Negative(t, off.cfg.HostBusyHigh, "a negative value is kept: it turns the host check off")
+	off := newTestScheduler(t, SchedulerConfig{RevertAfter: -1, RetryInterval: -1})
+	assert.Negative(t, off.cfg.RevertAfter, "a negative value is kept: it means no wait")
 	assert.Negative(t, off.cfg.RetryInterval, "a negative value is kept: it means every sample")
 }
 
-func TestAHostBusyLowAtOrAboveTheHighMarkIsMovedBelowIt(t *testing.T) {
-	var logs logLines
-	s := newTestScheduler(t, SchedulerConfig{HostBusyHigh: 0.6, HostBusyLow: 0.8, Logf: logs.logf})
-	assert.InDelta(t, 0.6, s.cfg.HostBusyHigh, 1e-9)
-	assert.Less(t, s.cfg.HostBusyLow, s.cfg.HostBusyHigh)
-	assert.Len(t, logs.matching("low mark 0.8", "high mark 0.6"), 1, "the change is logged once")
-
-	var quiet logLines
-	newTestScheduler(t, SchedulerConfig{Logf: quiet.logf})
-	assert.Empty(t, quiet.matching("low mark"), "the defaults need no change")
-}
-
-func TestAHolderTheMeterCannotSeeCountsAtItsCost(t *testing.T) {
+func TestAJobNotMeasuredYetCountsAtItsCost(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 3})
 	seen := admit(t, s, LeaseRequest{ID: "seen", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}})
-	blind := admit(t, s, LeaseRequest{ID: "blind", Policy: JobPolicy{Cost: 2, Priority: throttlePolicy.Priority}})
-	sa, ba := newFakeActuator(0.5), newFakeActuator(5)
-	ba.noRead = true
+	unseen := admit(t, s, LeaseRequest{ID: "unseen", Policy: JobPolicy{Cost: 2, Priority: throttlePolicy.Priority}})
+	sa, ua := newFakeActuator(0.5), newFakeActuator(5)
+	ua.noRead = true
 	seen.AttachActuator(sa)
-	blind.AttachActuator(ba)
-	// Both were admitted under the larger budget.
+	unseen.AttachActuator(ua)
+	// Both were started under the larger budget.
 	s.SetCPUBudget(1)
 
 	s.gov.tick()
 	report := s.Readings()
-	assert.InDelta(t, 0.5, report.Measured, 1e-9, "a holder with no reading is not part of what was measured")
+	assert.InDelta(t, 0.5, report.Measured, 1e-9, "a job with no measurement is not part of what was measured")
 	assert.Equal(t, 1, report.Unmeasured)
-	assert.NotContains(t, report.Jobs, "blind")
+	assert.NotContains(t, report.Jobs, "unseen")
 	assert.False(t, report.OverBudget, "what was measured is within the budget")
-	assert.True(t, ba.isApplied(MechPriority), "at its cost, the blind holder puts the load over the budget")
-	assert.True(t, sa.isApplied(MechPriority), "with no holder above its cost, every holder is throttled")
-	assert.False(t, blind.Measured())
-	assert.Zero(t, blind.CPUSeconds())
+	assert.True(t, ua.isApplied(MechPriority), "at its cost, the job puts the load over the target")
+	assert.True(t, sa.isApplied(MechPriority), "with no job above its cost, every job is throttled")
+	assert.False(t, unseen.Measured())
+	assert.Zero(t, unseen.CPUSeconds())
 }
 
-func TestALoneHolderLargerThanTheBudgetIsNotOverItBeforeItsFirstReading(t *testing.T) {
+func TestAJobLargerThanTheBudgetIsNotThrottledBeforeItIsMeasured(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2})
 	big := admit(t, s, LeaseRequest{ID: "big", Policy: JobPolicy{Cost: 5, Priority: throttlePolicy.Priority}})
 	a := newFakeActuator(1)
@@ -324,7 +258,31 @@ func TestALoneHolderLargerThanTheBudgetIsNotOverItBeforeItsFirstReading(t *testi
 	big.AttachActuator(a)
 
 	s.gov.tick()
-	assert.False(t, a.isApplied(MechPriority), "admission lets work larger than the budget run alone, so it is not throttled for being unread")
+	assert.False(t, a.isApplied(MechPriority), "a job larger than the budget runs alone, so it is not throttled for being unmeasured")
+}
+
+func TestAMachineTheJobsFillIsNotThrottled(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
+	host := &scriptedHost{cpus: 4}
+	s.gov.sampler.host = host
+	var acts []*fakeActuator
+	for _, id := range []string{"a", "b"} {
+		l := admit(t, s, LeaseRequest{ID: id, Policy: JobPolicy{Cost: 2, Priority: throttlePolicy.Priority}})
+		a := newFakeActuator(2)
+		l.AttachActuator(a)
+		acts = append(acts, a)
+	}
+
+	host.set(1)
+	for range 3 {
+		s.gov.tick()
+	}
+	report := s.Readings()
+	assert.InDelta(t, 4, report.HostBusy, 1e-9, "the jobs use every CPU of the host")
+	assert.InDelta(t, 4, report.Measured, 1e-9)
+	for _, a := range acts {
+		assert.False(t, a.isApplied(MechPriority), "a host the jobs fill is what the budget asks for")
+	}
 }
 
 func TestARefusedControlWaitsRetryIntervalAndLogsOnce(t *testing.T) {
@@ -376,7 +334,7 @@ func TestANegativeRetryIntervalTriesAtEverySample(t *testing.T) {
 
 func TestARefusedRevertKeepsTheControlInEffectUntilItTakes(t *testing.T) {
 	var logs logLines
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, ReleaseAfter: -1, Logf: logs.logf})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1, Logf: logs.logf})
 	clock := &testClock{at: time.Now()}
 	s.now = clock.now
 	l := admit(t, s, LeaseRequest{ID: "sticky", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}})
@@ -408,7 +366,7 @@ func TestARefusedRevertKeepsTheControlInEffectUntilItTakes(t *testing.T) {
 }
 
 func TestAnEndingLeaseTriesItsRefusedRevertOnceAndDropsIt(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, ReleaseAfter: -1})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
 	l := admit(t, s, hogRequest)
 	a := newFakeActuator(3)
 	a.revertOut = OutcomeRefused
@@ -436,7 +394,7 @@ func TestTheGovernorReadsNoProcessTableForActuatorWork(t *testing.T) {
 	for range 3 {
 		s.gov.tick()
 	}
-	assert.Zero(t, src.count(), "no holder is a process tree, so the process table is never read")
+	assert.Zero(t, src.count(), "no job is a process tree, so the process table is never read")
 	assert.InDelta(t, 1, s.Readings().Measured, 1e-9)
 
 	s.gov.sampler.host = nil
@@ -459,12 +417,12 @@ func TestAClassCostCountsOnlyTheTimeALeaseWasMeasured(t *testing.T) {
 
 	step()
 	step()
-	a.setBlind(false)
+	a.setUnreadable(false)
 	step()
 	step()
 	assert.InDelta(t, 20, l.CPUSeconds(), 1e-9)
 	l.Release()
 	cost, ok := s.classes.cost("half-seen")
 	require.True(t, ok)
-	assert.InDelta(t, 2, cost, 1e-9, "the class cost leaves out the half of the lease that no reading covered")
+	assert.InDelta(t, 2, cost, 1e-9, "the class cost leaves out the half of the lease that no measurement covered")
 }

@@ -144,9 +144,8 @@ func TestGovernorGivesAControlBackOnceTheJobIsUnderBudgetAgain(t *testing.T) {
 		c.CPUBudget = 0.001
 		c.SampleInterval = 20 * time.Millisecond
 	}, func(s *Server) {
-		// This test is about the release itself, so no dwell, and the load of the machine that runs the suite cannot hold it back.
-		s.sched.cfg.ReleaseAfter = -1
-		s.sched.cfg.HostBusyHigh = -1
+		// This test is about the revert itself, so it does not wait.
+		s.sched.cfg.RevertAfter = -1
 		s.gov.probe = hostProbe{known: true, canFreeze: host.CanFreeze,
 			freezeWhy: host.FreezeDetail, spelling: host.NiceSpelling, niceWhy: host.NiceDetail}
 	})

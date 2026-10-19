@@ -30,7 +30,7 @@ var (
 type SchedulerConfig struct {
 	// MaxConcurrent bounds how many counted leases hold a slot at once. Zero means no bound.
 	MaxConcurrent int
-	// CPUBudget is how many CPUs the holders may use together. Zero means one per CPU.
+	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
 	CPUBudget float64
 	// DefaultCost is the CPU cost of a lease that declares none and whose class has no history.
 	DefaultCost float64
@@ -44,15 +44,9 @@ type SchedulerConfig struct {
 	Logf func(format string, args ...any)
 	// PriorityKeys is the admission order, compared top to bottom. NewScheduler panics on an invalid list.
 	PriorityKeys []PriorityKey
-	// ReleaseBelow is the share of the budget the load must fall to before the budget controls come off. Zero means DefaultReleaseBelow.
-	ReleaseBelow float64
-	// ReleaseAfter is how long the load must stay there first. Zero means DefaultReleaseAfter, and a negative value means no wait.
-	ReleaseAfter time.Duration
-	// HostBusyHigh is the host's busy share that throttles as if over budget. Zero means DefaultHostBusyHigh. Negative is off.
-	HostBusyHigh float64
-	// HostBusyLow is the share of the host's CPUs the host must fall below to stop counting as saturated. Zero means DefaultHostBusyLow.
-	HostBusyLow float64
-	// RetryInterval is the wait before a failed control is tried again. Zero means DefaultRetryInterval. Negative is no wait.
+	// RevertAfter is how long the load must stay at or below the budget before the governor reverts its controls.
+	RevertAfter time.Duration
+	// RetryInterval is the wait before a failed control is tried again. Zero means DefaultRetryInterval. A negative value means no wait.
 	RetryInterval time.Duration
 	// ErrorLogf receives the lines that name a configuration error the operator has to fix. Nil sends them to Logf.
 	ErrorLogf func(format string, args ...any)
@@ -60,19 +54,31 @@ type SchedulerConfig struct {
 
 // The defaults for the governor's SchedulerConfig fields.
 const (
-	// DefaultReleaseBelow is the share of the budget the load must fall to before the budget controls come off.
-	DefaultReleaseBelow = 0.85
-	// DefaultReleaseAfter is how long the load must stay there first.
-	DefaultReleaseAfter = 15 * time.Second
-	// DefaultHostBusyHigh is the share of the host's CPUs in use at which the host counts as saturated.
-	DefaultHostBusyHigh = 0.90
-	// DefaultHostBusyLow is the share the host must fall below to stop counting as saturated.
-	DefaultHostBusyLow = 0.75
+	// DefaultRevertAfter is how long the load must stay at or below the budget before the controls come off.
+	DefaultRevertAfter = 5 * time.Second
 	// DefaultRetryInterval is how long a control that did not take effect waits before the next try.
 	DefaultRetryInterval = 10 * time.Second
 )
 
-// Scheduler admits leases and governs the ones that hold a slot.
+// overbook is how far past the budget the scheduler books CPUs.
+const overbook = 1.1
+
+// fillLimit is how many budgets of CPUs the scheduler may book when it starts a job only because CPUs are idle.
+const fillLimit = 2.0
+
+// usage is what the CPUs did at the last sample.
+type usage struct {
+	// n counts the samples, so a rule can act once for each sample.
+	n uint64
+	// rates is how many CPUs each running job used.
+	rates map[*Lease]float64
+	// hostBusy is how many CPUs the whole host used.
+	hostBusy float64
+	// hostCPUs is how many CPUs the host has. It is zero when the sample did not read the host's own counters.
+	hostCPUs int
+}
+
+// Scheduler starts leases and governs the ones that run.
 type Scheduler struct {
 	cfg SchedulerConfig
 
@@ -86,6 +92,10 @@ type Scheduler struct {
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time
+	// used is what the CPUs did at the last sample.
+	used usage
+	// filled is the sample at which the last job started only because CPUs were idle.
+	filled uint64
 
 	classes  *classBook
 	gov      *governor
@@ -114,26 +124,11 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.ErrorLogf == nil {
 		cfg.ErrorLogf = cfg.Logf
 	}
-	if cfg.ReleaseBelow <= 0 {
-		cfg.ReleaseBelow = DefaultReleaseBelow
-	}
-	if cfg.ReleaseAfter == 0 {
-		cfg.ReleaseAfter = DefaultReleaseAfter
+	if cfg.RevertAfter == 0 {
+		cfg.RevertAfter = DefaultRevertAfter
 	}
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = DefaultRetryInterval
-	}
-	if cfg.HostBusyHigh == 0 {
-		cfg.HostBusyHigh = DefaultHostBusyHigh
-	}
-	if cfg.HostBusyLow <= 0 {
-		cfg.HostBusyLow = DefaultHostBusyLow
-	}
-	if cfg.HostBusyHigh > 0 && cfg.HostBusyLow >= cfg.HostBusyHigh {
-		low := cfg.HostBusyHigh * DefaultHostBusyLow / DefaultHostBusyHigh
-		cfg.Logf("go-jobserver: the host busy low mark %s is not below the high mark %s, so it is %s",
-			fmtCPUs(cfg.HostBusyLow), fmtCPUs(cfg.HostBusyHigh), fmtCPUs(low))
-		cfg.HostBusyLow = low
 	}
 	priority, err := newPriorityTable(cfg.PriorityKeys)
 	if err != nil {
@@ -183,7 +178,7 @@ func (s *Scheduler) Close() {
 	})
 }
 
-// Budget is how many CPUs the holders may use together.
+// Budget is how many CPUs the running jobs may use together.
 func (s *Scheduler) Budget() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

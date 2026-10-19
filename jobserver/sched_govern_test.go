@@ -104,10 +104,10 @@ func (f *fakeActuator) callList() []string {
 	return append([]string(nil), f.calls...)
 }
 
-func (f *fakeActuator) setBlind(blind bool) {
+func (f *fakeActuator) setUnreadable(unreadable bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.noRead = blind
+	f.noRead = unreadable
 }
 
 func (f *fakeActuator) setOutcomes(apply, revert Outcome) {
@@ -119,7 +119,7 @@ func (f *fakeActuator) setOutcomes(apply, revert Outcome) {
 var throttlePolicy = JobPolicy{Priority: PrioritySettings{Enabled: true, Nice: 10}}
 
 func TestGovernorThrottlesOnlyTheLeaseAboveItsCost(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, ReleaseAfter: -1})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2, RevertAfter: -1})
 	quiet, err := s.Acquire(context.Background(), LeaseRequest{ID: "quiet", Policy: JobPolicy{Cost: 1, Priority: throttlePolicy.Priority}}, nil)
 	require.NoError(t, err)
 	hog, err := s.Acquire(context.Background(), LeaseRequest{ID: "hog", Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}}, nil)
@@ -149,16 +149,17 @@ func TestGovernorThrottlesOnlyTheLeaseAboveItsCost(t *testing.T) {
 }
 
 func TestGovernorThrottlesEveryLeaseWhenNoneIsAboveItsCost(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 1})
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 2})
 	var acts []*fakeActuator
 	for _, id := range []string{"a", "b"} {
-		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 0.5, Priority: throttlePolicy.Priority}}, nil)
+		l, err := s.Acquire(context.Background(), LeaseRequest{ID: id, Policy: JobPolicy{Cost: 0.6, Priority: throttlePolicy.Priority}}, nil)
 		require.NoError(t, err)
-		// Each is within its cost, and together they are over the budget.
-		a := newFakeActuator(0.52)
+		// Each is within its cost, and together they are over the target.
+		a := newFakeActuator(0.62)
 		l.AttachActuator(a)
 		acts = append(acts, a)
 	}
+	s.SetCPUBudget(1)
 	s.gov.tick()
 	for _, a := range acts {
 		assert.True(t, a.isApplied(MechPriority))
