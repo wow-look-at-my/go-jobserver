@@ -56,7 +56,14 @@ func TestControlsGoOnOnlyAboveTheBudgetPlusATenth(t *testing.T) {
 	assert.True(t, a.isApplied(MechPriority), "above the target, the control goes on")
 }
 
-func TestAnIdleHostStartsOneMoreJobAtEachSample(t *testing.T) {
+// sample takes n samples of the CPUs.
+func sample(s *Scheduler, n int) {
+	for range n {
+		s.gov.tick()
+	}
+}
+
+func TestIdleCPUsStartOneJobAfterSeveralIdleSamplesAndThenTheNextWaitsAsLong(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
 	host := &scriptedHost{cpus: 4}
 	s.gov.sampler.host = host
@@ -73,24 +80,21 @@ func TestAnIdleHostStartsOneMoreJobAtEachSample(t *testing.T) {
 	waitQueued(t, s, 3)
 
 	host.set(0.25)
-	s.gov.tick()
-	assert.Equal(t, 2, s.Status().Running, "the first sample has no host load to go by")
-	s.gov.tick()
-	assert.Equal(t, 3, s.Status().Running, "one job starts for the idle CPUs, and only one")
-	cl := startedSoon(t, c)
-	ca := newFakeActuator(0.5)
-	cl.AttachActuator(ca)
+	sample(s, idleSamples)
+	assert.Equal(t, 2, s.Status().Running, "the CPUs have not stayed idle for long enough")
+	sample(s, 1)
+	assert.Equal(t, 3, s.Status().Running, "once they have, one job starts")
+	startedSoon(t, c).AttachActuator(newFakeActuator(0.5))
 
 	host.set(0.375)
-	s.gov.tick()
-	assert.Equal(t, 4, s.Status().Running, "the next sample starts the next job")
-	dl := startedSoon(t, d)
-	dl.AttachActuator(newFakeActuator(0.5))
+	sample(s, idleSamples-1)
+	assert.Equal(t, 3, s.Status().Running, "the next start waits as long as the first")
+	sample(s, 1)
+	assert.Equal(t, 4, s.Status().Running)
+	startedSoon(t, d).AttachActuator(newFakeActuator(0.5))
 
 	host.set(0.5)
-	for range 3 {
-		s.gov.tick()
-	}
+	sample(s, 3*idleSamples)
 	assert.Equal(t, 4, s.Status().Running, "the booked costs stop at twice the budget")
 	st := s.Status()
 	require.Len(t, st.Waiting, 1)
@@ -104,6 +108,20 @@ func TestAnIdleHostStartsOneMoreJobAtEachSample(t *testing.T) {
 	}
 }
 
+func TestAJobStartsForIdleCPUsWhenOnlyHalfACPUIsIdle(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
+	host := &scriptedHost{cpus: 4}
+	s.gov.sampler.host = host
+	measuredJob(t, s, "a", 2, 1.7)
+	measuredJob(t, s, "b", 2, 1.7)
+	acquireAsync(s, context.Background(), LeaseRequest{ID: "c", Policy: JobPolicy{Cost: 2}}, nil)
+	waitQueued(t, s, 1)
+
+	host.set(0.85)
+	sample(s, idleSamples+1)
+	assert.Equal(t, 3, s.Status().Running)
+}
+
 func TestNoJobStartsForIdleCPUsWhenTheHostIsFull(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
 	host := &scriptedHost{cpus: 4}
@@ -115,9 +133,7 @@ func TestNoJobStartsForIdleCPUsWhenTheHostIsFull(t *testing.T) {
 
 	// The jobs use CPUs. Other work uses the rest.
 	host.set(1)
-	for range 3 {
-		s.gov.tick()
-	}
+	sample(s, 3*idleSamples)
 	assert.Equal(t, 2, s.Status().Running)
 }
 
@@ -128,9 +144,7 @@ func TestNoJobStartsForIdleCPUsWhenTheHostLoadIsUnknown(t *testing.T) {
 	acquireAsync(s, context.Background(), LeaseRequest{ID: "c", Policy: JobPolicy{Cost: 2}}, nil)
 	waitQueued(t, s, 1)
 
-	for range 3 {
-		s.gov.tick()
-	}
+	sample(s, 3*idleSamples)
 	assert.Equal(t, 2, s.Status().Running, "without the host's counters, the scheduler cannot see idle CPUs")
 	assert.NotEmpty(t, s.Readings().HostError)
 }
@@ -146,26 +160,34 @@ func TestNoJobStartsForIdleCPUsOutsideTheBudget(t *testing.T) {
 
 	// Some of the host's CPUs are idle, and the budget has no room.
 	host.set(0.475)
-	for range 3 {
-		s.gov.tick()
-	}
+	sample(s, 3*idleSamples)
 	assert.Equal(t, 2, s.Status().Running)
 }
 
 func TestAJobNotMeasuredYetCountsAtItsCostWhenTheSchedulerLooksForIdleCPUs(t *testing.T) {
-	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
-	host := &scriptedHost{cpus: 4}
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 8})
+	host := &scriptedHost{cpus: 8}
 	s.gov.sampler.host = host
-	measuredJob(t, s, "a", 2, 0.5)
-	measuredJob(t, s, "b", 2, 0.5)
-	// The new job has no actuator, so no sample measures it.
-	acquireAsync(s, context.Background(), LeaseRequest{ID: "c", Policy: JobPolicy{Cost: 2}}, nil)
-	acquireAsync(s, context.Background(), LeaseRequest{ID: "d", Policy: JobPolicy{Cost: 2}}, nil)
+	measuredJob(t, s, "a", 4, 1)
+	measuredJob(t, s, "b", 4, 1)
+	// The big job has no actuator, so no sample measures it.
+	big := acquireAsync(s, context.Background(), LeaseRequest{ID: "big", Policy: JobPolicy{Cost: 6}}, nil)
+	waitQueued(t, s, 1)
+	acquireAsync(s, context.Background(), LeaseRequest{ID: "small", Policy: JobPolicy{Cost: 2}}, nil)
 	waitQueued(t, s, 2)
 
 	host.set(0.25)
-	for range 4 {
-		s.gov.tick()
-	}
-	assert.Equal(t, 3, s.Status().Running, "the unmeasured job counts at its cost, so no more start")
+	sample(s, idleSamples+1)
+	require.Equal(t, 3, s.Status().Running, "the big job starts for the idle CPUs")
+	bigLease := startedSoon(t, big)
+
+	sample(s, 2*idleSamples)
+	assert.Equal(t, 3, s.Status().Running, "the big job counts at its cost, so the CPUs are not idle yet")
+
+	bigLease.AttachActuator(newFakeActuator(1))
+	host.set(0.375)
+	sample(s, idleSamples-1)
+	assert.Equal(t, 3, s.Status().Running)
+	sample(s, 1)
+	assert.Equal(t, 4, s.Status().Running, "measured, the big job leaves the CPUs idle, and the small job starts")
 }

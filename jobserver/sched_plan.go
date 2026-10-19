@@ -33,8 +33,7 @@ func (s *Scheduler) planLocked() {
 	now := s.now()
 	budget := s.budgetLocked()
 	running, reserved := 0, 0.0
-	// inUse is what the running jobs use now.
-	inUse, unmeasuredCost := 0.0, 0.0
+	inUse, unmeasuredCost := s.useLocked()
 	inGroup := map[string]int{}
 	for _, h := range s.holding {
 		if h.req.Group != "" {
@@ -43,12 +42,6 @@ func (s *Scheduler) planLocked() {
 		if !h.req.GroupOnly {
 			running++
 			reserved += h.cost
-			if rate, ok := s.used.rates[h]; ok {
-				inUse += rate
-			} else {
-				inUse += h.cost
-				unmeasuredCost += h.cost
-			}
 		}
 	}
 	type wait struct {
@@ -110,24 +103,52 @@ func (s *Scheduler) planLocked() {
 	}
 }
 
-// idleFits reports whether a job whose cost does not fit the booked CPUs may
-// start because CPUs are idle. The host's own counters must show room for the
-// cost, and so must the budget.
-func (s *Scheduler) idleFits(cost, reserved, inUse, unmeasuredCost, budget float64) bool {
-	if s.used.hostCPUs == 0 || s.filled == s.used.n {
-		return false
+// useLocked adds up the CPUs the running jobs use now. A job that is not
+// measured yet counts at its cost, and unmeasured is the part of the sum that
+// comes from costs.
+func (s *Scheduler) useLocked() (inUse, unmeasured float64) {
+	for _, h := range s.holding {
+		if h.req.GroupOnly {
+			continue
+		}
+		if rate, ok := s.used.rates[h]; ok {
+			inUse += rate
+			continue
+		}
+		inUse += h.cost
+		unmeasured += h.cost
 	}
-	return reserved+cost <= budget*fillLimit &&
-		inUse+cost <= budget &&
-		s.used.hostBusy+unmeasuredCost+cost <= float64(s.used.hostCPUs)
+	return inUse, unmeasured
 }
 
-// sampled takes what the CPUs did at a sample and plans again, so a queued
-// job starts within a sample of the CPUs going idle.
+// idleFits reports whether a job whose cost does not fit the booked CPUs may
+// start because CPUs are idle. The CPUs must have stayed idle for idleSamples
+// samples, and the last such start must be as old. The host and the budget
+// must both have room for the job, which is its cost or idleRoom, whichever
+// is less.
+func (s *Scheduler) idleFits(cost, reserved, inUse, unmeasured, budget float64) bool {
+	u := s.used
+	if u.hostCPUs == 0 || s.idleRun < idleSamples || u.n-s.filled < idleSamples {
+		return false
+	}
+	room := min(cost, idleRoom)
+	return reserved+cost <= budget*fillLimit &&
+		inUse+room <= budget &&
+		u.hostBusy+unmeasured+room <= float64(u.hostCPUs)
+}
+
+// sampled takes what the CPUs did at a sample, counts the samples in a row at
+// which they sat idle, and plans again.
 func (s *Scheduler) sampled(u usage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.used = u
+	inUse, unmeasured := s.useLocked()
+	if u.hostCPUs > 0 && min(float64(u.hostCPUs)-u.hostBusy-unmeasured, s.budgetLocked()-inUse) >= idleRoom {
+		s.idleRun++
+	} else {
+		s.idleRun = 0
+	}
 	s.planLocked()
 }
 

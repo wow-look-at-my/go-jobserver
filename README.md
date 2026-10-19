@@ -146,13 +146,13 @@ The default is one CPU for each CPU of the host. A job that costs more than the 
 
 The extra tenth is on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. With the budget set to the whole machine, the extra tenth keeps every CPU busy. Start such jobs at a low priority, for example with `nice`, so the rest of the host stays responsive while every CPU is busy.
 
-A cost can also be too high. When CPUs are idle, the daemon starts a waiting job even though the costs already fill the budget plus a tenth. It does this only while all of these hold:
+A cost can also be too high. The daemon starts a waiting job even though the costs already fill the budget plus a tenth. This happens when CPUs stay idle for several samples in a row. It waits as long again before it starts another, so it sees what the first one uses. It starts such a job only while all of these hold:
 
-- The host's own CPU counters show idle CPUs for the job's cost. A host whose counters cannot be read never satisfies this.
-- The CPUs the running jobs use now, plus the job's cost, stay within the budget. A job that is not measured yet counts at its cost.
+- The host's own CPU counters show idle CPUs for the job: its cost, or half a CPU, whichever is less. A host whose counters cannot be read never satisfies this.
+- The CPUs the running jobs use now, plus that much, stay within the budget. A job that is not measured yet counts at its cost.
 - The costs of the running jobs, plus the job's cost, stay within twice the budget.
 
-It starts at most one such job at each sample, so it sees what that job uses before it starts the next.
+A short dip in use does not start a job. Only idle CPUs that stay idle do.
 
 The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured. `-cost` prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
 
