@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/wow-look-at-my/simple-stats-api/cpusample"
 )
 
 // CPUReport is what the daemon last measured, and what it did about it.
@@ -49,7 +51,7 @@ type governor struct {
 	// tickMu runs one tick at a time.
 	tickMu  sync.Mutex
 	mu      sync.Mutex
-	sampler *sampler
+	sampler *cpusample.Sampler
 	sample  Reading
 	// rates is what each lease used at the latest sample.
 	rates map[*Lease]float64
@@ -81,7 +83,7 @@ const historyLimit = 64
 func newGovernor(s *Scheduler) *governor {
 	return &governor{
 		sched:   s,
-		sampler: newSampler(),
+		sampler: newSampler(s.cfg.StatsURL),
 		rates:   map[*Lease]float64{},
 		lastAt:  map[*Lease]time.Time{},
 		active:  map[*Lease][]Control{},
@@ -138,7 +140,7 @@ func (g *governor) tick() {
 			roots[l.key()] = pid
 		}
 	}
-	reading := g.sampler.sample(roots)
+	reading := g.sampler.Sample(roots)
 	// Asking this host how it stops a process starts one and waits for it.
 	facts := g.hostFacts(asksTheHost(targets))
 	now := g.sched.now()

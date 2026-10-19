@@ -53,7 +53,7 @@ func TestTheErrorEndsWhenTheCountersCanBeReadAgain(t *testing.T) {
 	var errs, infos lineLog
 	s := newTestScheduler(t, SchedulerConfig{ErrorLogf: errs.logf, Logf: infos.logf})
 	host := &scriptedHost{cpus: 4, err: errors.New("open /proc/stat: permission denied")}
-	s.gov.sampler.host = host
+	s.gov.sampler.Host = hostOf(host)
 
 	s.gov.tick()
 	require.Len(t, errs.lines, 1)
@@ -80,7 +80,7 @@ func TestTheErrorEndsWhenTheCountersCanBeReadAgain(t *testing.T) {
 func TestAReadableHostIsNoError(t *testing.T) {
 	var errs lineLog
 	s := newTestScheduler(t, SchedulerConfig{ErrorLogf: errs.logf})
-	s.gov.sampler.host = &scriptedHost{cpus: 4}
+	s.gov.sampler.Host = hostOf(&scriptedHost{cpus: 4})
 
 	for range 3 {
 		s.gov.tick()
@@ -90,7 +90,7 @@ func TestAReadableHostIsNoError(t *testing.T) {
 }
 
 func TestTheDashboardShowsTheUnreadableHostLoad(t *testing.T) {
-	srv := newTunedServer(t, nil, func(srv *Server) { srv.gov.sampler.host = nil })
+	srv := newTunedServer(t, nil, func(srv *Server) { srv.gov.sampler.Host = nil })
 	srv.gov.tick()
 
 	rec := httptest.NewRecorder()

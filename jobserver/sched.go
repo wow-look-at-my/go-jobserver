@@ -36,6 +36,8 @@ type SchedulerConfig struct {
 	DefaultCost float64
 	// SampleInterval is how often the governor samples CPU use. Zero means one second.
 	SampleInterval time.Duration
+	// StatsURL is a simple-stats-api to read the host load from. Empty reads this host's /proc/stat. Process trees are always read here.
+	StatsURL string
 	// DisableCPU turns the governor off: nothing is measured, throttled or limited.
 	DisableCPU bool
 	// HistoryPath is the file the per-class cost history is kept in. Empty keeps it in memory.

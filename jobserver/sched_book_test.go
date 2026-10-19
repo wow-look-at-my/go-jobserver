@@ -41,7 +41,7 @@ func TestJobsStartUntilTheCostsPassTheBudgetPlusTwoCPUs(t *testing.T) {
 func TestNoJobStartsWhileMoreTasksWantACPUThanTheHostHasPlusTwo(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
 	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
+	s.gov.sampler.Host = hostOf(host)
 	host.setRunning(5)
 	l := admit(t, s, LeaseRequest{ID: "a", Policy: JobPolicy{Cost: 1}})
 	l.AttachActuator(newFakeActuator(1))
@@ -69,7 +69,7 @@ func TestNoJobStartsWhileMoreTasksWantACPUThanTheHostHasPlusTwo(t *testing.T) {
 func TestAJobStartsOnABusyHostWhenNoneRuns(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
 	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
+	s.gov.sampler.Host = hostOf(host)
 	host.setRunning(100)
 	s.gov.tick()
 
@@ -96,7 +96,7 @@ func TestAGroupOnlyLeaseIgnoresTheHostLoad(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
 	s.SetGroups(map[string]int{"managers": 2})
 	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
+	s.gov.sampler.Host = hostOf(host)
 	host.setRunning(100)
 	admit(t, s, LeaseRequest{ID: "a", Policy: JobPolicy{Cost: 1}})
 	s.gov.tick()
