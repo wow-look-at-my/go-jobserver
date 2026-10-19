@@ -22,16 +22,18 @@ type batchState struct {
 // tells each lease still queued where it stands. Caller holds s.mu.
 //
 // A lease fits when its group has a free slot, and, unless it is GroupOnly,
-// when the count cap has room. Its cost fits the CPU budget. The CPU budget
-// never holds back the only lease: work larger than the whole budget still
-// runs on an otherwise idle scheduler.
+// when the count cap has room. Its cost fits bookable. The host must also
+// have room: the tasks that want a CPU. That host is with the jobs not
+// measured yet and this counted at their cost, stay within bookable for the
+// host's CPUs. Neither CPU limit holds back the only lease, so work larger
+// than the whole budget still runs on an otherwise idle scheduler.
 func (s *Scheduler) planLocked() {
 	if len(s.waiting) == 0 {
 		return
 	}
 	now := s.now()
 	budget := s.budgetLocked()
-	running, reserved := 0, 0.0
+	running, reserved, unmeasured := 0, 0.0, 0.0
 	inGroup := map[string]int{}
 	for _, h := range s.holding {
 		if h.req.Group != "" {
@@ -40,6 +42,9 @@ func (s *Scheduler) planLocked() {
 		if !h.req.GroupOnly {
 			running++
 			reserved += h.cost
+			if !h.Measured() {
+				unmeasured += h.cost
+			}
 		}
 	}
 	type wait struct {
@@ -61,14 +66,21 @@ func (s *Scheduler) planLocked() {
 					Reason: fmt.Sprintf("run cap: %d of %d running", running, s.maxRuns)}})
 				continue
 			}
-			if reserved > 0 && reserved+l.cost > budget {
+			if reserved > 0 && reserved+l.cost > bookable(budget) {
 				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
 					Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
 						fmtCPUs(reserved), fmtCPUs(budget), fmtCPUs(l.cost))}})
 				continue
 			}
+			if running > 0 && s.host.cpus > 0 && float64(s.host.runnable)+unmeasured+l.cost > bookable(float64(s.host.cpus)) {
+				queued = append(queued, wait{l, QueueState{Kind: WaitCPU, Key: WaitCPU,
+					Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
+						s.host.runnable, s.host.cpus, fmtCPUs(l.cost))}})
+				continue
+			}
 			running++
 			reserved += l.cost
+			unmeasured += l.cost
 		}
 		if l.req.Group != "" {
 			inGroup[l.req.Group]++
@@ -94,6 +106,15 @@ func (s *Scheduler) planLocked() {
 			w.l.notify(w.st)
 		}
 	}
+}
+
+// sampled takes the host's load at a sample and plans again, so a queued job
+// starts as soon as the host has room.
+func (s *Scheduler) sampled(h hostLoad) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.host = h
+	s.planLocked()
 }
 
 // holderIDsLocked lists the holders a queued lease waits behind: its group's

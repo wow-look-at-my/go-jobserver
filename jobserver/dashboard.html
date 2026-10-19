@@ -36,6 +36,7 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
 .s-failed { background: #da363333; color: #ff7b72; }
 .s-cancelled { background: #6e768133; color: #c9d1d9; }
 .s-blocked { background: #bb800933; color: #e3b341; }
+.alert { background: #da363326; border: 1px solid #da3633; border-radius: 6px; color: #ffa198; padding: .6rem .9rem; margin-bottom: 1rem; }
 .empty { color: #8b949e; padding: 2rem 0; }
 .log { background: #010409; border: 1px solid #21262d; border-radius: 6px; padding: .75rem;
   white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
@@ -48,7 +49,7 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
   <span class="meta">pid {{.Stats.PID}}</span>
   <span class="meta">up {{.Stats.Uptime}}</span>
   <span class="meta">{{.Stats.Running}} running / {{.Stats.Total}} jobs</span>
-  <span class="meta">cpu {{pct .Stats.CPU.Measured}}/{{pct .Stats.CPU.Budget}} of {{.Stats.CPU.CPUs}} (host {{pct .Stats.CPU.HostBusy}})</span>
+  <span class="meta">cpu {{pct .Stats.CPU.Measured}}/{{pct .Stats.CPU.Budget}} of {{.Stats.CPU.CPUs}} ({{if .Stats.CPU.HostError}}host load unknown{{else}}host {{pct .Stats.CPU.HostBusy}}{{end}})</span>
   {{if .Stats.CPU.OverBudget}}<span class="badge paused">over budget</span>{{end}}
   {{if .Stats.Paused}}<span class="badge paused">paused</span>{{else}}<span class="badge live">scheduling</span>{{end}}
   <span style="flex:1"></span>
@@ -56,6 +57,9 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
   <button onclick="act('resume')">Resume</button>
   <button onclick="act('interrupt-all')">Interrupt all</button>
 </header>
+{{- if .Stats.CPU.HostError}}
+<div class="alert" role="alert"><strong>Configuration error:</strong> the host's CPU load is unknown ({{.Stats.CPU.HostError}}). go-jobserver cannot see work outside its own jobs, and it cannot see how many tasks want a CPU. Under load it keeps starting work, and it can destabilize the system.</div>
+{{- end}}
 {{- if .Jobs}}
 <table>
   <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>started</th><th>took</th><th>exit</th><th></th></tr></thead>

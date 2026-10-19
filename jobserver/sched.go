@@ -30,7 +30,7 @@ var (
 type SchedulerConfig struct {
 	// MaxConcurrent bounds how many counted leases hold a slot at once. Zero means no bound.
 	MaxConcurrent int
-	// CPUBudget is how many CPUs the holders may use together. Zero means one per CPU.
+	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
 	CPUBudget float64
 	// DefaultCost is the CPU cost of a lease that declares none and whose class has no history.
 	DefaultCost float64
@@ -44,9 +44,36 @@ type SchedulerConfig struct {
 	Logf func(format string, args ...any)
 	// PriorityKeys is the admission order, compared top to bottom. NewScheduler panics on an invalid list.
 	PriorityKeys []PriorityKey
+	// RevertAfter is how long the load must stay at or below the budget before the governor reverts its controls.
+	RevertAfter time.Duration
+	// RetryInterval is the wait before a failed control is tried again. Zero means DefaultRetryInterval. A negative value means no wait.
+	RetryInterval time.Duration
+	// ErrorLogf receives the lines that name a configuration error the operator has to fix. Nil sends them to Logf.
+	ErrorLogf func(format string, args ...any)
 }
 
-// Scheduler admits leases and governs the ones that hold a slot.
+// The defaults for the governor's SchedulerConfig fields.
+const (
+	// DefaultRevertAfter is how long the load must stay at or below the budget before the controls come off.
+	DefaultRevertAfter = 5 * time.Second
+	// DefaultRetryInterval is how long a control that did not take effect waits before the next try.
+	DefaultRetryInterval = 10 * time.Second
+)
+
+// bookable is how many CPUs of cost the scheduler books for a budget. The
+// budget plus CPUs, or plus the whole budget when that is less.
+func bookable(budget float64) float64 {
+	return budget + min(budget, 2)
+}
+
+// hostLoad is how many tasks wanted a CPU at the last sample, on a host with
+// cpus CPUs. cpus is zero.
+type hostLoad struct {
+	cpus     int
+	runnable int
+}
+
+// Scheduler starts leases and governs the ones that run.
 type Scheduler struct {
 	cfg SchedulerConfig
 
@@ -60,6 +87,8 @@ type Scheduler struct {
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time
+	// host is the host's load at the last sample.
+	host hostLoad
 
 	classes  *classBook
 	gov      *governor
@@ -84,6 +113,15 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.ErrorLogf == nil {
+		cfg.ErrorLogf = cfg.Logf
+	}
+	if cfg.RevertAfter == 0 {
+		cfg.RevertAfter = DefaultRevertAfter
+	}
+	if cfg.RetryInterval == 0 {
+		cfg.RetryInterval = DefaultRetryInterval
 	}
 	priority, err := newPriorityTable(cfg.PriorityKeys)
 	if err != nil {
@@ -133,7 +171,7 @@ func (s *Scheduler) Close() {
 	})
 }
 
-// Budget is how many CPUs the holders may use together.
+// Budget is how many CPUs the running jobs may use together.
 func (s *Scheduler) Budget() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

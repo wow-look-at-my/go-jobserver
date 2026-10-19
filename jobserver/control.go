@@ -325,6 +325,19 @@ const (
 	suspendProbeRelease = 5 * time.Second
 )
 
+// holdEnv set to "1" makes a binary that links this package wait for its input to end, then leave.
+const holdEnv = "GO_JOBSERVER_HOLD"
+
+// init answers the host probe before the program's own main runs, so the
+// probe works in every binary that links this package.
+func init() {
+	if os.Getenv(holdEnv) != "1" {
+		return
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	os.Exit(0)
+}
+
 // A hostProbe is what one host answered about process control, asked on a
 // process of the daemon's own.
 type hostProbe struct {
@@ -337,9 +350,9 @@ type hostProbe struct {
 
 // probeHost asks this host what its mechanisms cannot read off the platform.
 // What its stop signal does to a process, and which spelling its getpriority
-// answers with. It asks with a process of its own. That process is running
-// this binary in the mode that waits for input. A host that ends a process
-// when asked to stop it ends nothing.
+// answers with. It asks with a process of its own. That process is this
+// binary, started with holdEnv set, so it waits for its input to end. A host
+// that ends a process when asked to stop it ends nothing.
 //
 // The stop answer cannot come from the signal alone: a host whose stop signal
 // ends a process reports success for it. The same as one that suspends it.
@@ -355,7 +368,8 @@ func probeHost() hostProbe {
 		out.niceWhy = out.freezeWhy
 		return out
 	}
-	cmd := exec.Command(exe, "-hold")
+	cmd := exec.Command(exe)
+	cmd.Env = append(os.Environ(), holdEnv+"=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		out.freezeWhy = "no pipe for the probe process: " + err.Error()

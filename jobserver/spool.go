@@ -3,6 +3,7 @@ package jobserver
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,59 +39,90 @@ func (s *Server) watchSpool() {
 	}
 }
 
-// scanSpool processes every job file that is waiting.
+// scanSpool processes every job file that is waiting. A file that left the
+// directory is no longer stuck.
 func (s *Server) scanSpool() {
 	entries, err := os.ReadDir(s.cfg.SpoolDir)
 	if err != nil {
 		return
 	}
+	waiting := set.New[string]()
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
+		waiting.Add(entry.Name())
 		s.takeSpoolFile(entry.Name())
+	}
+	for name := range s.spoolStuck {
+		if !waiting.Contains(name) {
+			delete(s.spoolStuck, name)
+		}
 	}
 }
 
 // takeSpoolFile reads one spool file, enqueues what it describes, and moves
-// the file to done/ or failed/.
+// the file to done/ or failed/. A file that cannot be moved stays in the
+// spool. It is skipped until it changes, so it makes one job and not one per
+// scan.
 func (s *Server) takeSpoolFile(name string) {
 	path := filepath.Join(s.cfg.SpoolDir, name)
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	mtime := info.ModTime().UnixNano()
+	if stuck, ok := s.spoolStuck[name]; ok && stuck == mtime {
+		return
+	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 	spec, err := specFromFile(name, body)
 	if err != nil {
-		s.moveSpool(path, spoolFailedDir, err)
+		s.moveSpool(name, mtime, spoolFailedDir, err)
 		return
 	}
 	if _, _, err := s.Enqueue(*spec); err != nil {
-		s.moveSpool(path, spoolFailedDir, err)
+		s.moveSpool(name, mtime, spoolFailedDir, err)
 		return
 	}
-	s.moveSpool(path, spoolDoneDir, nil)
 	s.cfg.Logf("go-jobserver: spooled %s", name)
+	s.moveSpool(name, mtime, spoolDoneDir, nil)
 }
 
-// moveSpool moves a processed file aside, recording why when it failed. The
-// reason is written before the move, so a file never appears under failed/
-// without the reason beside it.
-func (s *Server) moveSpool(path, dir string, cause error) {
-	dst := filepath.Join(s.cfg.SpoolDir, dir, filepath.Base(path))
+// moveSpool moves a processed file aside. When the move fails, it logs the
+// failure and marks that version of the file as stuck.
+func (s *Server) moveSpool(name string, mtime int64, dir string, cause error) {
+	if err := s.renameSpool(name, dir, cause); err != nil {
+		s.spoolStuck[name] = mtime
+		s.cfg.Logf("go-jobserver: spool %s: %v; the file stays and is skipped until it changes", name, err)
+	}
+}
+
+// renameSpool makes the destination directory and moves the file into it,
+// recording why when it failed. The reason is written before the move, so a
+// file never appears under failed/ without the reason beside it.
+func (s *Server) renameSpool(name, dir string, cause error) error {
+	dstDir := filepath.Join(s.cfg.SpoolDir, dir)
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	dst := filepath.Join(dstDir, name)
 	reason := dst + ".error"
 	if cause != nil {
 		if err := os.WriteFile(reason, []byte(cause.Error()+"\n"), 0o644); err != nil {
-			s.cfg.Logf("go-jobserver: spool reason %s: %v", reason, err)
-			return
+			return err
 		}
 	}
-	if err := os.Rename(path, dst); err != nil {
-		s.cfg.Logf("go-jobserver: spool move %s: %v", path, err)
+	if err := os.Rename(filepath.Join(s.cfg.SpoolDir, name), dst); err != nil {
 		if cause != nil {
 			os.Remove(reason)
 		}
+		return err
 	}
+	return nil
 }
 
 // specFromFile parses a spool file. JSON is a Spec, an array or a string; any

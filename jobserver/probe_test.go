@@ -1,27 +1,15 @@
 package jobserver
 
 import (
-	"io"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestMain lets this test binary stand in for the daemon as the process the
-// suspend probe runs, which starts os.Executable() with -hold.
-func TestMain(m *testing.M) {
-	for _, arg := range os.Args[1:] {
-		if arg == "-hold" {
-			_, _ = io.Copy(io.Discard, os.Stdin)
-			os.Exit(0)
-		}
-	}
-	os.Exit(m.Run())
-}
 
 // hostHere is what this host answers, asked the way the daemon asks: on a
 // process of the probe's own.
@@ -41,6 +29,7 @@ func hostHere(t *testing.T) hostFacts {
 func TestTheHostProbeAsksWithAProcessOfItsOwn(t *testing.T) {
 	host := probeHost()
 	require.True(t, host.known, "the probe has to come back with an answer")
+	assert.Empty(t, os.Getenv(holdEnv), "only the probe's child carries the hold variable")
 	switch hostOS() {
 	case "linux", "darwin", "freebsd", "netbsd", "openbsd":
 		assert.True(t, host.canFreeze, "this host's stop signal suspends a process: %s", host.freezeWhy)
@@ -59,6 +48,22 @@ func TestTheHostProbeAsksWithAProcessOfItsOwn(t *testing.T) {
 		}
 	}
 	assert.NotEmpty(t, host.niceWhy, "the priority answer carries its reason too")
+}
+
+// The probe's child is this test binary, which has no -hold flag of its own.
+// An unknown flag makes it fail, unless init answers the variable first.
+func TestTheHoldVariableMakesThisBinaryTheProbesChild(t *testing.T) {
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	child := exec.Command(exe, "-no-such-flag")
+	child.Env = append(os.Environ(), holdEnv+"=1")
+	child.Stdin = strings.NewReader("input the child reads to its end")
+	require.NoError(t, child.Run(), "the variable must make the process leave cleanly once its input ends")
+
+	plain := exec.Command(exe, "-no-such-flag")
+	plain.Stdin = strings.NewReader("")
+	assert.Error(t, plain.Run(), "without the variable the binary runs as itself")
 }
 
 // The value a revert writes depends on which spelling the host answers with,

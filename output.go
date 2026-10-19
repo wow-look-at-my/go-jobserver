@@ -13,7 +13,14 @@ func printCPU(cpu jobserver.CPUReport) {
 	fmt.Printf("cpus     %d\n", cpu.CPUs)
 	fmt.Printf("budget   %.2f\n", cpu.Budget)
 	fmt.Printf("measured %.2f\n", cpu.Measured)
-	fmt.Printf("host     %.2f\n", cpu.HostBusy)
+	if cpu.HostError != "" {
+		fmt.Printf("host     unknown\n")
+		fmt.Printf("error    configuration error: the host's CPU load is unknown (%s)\n", cpu.HostError)
+		fmt.Printf("         the daemon cannot see work outside its own jobs or how many tasks want a CPU, and can destabilize the system under load\n")
+	} else {
+		fmt.Printf("host     %.2f\n", cpu.HostBusy)
+		fmt.Printf("runnable %d\n", cpu.HostRunnable)
+	}
 	fmt.Printf("over     %v\n", cpu.OverBudget)
 	if cpu.Note != "" {
 		fmt.Printf("note     %s\n", cpu.Note)

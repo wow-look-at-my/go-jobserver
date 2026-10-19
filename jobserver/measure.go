@@ -27,18 +27,34 @@ type Reading struct {
 	At time.Time
 	// CPUs is how many logical CPUs the host has.
 	CPUs int
-	// HostBusy is how many CPUs were busy across the whole host, counted from process CPU time.
+	// HostBusy is how many CPUs the whole host used: from its own counters when HostOK is set, else from the process table.
 	HostBusy float64
+	// HostCPUs is how many CPUs the host's own counters cover. Zero means they were not read.
+	HostCPUs int
+	// HostOK reports whether HostBusy comes from the host's own counters.
+	HostOK bool
+	// HostRunnable is how many tasks wanted a CPU at the sample, not counting the reader. It is zero when HostCPUs is.
+	HostRunnable int
+	// HostErr says why the host's own counters cannot be read. It is empty when they can.
+	HostErr string
 	// Window is how long the rates were measured over.
 	Window time.Duration
 	// Jobs maps a job id to how many CPUs its process tree used.
 	Jobs map[string]float64
-	// Table is the snapshot the rates came from.
+	// Table is the snapshot the rates came from. It is nil when no job needed it.
 	Table []Proc
-	// OK reports whether rates could be computed.
+	// OK reports whether the per-process rates could be computed. A sample that skipped the process table reports HostOK.
 	OK bool
-	// Note explains a sample that carries no rates.
+	// Note explains a sample that carries no rates, or a host read that failed.
 	Note string
+}
+
+// addNote adds one reason to a reading's note.
+func (r *Reading) addNote(note string) {
+	if r.Note != "" {
+		note = r.Note + "; " + note
+	}
+	r.Note = note
 }
 
 // clockTick is the resolution of the CPU times /proc reports. Linux counts in hundredths of a second.
@@ -268,15 +284,22 @@ func (x *procIndex) tree(root int) []Proc {
 
 // A sampler turns process snapshots into CPU rates.
 type sampler struct {
-	src  procSource
+	src procSource
+	// host is the host's own CPU counters. Nil means the host has none.
+	host hostSource
 	now  func() time.Time
 	mu   sync.Mutex
 	at   time.Time
 	prev map[int]time.Duration
 	base bool
+	// hostPrev is the host read the next host rate counts from, once hostBase is set.
+	hostPrev hostStat
+	hostBase bool
 }
 
-func newSampler() *sampler { return &sampler{src: newProcSource(), now: time.Now} }
+func newSampler() *sampler {
+	return &sampler{src: newProcSource(), host: newHostSource(), now: time.Now}
+}
 
 // nowAt reads the clock, falling back to the real one.
 func (s *sampler) nowAt() time.Time {
@@ -293,10 +316,20 @@ func (s *sampler) sample(roots map[string]int) Reading {
 	defer s.mu.Unlock()
 	now := s.nowAt()
 	r := Reading{At: now, CPUs: runtime.NumCPU(), Jobs: map[string]float64{}}
+	hostRead := s.readHost(&r)
+	if len(roots) == 0 && hostRead {
+		// No job needs the process table. The rates of the next scan cannot span the skipped samples.
+		s.base, s.prev = false, nil
+		r.OK = r.HostOK
+		if !r.OK {
+			r.addNote("measuring from the next sample")
+		}
+		return r
+	}
 	procs, err := s.src.procs()
 	if err != nil {
 		s.at, s.base, s.prev = now, false, nil
-		r.Note = err.Error()
+		r.addNote(err.Error())
 		return r
 	}
 	r.Table = procs
@@ -305,7 +338,7 @@ func (s *sampler) sample(roots map[string]int) Reading {
 	if !s.base || window <= 0 {
 		s.at, s.base = now, true
 		s.prev = cpuByPID(procs)
-		r.Note = "measuring from the next sample"
+		r.addNote("measuring from the next sample")
 		return r
 	}
 	delta := make(map[int]time.Duration, len(procs))
@@ -321,7 +354,10 @@ func (s *sampler) sample(roots map[string]int) Reading {
 	}
 	seconds := window.Seconds()
 	r.OK = true
-	r.HostBusy = float64(host) / float64(time.Second) / seconds
+	if !r.HostOK {
+		// The table misses other PID namespaces and processes that start and end between samples, so it is only the fallback.
+		r.HostBusy = float64(host) / float64(time.Second) / seconds
+	}
 	index := newProcIndex(procs)
 	for id, root := range roots {
 		var used time.Duration
@@ -333,6 +369,34 @@ func (s *sampler) sample(roots map[string]int) Reading {
 	s.at = now
 	s.prev = cpuByPID(procs)
 	return r
+}
+
+// readHost reads the host's own counters into r, and reports whether the
+// host source answered. The first answer only sets the baseline.
+func (s *sampler) readHost(r *Reading) bool {
+	if s.host == nil {
+		r.HostErr = "this host has no /proc/stat"
+		return false
+	}
+	st, err := s.host.hostStat()
+	if err != nil {
+		s.hostBase = false
+		r.HostErr = err.Error()
+		r.addNote("host cpu: " + err.Error())
+		return false
+	}
+	prev, had := s.hostPrev, s.hostBase
+	s.hostPrev, s.hostBase = st, true
+	r.HostCPUs = st.cpus
+	r.HostRunnable = max(st.running-1, 0)
+	if !had || st.total <= prev.total || st.busy < prev.busy {
+		return true
+	}
+	busy, total := st.busy-prev.busy, st.total-prev.total
+	// The kernel documents that iowait can decrease, which can put busy above the total.
+	r.HostBusy = min(float64(busy)/float64(total), 1) * float64(st.cpus)
+	r.HostOK = true
+	return true
 }
 
 // cpuByPID indexes a snapshot's accumulated CPU times.

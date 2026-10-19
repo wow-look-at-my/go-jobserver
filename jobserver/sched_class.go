@@ -78,12 +78,13 @@ func (b *classBook) cost(class string) (float64, bool) {
 	return c.Cost, true
 }
 
-// observe records one measured run of a class and saves the history.
-func (b *classBook) observe(class string, cpuSeconds float64, wall time.Duration, revoked bool) {
-	if class == "" || wall <= 0 {
+// observe records one measured run of a class and saves the history. span is
+// how long the run's measurements cover.
+func (b *classBook) observe(class string, cpuSeconds float64, span time.Duration, revoked bool) {
+	if class == "" || span <= 0 {
 		return
 	}
-	avg := cpuSeconds / wall.Seconds()
+	avg := cpuSeconds / span.Seconds()
 	b.mu.Lock()
 	c, ok := b.classes[class]
 	if !ok {

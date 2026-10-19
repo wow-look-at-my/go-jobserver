@@ -5,14 +5,51 @@ package jobserver
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// runWithBackgroundChild runs a shell that starts a sleeping child and exits
+// with a code. The child keeps the output pipe open past the wait delay, and
+// the test kills it afterwards.
+func runWithBackgroundChild(t *testing.T, exit int) (int, error) {
+	t.Helper()
+	old := waitDelay
+	waitDelay = 200 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(filepath.Join(dir, "child.pid"))
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	script := fmt.Sprintf("sleep 30 & echo $! > child.pid; exit %d", exit)
+	return ExecRunner{}.Run(context.Background(), &Job{Command: []string{"sh", "-c", script}, Dir: dir}, &bytes.Buffer{}, nil)
+}
+
+func TestExecRunnerCountsExitZeroAsSuccessWhileAChildHoldsThePipe(t *testing.T) {
+	code, err := runWithBackgroundChild(t, 0)
+	require.NoError(t, err)
+	require.Zero(t, code)
+}
+
+func TestExecRunnerKeepsTheExitCodeWhileAChildHoldsThePipe(t *testing.T) {
+	code, err := runWithBackgroundChild(t, 3)
+	require.NoError(t, err)
+	require.Equal(t, 3, code)
+}
 
 func TestExecRunnerKillsAJobsWholeProcessGroup(t *testing.T) {
 	dir := t.TempDir()
