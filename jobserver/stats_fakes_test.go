@@ -3,7 +3,6 @@ package jobserver
 import (
 	"math"
 	"sync"
-	"time"
 
 	"github.com/wow-look-at-my/simple-stats-api/cpusample"
 )
@@ -68,15 +67,4 @@ func (c *countingSource) count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.scans
-}
-
-// burn adds CPU time to one process of the table.
-func (c *countingSource) burn(pid int, d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i := range c.table {
-		if c.table[i].PID == pid {
-			c.table[i].CPU += d
-		}
-	}
 }
