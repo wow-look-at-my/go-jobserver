@@ -128,7 +128,9 @@ Every `-sample` interval (one second by default) the daemon measures:
 
 The daemon adds up each job's CPU time. It records the total on the job as `cpu_seconds` when the job ends.
 
-On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. A host with neither says so in the status instead of reporting zero.
+The daemon does no sampling of its own. Every reading comes from [simple-stats-api](https://github.com/wow-look-at-my/simple-stats-api)'s `cpusample` package, which it imports. On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. A host with neither says so in the status instead of reporting zero.
+
+`-stats-url URL` (`StatsURL` in `SchedulerConfig`) reads the host load from a running simple-stats-api instead of this host's `/proc/stat`. The scheduler and a dashboard on that server show the same numbers. A server that cannot be reached, answers late, or lacks `cpu/percent`, `cpu/count` or `system/procs_running` is an unreadable host load (below). Process trees are still read on this host, because a PID only means something in the daemon's own PID namespace.
 
 #### An unreadable host load is a configuration error
 
@@ -361,7 +363,7 @@ go-toolchain
 | `jobserver/executor.go` | running a command and hashing what it produced |
 | `jobserver/process_unix.go` | the process group a job runs in, and killing all of it |
 | `jobserver/policy.go` | a job's CPU cost, its control settings and the process selectors |
-| `jobserver/measure.go` | the process table, the process tree and CPU rates |
+| `jobserver/stats.go` | the sampler: simple-stats-api's `cpusample`, local or over HTTP |
 | `jobserver/control.go` | the mechanisms, the host each is available on, and their outcomes |
 | `jobserver/affinity_linux.go` | the CPU mask, where the kernel has one |
 | `jobserver/sched.go` | the Scheduler: the count cap, groups, CPU budget, Acquire and TryAcquire |
@@ -373,7 +375,6 @@ go-toolchain
 | `jobserver/govern_plan.go` | the limits, the budget decision, and the plans to throttle and revert |
 | `jobserver/govern_hostload.go` | the error for a host whose load is unknown |
 | `jobserver/govern_ctl.go` | the control calls, made outside the governor's lock, and their retries |
-| `jobserver/hostcpu.go` | the host's own CPU counters |
 | `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
