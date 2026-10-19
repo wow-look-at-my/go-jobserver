@@ -22,6 +22,8 @@ type CPUReport struct {
 	HostCPUs int `json:"host_cpus"`
 	// HostSaturated reports whether the host counts as saturated, which throttles the running work as if it were over budget.
 	HostSaturated bool `json:"host_saturated"`
+	// HostError says why the host's own CPU counters cannot be read.
+	HostError string `json:"host_error,omitempty"`
 	// OverBudget reports whether Measured is above Budget.
 	OverBudget bool `json:"over_budget"`
 	// Unmeasured is how many holders had no reading at the last sample. Each counts against the budget at its admitted cost.
@@ -63,6 +65,10 @@ type governor struct {
 	failed map[*Lease]map[controlKey]time.Time
 	// hostHot is set while the host counts as saturated.
 	hostHot bool
+	// hostErr is why the host's own counters cannot be read. It is empty while they can.
+	hostErr string
+	// blindSince is when they were first unreadable, and blindLoggedAt is when the error about it was last logged.
+	blindSince, blindLoggedAt time.Time
 	// calmSince is when the load fell to the release mark. It is zero while the load is above the mark.
 	calmSince time.Time
 	// history is every control this daemon has applied or reverted, newest last.
@@ -143,10 +149,17 @@ func (g *governor) tick() {
 
 	g.mu.Lock()
 	live := g.recordSampleLocked(targets, rates, reading, now)
+	blindErr, blindInfo := g.watchBlindLocked(reading, now)
 	plan, limited, revoke := g.planLimitsLocked(live, now)
 	plan = append(plan, g.planBudgetLocked(live, reading, budget, now)...)
 	g.mu.Unlock()
 
+	if blindErr != "" {
+		g.sched.cfg.ErrorLogf("%s", blindErr)
+	}
+	if blindInfo != "" {
+		g.sched.cfg.Logf("%s", blindInfo)
+	}
 	for _, a := range plan {
 		g.perform(a, facts, now)
 	}
@@ -302,6 +315,7 @@ func (g *governor) report() CPUReport {
 		HostBusy:      g.sample.HostBusy,
 		HostCPUs:      g.sample.HostCPUs,
 		HostSaturated: g.hostHot,
+		HostError:     g.hostErr,
 		Unmeasured:    g.unmeasured,
 		Jobs:          map[string]float64{},
 		Note:          g.sample.Note,

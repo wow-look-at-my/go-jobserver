@@ -33,6 +33,8 @@ type Reading struct {
 	HostCPUs int
 	// HostOK reports whether HostBusy comes from the host's own counters.
 	HostOK bool
+	// HostErr says why the host's own counters cannot be read. It is empty when they can.
+	HostErr string
 	// Window is how long the rates were measured over.
 	Window time.Duration
 	// Jobs maps a job id to how many CPUs its process tree used.
@@ -371,11 +373,13 @@ func (s *sampler) sample(roots map[string]int) Reading {
 // host source answered. The first answer only sets the baseline.
 func (s *sampler) readHost(r *Reading) bool {
 	if s.host == nil {
+		r.HostErr = "this host has no /proc/stat"
 		return false
 	}
 	st, err := s.host.hostStat()
 	if err != nil {
 		s.hostBase = false
+		r.HostErr = err.Error()
 		r.addNote("host cpu: " + err.Error())
 		return false
 	}

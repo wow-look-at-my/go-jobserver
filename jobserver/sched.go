@@ -54,6 +54,10 @@ type SchedulerConfig struct {
 	HostBusyLow float64
 	// RetryInterval is the wait before a failed control is tried again. Zero means DefaultRetryInterval. Negative is no wait.
 	RetryInterval time.Duration
+	// HostBlindEvery is how often the scheduler repeats its error while it cannot read the host's CPU counters.
+	HostBlindEvery time.Duration
+	// ErrorLogf receives the lines that name a configuration error the operator has to fix. Nil sends them to Logf.
+	ErrorLogf func(format string, args ...any)
 }
 
 // The defaults for the governor's SchedulerConfig fields.
@@ -68,6 +72,8 @@ const (
 	DefaultHostBusyLow = 0.75
 	// DefaultRetryInterval is how long a control that did not take effect waits before the next try.
 	DefaultRetryInterval = 10 * time.Second
+	// DefaultHostBlindEvery is how often the error about an unreadable host load repeats.
+	DefaultHostBlindEvery = 5 * time.Minute
 )
 
 // Scheduler admits leases and governs the ones that hold a slot.
@@ -108,6 +114,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.ErrorLogf == nil {
+		cfg.ErrorLogf = cfg.Logf
+	}
+	if cfg.HostBlindEvery <= 0 {
+		cfg.HostBlindEvery = DefaultHostBlindEvery
 	}
 	if cfg.ReleaseBelow <= 0 {
 		cfg.ReleaseBelow = DefaultReleaseBelow
