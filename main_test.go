@@ -76,7 +76,7 @@ func TestCLIQueueWaitsForAJob(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo from-cli"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "echo from-cli"})
 	})
 	require.NoError(t, err)
 	// stdout carries the id alone, so a script can capture it.
@@ -90,7 +90,7 @@ func TestCLIQueueReportsAFailure(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo bad >&2; exit 4"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "echo bad >&2; exit 4"})
 	})
 	require.Error(t, err)
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"), "stdout was %q", out)
@@ -102,22 +102,22 @@ func TestCLIQueueDraftThenActivate(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-draft", "-name", "later", "--", "sh", "-c", "echo later"})
+		return run([]string{"--dir", dir, "queue", "--draft", "--name", "later", "--", "sh", "-c", "echo later"})
 	})
 	require.NoError(t, err)
 	id := strings.TrimSpace(out)
 	require.True(t, strings.HasPrefix(id, "j-"))
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "status", id}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "status", id}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, string(jobserver.StateDraft))
 	assert.Contains(t, out, "later")
 
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "activate", id}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "activate", id}) })
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		out, err := capture(t, func() error { return run([]string{"-dir", dir, "status", id}) })
+		out, err := capture(t, func() error { return run([]string{"--dir", dir, "status", id}) })
 		return err == nil && strings.Contains(out, string(jobserver.StateCompleted))
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -127,30 +127,30 @@ func TestCLIDependBuildsAChain(t *testing.T) {
 	startDaemon(t, dir)
 	var producer, consumer string
 	out, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-draft", "--", "sh", "-c", "echo one"})
+		return run([]string{"--dir", dir, "queue", "--draft", "--", "sh", "-c", "echo one"})
 	})
 	require.NoError(t, err)
 	producer = strings.TrimSpace(out)
 	out, err = capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-draft", "--", "sh", "-c", "echo two"})
+		return run([]string{"--dir", dir, "queue", "--draft", "--", "sh", "-c", "echo two"})
 	})
 	require.NoError(t, err)
 	consumer = strings.TrimSpace(out)
 
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "depend", consumer, producer}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "depend", consumer, producer}) })
 	require.NoError(t, err)
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "status", consumer}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "status", consumer}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "deps      "+producer)
 
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "activate", producer}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "activate", producer}) })
 	require.NoError(t, err)
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "activate", consumer}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "activate", consumer}) })
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		out, err := capture(t, func() error { return run([]string{"-dir", dir, "status", consumer}) })
+		out, err := capture(t, func() error { return run([]string{"--dir", dir, "status", consumer}) })
 		return err == nil && strings.Contains(out, string(jobserver.StateCompleted))
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -159,18 +159,18 @@ func TestCLIListShowsJobs(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "true"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "true"})
 	})
 	require.NoError(t, err)
 	id := strings.Split(strings.TrimSpace(out), "\n")[0]
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "list"}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "ID")
 	assert.Contains(t, out, id)
 	assert.Contains(t, out, string(jobserver.StateCompleted))
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "list", "-json"}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "list", "--json"}) })
 	require.NoError(t, err)
 	var listed []jobserver.Job
 	require.NoError(t, json.Unmarshal([]byte(out), &listed))
@@ -193,7 +193,7 @@ func TestCLIListShowsTheDependencyDepth(t *testing.T) {
 		ids = append(ids, j.ID)
 	}
 
-	out, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
+	out, err := capture(t, func() error { return run([]string{"--dir", dir, "list"}) })
 	require.NoError(t, err)
 
 	depths := map[string]string{}
@@ -208,12 +208,12 @@ func TestCLILogsPrintsTheOutput(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo logged-line"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "echo logged-line"})
 	})
 	require.NoError(t, err)
 	id := strings.Split(strings.TrimSpace(out), "\n")[0]
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "logs", id}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "logs", id}) })
 	require.NoError(t, err)
 	assert.Equal(t, "logged-line\n", out)
 }
@@ -221,33 +221,33 @@ func TestCLILogsPrintsTheOutput(t *testing.T) {
 func TestCLIPauseResumeAndInterrupt(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
-	out, err := capture(t, func() error { return run([]string{"-dir", dir, "pause"}) })
+	out, err := capture(t, func() error { return run([]string{"--dir", dir, "pause"}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "paused")
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "stats"}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "stats"}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "paused   true")
 
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "resume"}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "resume"}) })
 	require.NoError(t, err)
 
 	idOut, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "--", "sh", "-c", "sleep 30"})
+		return run([]string{"--dir", dir, "queue", "--", "sh", "-c", "sleep 30"})
 	})
 	require.NoError(t, err)
 	id := strings.TrimSpace(idOut)
 	require.Eventually(t, func() bool {
-		out, _ := capture(t, func() error { return run([]string{"-dir", dir, "status", id}) })
+		out, _ := capture(t, func() error { return run([]string{"--dir", dir, "status", id}) })
 		return strings.Contains(out, string(jobserver.StateRunning))
 	}, 10*time.Second, 20*time.Millisecond)
 
-	out, err = capture(t, func() error { return run([]string{"-dir", dir, "interrupt", id}) })
+	out, err = capture(t, func() error { return run([]string{"--dir", dir, "interrupt", id}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "interrupted")
 
 	require.Eventually(t, func() bool {
-		out, _ := capture(t, func() error { return run([]string{"-dir", dir, "status", id}) })
+		out, _ := capture(t, func() error { return run([]string{"--dir", dir, "status", id}) })
 		return strings.Contains(out, string(jobserver.StateCancelled))
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -259,7 +259,7 @@ func TestCLIQueueReadsTheSpool(t *testing.T) {
 	require.NoError(t, os.MkdirAll(spool, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(spool, "spooled.cmd"), []byte("echo spooled\n"), 0o644))
 	require.Eventually(t, func() bool {
-		out, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
+		out, err := capture(t, func() error { return run([]string{"--dir", dir, "list"}) })
 		return err == nil && strings.Contains(out, "echo spooled")
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -278,14 +278,14 @@ func TestCLIQueueOverIPC(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	out, errText, err := captureBoth(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "echo over-ipc"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "echo over-ipc"})
 	})
 	require.NoError(t, err, errText)
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"), "stdout was %q", out)
 	assert.Contains(t, errText, string(jobserver.StateCompleted))
 
 	logs, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "logs", strings.TrimSpace(out)})
+		return run([]string{"--dir", dir, "logs", strings.TrimSpace(out)})
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "over-ipc\n", logs)
@@ -293,7 +293,7 @@ func TestCLIQueueOverIPC(t *testing.T) {
 
 func TestCLIWithoutADaemonReportsIt(t *testing.T) {
 	dir := shortDir(t)
-	_, err := capture(t, func() error { return run([]string{"-dir", dir, "list"}) })
+	_, err := capture(t, func() error { return run([]string{"--dir", dir, "list"}) })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no daemon")
 }
@@ -305,17 +305,64 @@ func TestCLIVersionAndHelp(t *testing.T) {
 
 	out, err = capture(t, func() error { return run([]string{"help"}) })
 	require.NoError(t, err)
-	assert.Contains(t, out, "usage:")
+	assert.Contains(t, out, "Usage:")
 
 	out, err = capture(t, func() error { return run(nil) })
 	require.NoError(t, err)
-	assert.Contains(t, out, "usage:")
+	assert.Contains(t, out, "Usage:")
+}
+
+func TestCLIHelpListsCommandsAndLongFlags(t *testing.T) {
+	out, err := capture(t, func() error { return run([]string{"--help"}) })
+	require.NoError(t, err)
+	for _, want := range []string{"queue", "policy", "--dir", "--budget", "-j, --jobs"} {
+		assert.Contains(t, out, want)
+	}
+
+	out, err = capture(t, func() error { return run([]string{"queue", "--help"}) })
+	require.NoError(t, err)
+	for _, want := range []string{"--wait", "--dep", "--freeze-exempt", "--dir"} {
+		assert.Contains(t, out, want)
+	}
+}
+
+func TestCLIQueueStopsAtTheCommand(t *testing.T) {
+	dir := shortDir(t)
+	startDaemon(t, dir)
+	// No "--": the "-c" belongs to sh, not to queue.
+	out, err := capture(t, func() error {
+		return run([]string{"--dir", dir, "queue", "--wait", "sh", "-c", "echo no-dash"})
+	})
+	require.NoError(t, err)
+	logs, err := capture(t, func() error { return run([]string{"--dir", dir, "logs", strings.TrimSpace(out)}) })
+	require.NoError(t, err)
+	assert.Equal(t, "no-dash\n", logs)
+}
+
+func TestCLIQueueDepAndDependsShareOneList(t *testing.T) {
+	dir := shortDir(t)
+	srv := startDaemon(t, dir)
+	var ids []string
+	for range 2 {
+		j, _, err := srv.Enqueue(jobserver.Spec{Command: []string{"true"}, Draft: true})
+		require.NoError(t, err)
+		ids = append(ids, j.ID)
+	}
+	out, err := capture(t, func() error {
+		return run([]string{"--dir", dir, "queue", "--draft", "--dep", ids[0], "--depends", ids[1], "--", "true"})
+	})
+	require.NoError(t, err)
+	raw, err := capture(t, func() error { return run([]string{"--dir", dir, "status", "--json", strings.TrimSpace(out)}) })
+	require.NoError(t, err)
+	var job jobserver.Job
+	require.NoError(t, json.Unmarshal([]byte(raw), &job))
+	assert.Equal(t, ids, job.Deps)
 }
 
 func TestCLIQueueNeedsACommand(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
-	_, err := capture(t, func() error { return run([]string{"-dir", dir, "queue"}) })
+	_, err := capture(t, func() error { return run([]string{"--dir", dir, "queue"}) })
 	require.Error(t, err)
 }
 
@@ -329,7 +376,7 @@ func TestCLIQueueThroughAShell(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	out, errText, err := captureBoth(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "-shell", "echo a && echo b"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--shell", "echo a && echo b"})
 	})
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(strings.TrimSpace(out), "j-"))
@@ -339,7 +386,7 @@ func TestCLIQueueThroughAShell(t *testing.T) {
 func TestCLIInterruptAll(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
-	out, err := capture(t, func() error { return run([]string{"-dir", dir, "interrupt", "all"}) })
+	out, err := capture(t, func() error { return run([]string{"--dir", dir, "interrupt", "all"}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "interrupted 0 job(s)")
 }
@@ -348,11 +395,11 @@ func TestCLIStatusJSON(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
 	idOut, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "-wait", "--", "sh", "-c", "true"})
+		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "true"})
 	})
 	require.NoError(t, err)
 	id := strings.Split(strings.TrimSpace(idOut), "\n")[0]
-	out, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	out, err := capture(t, func() error { return run([]string{"--dir", dir, "status", "--json", id}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, `"state": "completed"`)
 }
@@ -363,16 +410,16 @@ func TestCLIQueueWithInputsAndOutputs(t *testing.T) {
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
 		return run([]string{
-			"-dir", dir, "queue", "-wait",
-			"-workdir", work,
-			"-output", "made.txt",
-			"-env", "JOBSERVER_CLI=1",
+			"--dir", dir, "queue", "--wait",
+			"--workdir", work,
+			"--output", "made.txt",
+			"--env", "JOBSERVER_CLI=1",
 			"--", "sh", "-c", "echo $JOBSERVER_CLI > made.txt",
 		})
 	})
 	require.NoError(t, err)
 	id := strings.Split(strings.TrimSpace(out), "\n")[0]
-	status, err := capture(t, func() error { return run([]string{"-dir", dir, "status", id}) })
+	status, err := capture(t, func() error { return run([]string{"--dir", dir, "status", id}) })
 	require.NoError(t, err)
 	assert.Contains(t, status, "made.txt")
 	assert.Contains(t, status, "artifact")
@@ -386,18 +433,18 @@ func TestCLICarriesAJobPolicyAndReplacesIt(t *testing.T) {
 	startDaemon(t, dir)
 	out, err := capture(t, func() error {
 		return run([]string{
-			"-dir", dir, "queue", "-draft",
-			"-cpu", "2.5",
-			"-priority", "-nice", "5",
-			"-freeze", "-exempt", "1234,sleep",
-			"-affinity", "0,1",
+			"--dir", dir, "queue", "--draft",
+			"--cpu", "2.5",
+			"--priority", "--nice", "5",
+			"--freeze", "--exempt", "1234,sleep",
+			"--affinity", "0,1",
 			"--", "sh", "-c", "true",
 		})
 	})
 	require.NoError(t, err)
 	id := strings.Split(strings.TrimSpace(out), "\n")[0]
 
-	raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	raw, err := capture(t, func() error { return run([]string{"--dir", dir, "status", "--json", id}) })
 	require.NoError(t, err)
 	var job jobserver.Job
 	require.NoError(t, json.Unmarshal([]byte(raw), &job))
@@ -410,13 +457,13 @@ func TestCLICarriesAJobPolicyAndReplacesIt(t *testing.T) {
 	assert.Equal(t, []string{"sleep"}, job.Policy.Freeze.Exempt.Names)
 
 	replaced, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "policy", "-cpu", "1", "-freeze-exempt", "99", id})
+		return run([]string{"--dir", dir, "policy", "--cpu", "1", "--freeze-exempt", "99", id})
 	})
 	require.NoError(t, err)
 	assert.Contains(t, replaced, "freeze")
 	assert.Contains(t, replaced, "exempt 99")
 
-	raw, err = capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+	raw, err = capture(t, func() error { return run([]string{"--dir", dir, "status", "--json", id}) })
 	require.NoError(t, err)
 	var after jobserver.Job
 	require.NoError(t, json.Unmarshal([]byte(raw), &after))
@@ -433,7 +480,7 @@ func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
 	defer signal.Stop(quiet)
 
 	daemon := make(chan error, 1)
-	go func() { daemon <- run([]string{"-dir", dir, "-no-http", "-ipc=false", "run"}) }()
+	go func() { daemon <- run([]string{"--dir", dir, "--no-http", "--ipc=false", "run"}) }()
 
 	sock := filepath.Join(dir, "go-jobserver.sock")
 	require.Eventually(t, func() bool {
@@ -442,7 +489,7 @@ func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
 	}, 30*time.Second, 10*time.Millisecond, "the daemon must publish its socket")
 
 	idOut, err := capture(t, func() error {
-		return run([]string{"-dir", dir, "queue", "--", "sh", "-c", "while :; do :; done"})
+		return run([]string{"--dir", dir, "queue", "--", "sh", "-c", "while :; do :; done"})
 	})
 	require.NoError(t, err)
 	id := strings.TrimSpace(idOut)
@@ -450,7 +497,7 @@ func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
 	// The shipped daemon reports the host's use, and the use of the job it is running, while that job burns.
 	var stats jobserver.Stats
 	require.Eventually(t, func() bool {
-		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "stats", "-json"}) })
+		raw, err := capture(t, func() error { return run([]string{"--dir", dir, "stats", "--json"}) })
 		if err != nil {
 			return false
 		}
@@ -460,10 +507,10 @@ func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
 	assert.Greater(t, stats.CPU.Budget, 0.0)
 	assert.GreaterOrEqual(t, stats.CPU.HostBusy, 0.0)
 
-	_, err = capture(t, func() error { return run([]string{"-dir", dir, "interrupt", id}) })
+	_, err = capture(t, func() error { return run([]string{"--dir", dir, "interrupt", id}) })
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		raw, err := capture(t, func() error { return run([]string{"-dir", dir, "status", "-json", id}) })
+		raw, err := capture(t, func() error { return run([]string{"--dir", dir, "status", "--json", id}) })
 		if err != nil {
 			return false
 		}
@@ -483,7 +530,7 @@ func TestCLIRunsTheDaemonAndReportsCPU(t *testing.T) {
 func TestCLIStatsPrintsTheCPUReport(t *testing.T) {
 	dir := shortDir(t)
 	startDaemon(t, dir)
-	out, err := capture(t, func() error { return run([]string{"-dir", dir, "stats"}) })
+	out, err := capture(t, func() error { return run([]string{"--dir", dir, "stats"}) })
 	require.NoError(t, err)
 	assert.Contains(t, out, "budget")
 	assert.Contains(t, out, "measured")

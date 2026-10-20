@@ -27,6 +27,29 @@ func printCPU(cpu jobserver.CPUReport) {
 	}
 }
 
+// printStats reports the daemon's counters.
+func printStats(st *jobserver.Stats) {
+	fmt.Printf("dir      %s\n", st.Dir)
+	fmt.Printf("version  %s\n", st.Revision)
+	fmt.Printf("pid      %d\n", st.PID)
+	fmt.Printf("uptime   %s\n", st.Uptime)
+	fmt.Printf("paused   %v\n", st.Paused)
+	fmt.Printf("running  %d\n", st.Running)
+	fmt.Printf("total    %d\n", st.Total)
+	printCPU(st.CPU)
+	for _, c := range st.Controls {
+		fmt.Printf("control  %s %s pid %d %s %s\n", c.Job, c.Mechanism, c.PID, c.Outcome, c.Detail)
+	}
+	states := make([]string, 0, len(st.ByState))
+	for state := range st.ByState {
+		states = append(states, state)
+	}
+	sortStrings(states)
+	for _, state := range states {
+		fmt.Printf("%-10s %d\n", state, st.ByState[state])
+	}
+}
+
 // printJSON writes a value as indented JSON.
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)

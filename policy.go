@@ -1,11 +1,10 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
 	"strings"
 
+	"github.com/spf13/pflag"
 	"github.com/wow-look-at-my/go-jobserver/jobserver"
 )
 
@@ -23,6 +22,8 @@ func (f *setFlag) Set(v string) error {
 	return nil
 }
 
+func (f *setFlag) Type() string { return "string" }
+
 // policyFlags are the CPU policy flags queue and policy share.
 type policyFlags struct {
 	cost     float64
@@ -36,15 +37,15 @@ type policyFlags struct {
 }
 
 // bind adds the policy flags.
-func (p *policyFlags) bind(fs *flag.FlagSet) {
+func (p *policyFlags) bind(fs *pflag.FlagSet) {
 	p.mech = map[jobserver.Mechanism]*[2]setFlag{}
-	fs.Float64Var(&p.cost, "cpu", 0, "CPUs the job is expected to use")
-	fs.BoolVar(&p.priority, "priority", false, "raise the nice value while over budget")
-	fs.IntVar(&p.nice, "nice", 0, "nice value for the priority mechanism")
-	fs.BoolVar(&p.freeze, "freeze", false, "suspend processes while over budget")
+	fs.Float64Var(&p.cost, "cpu", 0, "CPUs the job is expected to use (default: its last run, then 1)")
+	fs.BoolVar(&p.priority, "priority", false, "raise the job's nice value while it is over the CPU budget")
+	fs.IntVar(&p.nice, "nice", 0, "nice value for the priority mechanism (default 10)")
+	fs.BoolVar(&p.freeze, "freeze", false, "suspend the job's processes while it is over the CPU budget")
 	fs.Var(&p.affinity, "affinity", "CPUs to pin to (\"0,1\", \"all\" or \"last\")")
-	fs.Var(&p.exempt, "exempt", "processes every enabled mechanism leaves alone")
-	fs.Var(&p.only, "only", "processes every enabled mechanism is restricted to")
+	fs.Var(&p.exempt, "exempt", "processes every enabled mechanism leaves alone, as ids and names (\"1234,ffmpeg\")")
+	fs.Var(&p.only, "only", "processes every enabled mechanism is restricted to, as ids and names")
 	for _, m := range jobserver.Mechanisms() {
 		pair := new([2]setFlag)
 		fs.Var(&pair[0], string(m)+"-exempt", "processes the "+string(m)+" mechanism leaves alone")
@@ -92,38 +93,6 @@ func (p *policyFlags) mechOnly(m jobserver.Mechanism) jobserver.Selector {
 		return jobserver.ParseSelector(pair[1].value)
 	}
 	return jobserver.ParseSelector(p.only.value)
-}
-
-// cmdPolicy replaces a job's CPU policy.
-func cmdPolicy(g *globals, args []string) error {
-	fs := flag.NewFlagSet("policy", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Print(usage) }
-	g.bind(fs)
-	var pol policyFlags
-	pol.bind(fs)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return errors.New("policy needs one job id")
-	}
-	id := fs.Arg(0)
-	policy := pol.policy()
-	c, ctx, cancel, err := client(g)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	defer c.Close()
-	resp, err := c.Do(ctx, jobserver.Request{Op: jobserver.OpPolicy, ID: id, Policy: &policy})
-	if err != nil {
-		return err
-	}
-	if !resp.OK {
-		return errors.New(resp.Error)
-	}
-	printPolicy(resp.Job.Policy)
-	return nil
 }
 
 // printPolicy reports a job's policy in the form the flags take.
