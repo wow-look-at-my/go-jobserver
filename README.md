@@ -16,7 +16,7 @@ go-jobserver list                      # watch it
 open http://127.0.0.1:8059/            # the dashboard
 ```
 
-`go-jobserver run` stays in the foreground and serves every transport. The server directory defaults to `~/.local/state/go-jobserver`, and `-dir` moves it.
+`go-jobserver run` stays in the foreground and serves every transport. The server directory defaults to `~/.local/state/go-jobserver`, and `--dir` moves it.
 
 ## Jobs
 
@@ -25,7 +25,7 @@ A job is a command, the jobs it depends on. The files it reads, and the files it
 | field | meaning |
 | --- | --- |
 | `id` | the job's unique name, generated as `j-<12 hex>` unless one is given |
-| `command` | argv, run directly, or through `sh -c` with `-shell` |
+| `command` | argv, run directly, or through `sh -c` with `--shell` |
 | `deps` | job IDs that must succeed first |
 | `inputs` | files whose content decides the job's cache identity |
 | `outputs` | files the job must produce; missing ones fail the job |
@@ -45,14 +45,14 @@ draft ──activate──> active ──> running ──> completed
                       └──> blocked                 (a dependency failed)
 ```
 
-A job created with `-draft` waits until `go-jobserver activate <id>`. A dependency that fails makes everything downstream `blocked`, so nothing runs against the wreckage of a broken step.
+A job created with `--draft` waits until `go-jobserver activate <id>`. A dependency that fails makes everything downstream `blocked`, so nothing runs against the wreckage of a broken step.
 
 ### Dependency graph
 
 Dependencies are checked when a job is created and when one is added. A cycle is refused with `dependency cycle`. The scheduler runs a job once every dependency is `completed` or `cached`.
 
 ```sh
-go-jobserver queue -draft -name extract -- untar.sh
+go-jobserver queue --draft --name extract -- untar.sh
 # prints j-9f2c1a44b7e1
 go-jobserver depend j-9f2c1a44b7e1 build
 go-jobserver activate j-9f2c1a44b7e1
@@ -62,7 +62,7 @@ go-jobserver activate j-9f2c1a44b7e1
 
 A job that names its outputs has them hashed when it finishes. Those hashes, the job's command, its directory, its environment, its declared inputs, and the identities of its dependencies make up the job's **identity**. When a new job's identity matches one that already succeeded, the new job is marked `cached`. Its work is not repeated, and its artifacts are the earlier job's. Its `cache_of` names the job that did the work.
 
-Change an input file and the identity changes. The job runs again. Pass `-force` to run anyway, or give jobs the same `-key` to have an unfinished one absorbed instead of duplicated.
+Change an input file and the identity changes. The job runs again. Pass `--force` to run anyway, or give jobs the same `--key` to have an unfinished one absorbed instead of duplicated.
 
 ## Transports
 
@@ -71,9 +71,9 @@ Any of these can enqueue a job. The daemon serves all of them at once.
 | transport | how | where |
 | --- | --- | --- |
 | go-ipc | shared-memory service | name `go-jobserver-<dir hash>` |
-| HTTP | JSON API and dashboard | `127.0.0.1:8059` (`-http`) |
+| HTTP | JSON API and dashboard | `127.0.0.1:8059` (`--http`) |
 | file socket | the same API over a Unix socket | `<dir>/go-jobserver.sock` |
-| spool folder | drop a file in a directory | `<dir>/spool` (`-spool`) |
+| spool folder | drop a file in a directory | `<dir>/spool` (`--spool`) |
 | CLI | `go-jobserver queue ...` | talks to the socket or the service |
 
 The CLI prefers the file socket and falls back to the go-ipc service, so any process that can reach the directory can enqueue.
@@ -121,7 +121,7 @@ Jobs that each want four CPUs on a four-CPU machine do not run faster together t
 
 ### Measuring
 
-Every `-sample` interval (one second by default) the daemon measures:
+Every `--sample` interval (one second by default) the daemon measures:
 
 - How many CPUs the **whole host** used. On Linux this comes from `/proc/stat`. That file counts every process and kernel thread in every container. It is right inside a container too. A host without `/proc/stat` has no such counters. The daemon then cannot read the host's load, which is a configuration error (see below). The number it shows is only an estimate from process CPU time. The estimate misses kernel time and every process outside the daemon's own namespace.
 - How many CPUs **each running job** used. For a job that is a process tree, that means the job's child, its descendants and every process in its process group. So a job that starts helpers is measured as one.
@@ -130,7 +130,7 @@ The daemon adds up each job's CPU time. It records the total on the job as `cpu_
 
 The daemon does no sampling of its own. Every reading comes from [simple-stats-api](https://github.com/wow-look-at-my/simple-stats-api)'s `cpusample` package, which it imports. On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. A host with neither says so in the status instead of reporting zero.
 
-`-stats-url URL` (`StatsURL` in `SchedulerConfig`) reads the host load from a running simple-stats-api instead of this host's `/proc/stat`. The scheduler and a dashboard on that server show the same numbers. A server that cannot be reached, answers late, or lacks `cpu/percent`, `cpu/count` or `system/procs_running` is an unreadable host load (below). Process trees are still read on this host, because a PID only means something in the daemon's own PID namespace.
+`--stats-url URL` (`StatsURL` in `SchedulerConfig`) reads the host load from a running simple-stats-api instead of this host's `/proc/stat`. The scheduler and a dashboard on that server show the same numbers. A server that cannot be reached, answers late, or lacks `cpu/percent`, `cpu/count` or `system/procs_running` is an unreadable host load (below). Process trees are still read on this host, because a PID only means something in the daemon's own PID namespace.
 
 #### An unreadable host load is a configuration error
 
@@ -144,7 +144,7 @@ So the daemon treats this as a configuration error and does not run on quietly:
 
 ### Before a job starts
 
-Each job declares what it costs: the CPUs it expects to use. The daemon adds up the costs of the jobs it started. A job starts when its cost fits under the budget plus two CPUs. Until then it stays `active`. It starts the moment a running job finishes. `-budget` sets the budget.
+Each job declares what it costs: the CPUs it expects to use. The daemon adds up the costs of the jobs it started. A job starts when its cost fits under the budget plus two CPUs. Until then it stays `active`. It starts the moment a running job finishes. `--budget` sets the budget.
 
 The default is one CPU for each CPU of the host. A job that costs more than the whole budget still runs when nothing else runs, so no job waits forever.
 
@@ -160,11 +160,11 @@ A job always starts when none runs. A busy host cannot starve the daemon.
 
 The two extra CPUs are on purpose. Jobs wait for disk and network, and a budget filled exactly leaves CPUs idle. Ninja does the same: its default is more jobs than the host has CPUs. With a small budget the extra is the budget itself, so a budget of one CPU books two. With the budget set to the whole machine, the extra CPUs keep every CPU busy. Start such jobs at a low priority, for example with `nice`, so the rest of the host stays responsive while every CPU is busy.
 
-The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured. `-cost` prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
+The cost a job declares is used first. A job that declares none is priced at what its last run measured. Then at what earlier jobs of the same name measured. `--cost` prices a job with neither. The per-name history is kept in `classes.json` in the server directory.
 
 ```sh
-go-jobserver queue -cpu 4 -- make -j4
-go-jobserver -budget 6 run
+go-jobserver queue --cpu 4 -- make -j4
+go-jobserver --budget 6 run
 ```
 
 ### While a job runs
@@ -188,9 +188,9 @@ No host can use more CPUs than it has. With the budget set to the whole machine,
 
 | mechanism | what it does | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
-| `affinity` | pins the process to a CPU set, `-affinity 0,1` | `sched_setaffinity` | the background policy | the host's shell |
-| `priority` | raises the process's nice value, `-priority -nice 10` | `setpriority` | `setpriority` | the host's shell |
-| `freeze` | suspends the process, `-freeze` | `SIGSTOP` | `SIGSTOP` | asked first |
+| `affinity` | pins the process to a CPU set, `--affinity 0,1` | `sched_setaffinity` | the background policy | the host's shell |
+| `priority` | raises the process's nice value, `--priority --nice 10` | `setpriority` | `setpriority` | the host's shell |
+| `freeze` | suspends the process, `--freeze` | `SIGSTOP` | `SIGSTOP` | asked first |
 
 `affinity` and `priority` are attempted on every host and take effect wherever the call exists. A host that grows the call needs no change here. A call this host's syscall layer does not carry reports `not-applicable` with the reason, which is a missing capability rather than a refusal. A call the host has and declined - lowering a nice value without the privilege to, say - reports `refused`. `freeze` asks the host before it stops anything. A host whose stop signal ends a process reports success for that signal, so the two cannot be told apart from the answer alone.
 
@@ -227,14 +227,14 @@ Process can limit every mechanism. A selector is a comma-separated list of proce
 
 ```sh
 # freeze everything but this job's ffmpeg helper
-go-jobserver queue -freeze -exempt ffmpeg -- transcode.sh
+go-jobserver queue --freeze --exempt ffmpeg -- transcode.sh
 
 # only touch one process, by name or by pid, and leave its siblings alone
-go-jobserver queue -affinity 0 -affinity-only 1234 -- worker
-go-jobserver queue -priority -priority-exempt 99,logger -- build
+go-jobserver queue --affinity 0 --affinity-only 1234 -- worker
+go-jobserver queue --priority --priority-exempt 99,logger -- build
 ```
 
-`-exempt` and `-only` apply to every mechanism the job enables. `-affinity-exempt`, `-priority-only` and their siblings apply to one mechanism. `-only` restricts a mechanism to the processes it names. `-exempt` takes processes out of it. A process named by `exempt` is never touched, whatever else names it.
+`--exempt` and `--only` apply to every mechanism the job enables. `--affinity-exempt`, `--priority-only` and their siblings apply to one mechanism. `--only` restricts a mechanism to the processes it names. `--exempt` takes processes out of it. A process named by `exempt` is never touched, whatever else names it.
 
 Per-mechanism selectors are also part of the job spec, so the JSON transports carry them:
 
@@ -249,7 +249,7 @@ Per-mechanism selectors are also part of the job spec, so the JSON transports ca
 }
 ```
 
-`go-jobserver policy -freeze -exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `-no-cpu` turns sampling off fully.
+`go-jobserver policy --freeze --exempt ffmpeg <id>` replaces a job's policy, which is how a mechanism is turned off again. The flags say what the policy is now, so omitting one turns it off. `--no-cpu` turns sampling off fully.
 
 ## Scheduling work another program runs
 
@@ -339,9 +339,9 @@ stats                        show server counters, CPU use and active controls
 version                      print the version
 ```
 
-`queue` flags: `-name`, `-dep`/`-depends` (repeatable), `-input`, `-output`, `-env`, `-workdir`, `-key`, `-draft`, `-force`, `-wait`, `-shell`. With no command arguments, `queue` reads one command line from standard input.
+`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. With no command arguments, `queue` reads one command line from standard input.
 
-Global flags: `-dir`, `-http`, `-socket`, `-spool`, `-ipc`, `-j`, `-budget`, `-cost`, `-sample`, `-no-cpu`, `-no-http`, `-no-socket`, `-no-spool`.
+Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--stats-url`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
 
 ## Build and test
 
@@ -355,7 +355,7 @@ go-toolchain
 
 | path | what lives there |
 | --- | --- |
-| `main.go` | the command line |
+| `main.go`, `root.go`, `cmd_*.go` | the command line: cobra, one file per command |
 | `jobserver/job.go` | the job model, states and the dedup identity |
 | `jobserver/journal.go` | the record codec and frame format |
 | `jobserver/store.go` | the job table, the journal and the log files |
