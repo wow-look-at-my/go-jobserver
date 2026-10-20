@@ -36,6 +36,8 @@ type SchedulerConfig struct {
 	DefaultCost float64
 	// SampleInterval is how often the governor samples CPU use. Zero means one second.
 	SampleInterval time.Duration
+	// StatsURL is a simple-stats-api to read the host load from. Empty reads this host's /proc/stat. Process trees are always read here.
+	StatsURL string
 	// DisableCPU turns the governor off: nothing is measured, throttled or limited.
 	DisableCPU bool
 	// HistoryPath is the file the per-class cost history is kept in. Empty keeps it in memory.
@@ -352,16 +354,23 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 	return l, nil
 }
 
-// costOf is what a lease is expected to use: what it declared, then what its
-// class measured, then the default.
+// costOf is what a lease is expected to use. What it declared, then what its
+// class measured, then what each fallback class measured, then the default.
 func (s *Scheduler) costOf(req LeaseRequest) float64 {
 	if req.Policy.Cost > 0 {
 		return req.Policy.Cost
 	}
-	if c, ok := s.classes.cost(req.Class); ok {
-		return c
+	for _, class := range req.classes() {
+		if c, ok := s.classes.cost(class); ok {
+			return c
+		}
 	}
 	return s.cfg.DefaultCost
+}
+
+// classes is the lease's class, then its fallbacks.
+func (r LeaseRequest) classes() []string {
+	return append([]string{r.Class}, r.Fallback...)
 }
 
 // release removes a holder and plans again.

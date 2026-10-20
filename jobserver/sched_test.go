@@ -17,7 +17,7 @@ func newTestScheduler(t *testing.T, cfg SchedulerConfig) *Scheduler {
 	cfg.DisableCPU = true
 	s := NewScheduler(cfg)
 	// The load of the machine that runs the suite must not decide a test. A test of the host check sets its own source.
-	s.gov.sampler.host = nil
+	s.gov.sampler.Host = nil
 	t.Cleanup(s.Close)
 	return s
 }
@@ -342,6 +342,34 @@ func TestClassHistoryPricesTheNextRunAndSurvivesARestart(t *testing.T) {
 	assert.Equal(t, 1, list[0].Revoked)
 	assert.InDelta(t, 1, list[0].Peak, 1e-9)
 	assert.InDelta(t, 5, list[0].CPUSeconds, 1e-9)
+}
+
+func TestAFallbackClassPricesALeaseWhoseClassHasNoHistory(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{DefaultCost: 1})
+	req := LeaseRequest{Class: "gha-runner/o/r/build", Fallback: []string{"gha-runner/o/r", "gha-runner"}}
+	assert.InDelta(t, 1, s.costOf(req), 1e-9, "no class has history, so the default")
+
+	s.classes.observe("gha-runner", 2, time.Second, false)
+	assert.InDelta(t, 2, s.costOf(req), 1e-9, "the hook-wide class prices a repository it has not seen")
+	s.classes.observe("gha-runner/o/r", 6, 2*time.Second, false)
+	assert.InDelta(t, 3, s.costOf(req), 1e-9, "the repository's own history wins over the hook's")
+	s.classes.observe("gha-runner/o/r/build", 4, time.Second, false)
+	assert.InDelta(t, 4, s.costOf(req), 1e-9, "the job's own history wins over both")
+}
+
+func TestAReleasedLeaseRecordsIntoItsClassAndEveryFallback(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{})
+	l, err := s.Acquire(context.Background(), LeaseRequest{Class: "h/o/r/j", Fallback: []string{"h/o/r", "h"}}, nil)
+	require.NoError(t, err)
+	l.mu.Lock()
+	l.measured, l.cpuSeconds, l.measuredFor = true, 3, 2*time.Second
+	l.mu.Unlock()
+	l.Release()
+	got := map[string]float64{}
+	for _, c := range s.Classes() {
+		got[c.Class] = c.Cost
+	}
+	assert.Equal(t, map[string]float64{"h/o/r/j": 1.5, "h/o/r": 1.5, "h": 1.5}, got)
 }
 
 func TestSchedulerKeepsAFreeSlotWhenTheContextIsAlreadyDone(t *testing.T) {
