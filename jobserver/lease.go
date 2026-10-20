@@ -13,6 +13,8 @@ type LeaseRequest struct {
 	ID string `json:"id"`
 	// Class is the kind of work. The scheduler keeps a cost history per class.
 	Class string `json:"class,omitempty"`
+	// Fallback names broader classes, narrowest first.
+	Fallback []string `json:"fallback,omitempty"`
 	// Group is a named group whose limit the lease counts against. Empty means none.
 	Group string `json:"group,omitempty"`
 	// Priority holds the lease's value per priority key, by name. A key it leaves out takes the key's default.
@@ -214,11 +216,13 @@ func (l *Lease) Release() {
 		l.mu.Lock()
 		l.released = true
 		used, span, measured := l.cpuSeconds, l.measuredFor, l.measured
-		class, revoked := l.req.Class, l.reason != ""
+		classes, revoked := l.req.classes(), l.reason != ""
 		l.mu.Unlock()
 		if measured {
 			// The time the lease held its slot unmeasured would read as idle time.
-			l.sched.classes.observe(class, used, span, revoked)
+			for _, class := range classes {
+				l.sched.classes.observe(class, used, span, revoked)
+			}
 		}
 		l.sched.release(l)
 	})
