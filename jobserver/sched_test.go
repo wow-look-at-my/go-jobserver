@@ -17,7 +17,7 @@ func newTestScheduler(t *testing.T, cfg SchedulerConfig) *Scheduler {
 	cfg.DisableCPU = true
 	s := NewScheduler(cfg)
 	// The load of the machine that runs the suite must not decide a test. A test of the host check sets its own source.
-	s.gov.sampler.host = nil
+	s.gov.sampler.Host = nil
 	t.Cleanup(s.Close)
 	return s
 }

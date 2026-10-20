@@ -41,6 +41,8 @@ type Config struct {
 	SampleInterval time.Duration
 	// DisableCPU turns off CPU sampling, so the daemon neither measures nor throttles anything.
 	DisableCPU bool
+	// StatsURL is a simple-stats-api to read the host load from. Empty reads this host.
+	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
 	// Logf receives the server's own status lines. Nil discards them.
@@ -146,6 +148,7 @@ func New(cfg Config) (*Server, error) {
 		DefaultCost:    cfg.DefaultCost,
 		SampleInterval: cfg.SampleInterval,
 		DisableCPU:     cfg.DisableCPU,
+		StatsURL:       cfg.StatsURL,
 		HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
 		Logf:           cfg.Logf,
 	})

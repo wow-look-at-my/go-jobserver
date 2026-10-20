@@ -3,6 +3,8 @@ package jobserver
 import (
 	"fmt"
 	"time"
+
+	"github.com/wow-look-at-my/simple-stats-api/cpusample"
 )
 
 // A limited target is above its MaxCPUs at this sample.
@@ -112,7 +114,7 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 		offenders = live
 	}
 	var plan []action
-	var index *procIndex
+	var index *cpusample.ProcIndex
 	for _, t := range offenders {
 		for _, m := range t.req.Policy.Enabled() {
 			if t.a != nil {
@@ -125,9 +127,9 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 				continue
 			}
 			if index == nil {
-				index = newProcIndex(reading.Table)
+				index = cpusample.NewProcIndex(reading.Table)
 			}
-			for _, p := range t.req.Policy.settings(m).selected(index.tree(t.pid)) {
+			for _, p := range t.req.Policy.settings(m).selected(index.Tree(t.pid)) {
 				if g.shouldApplyLocked(t.l, controlKey{m: m, pid: p.PID}, now) {
 					plan = append(plan, action{t: t, kind: doApply, m: m, proc: p})
 				}

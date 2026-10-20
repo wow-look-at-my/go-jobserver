@@ -264,7 +264,7 @@ func TestAJobLargerThanTheBudgetIsNotThrottledBeforeItIsMeasured(t *testing.T) {
 func TestAMachineTheJobsFillIsNotThrottled(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 4})
 	host := &scriptedHost{cpus: 4}
-	s.gov.sampler.host = host
+	s.gov.sampler.Host = hostOf(host)
 	var acts []*fakeActuator
 	for _, id := range []string{"a", "b"} {
 		l := admit(t, s, LeaseRequest{ID: id, Policy: JobPolicy{Cost: 2, Priority: throttlePolicy.Priority}})
@@ -387,8 +387,8 @@ func TestAnEndingLeaseTriesItsRefusedRevertOnceAndDropsIt(t *testing.T) {
 func TestTheGovernorReadsNoProcessTableForActuatorWork(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{})
 	src := &countingSource{}
-	s.gov.sampler.src = src
-	s.gov.sampler.host = &scriptedHost{cpus: 4}
+	s.gov.sampler.Procs = src
+	s.gov.sampler.Host = hostOf(&scriptedHost{cpus: 4})
 	l := admit(t, s, LeaseRequest{ID: "container"})
 	l.AttachActuator(newFakeActuator(1))
 	for range 3 {
@@ -397,7 +397,7 @@ func TestTheGovernorReadsNoProcessTableForActuatorWork(t *testing.T) {
 	assert.Zero(t, src.count(), "no job is a process tree, so the process table is never read")
 	assert.InDelta(t, 1, s.Readings().Measured, 1e-9)
 
-	s.gov.sampler.host = nil
+	s.gov.sampler.Host = nil
 	s.gov.tick()
 	assert.Equal(t, 1, src.count(), "with no host counters, HostBusy comes from the table")
 }

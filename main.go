@@ -49,6 +49,7 @@ global flags (also accepted after the command):
   -cost N        CPU cost assumed for a job that declares none (default 1)
   -sample DUR    how often CPU use is sampled (default 1s)
   -no-cpu        do not sample CPU use or throttle anything
+  -stats-url URL read the host load from a simple-stats-api (default: this host's /proc/stat)
   -no-http       do not serve the dashboard
   -no-socket     do not serve the file socket
   -no-spool      do not watch a spool directory
@@ -98,6 +99,7 @@ type globals struct {
 	cost     float64
 	sample   time.Duration
 	noCPU    bool
+	statsURL string
 	hold     bool
 	noHTTP   bool
 	noSocket bool
@@ -117,6 +119,7 @@ func (g *globals) bind(fs *flag.FlagSet) {
 	fs.Float64Var(&g.cost, "cost", g.cost, "CPU cost assumed for a job that declares none")
 	fs.DurationVar(&g.sample, "sample", g.sample, "how often CPU use is sampled")
 	fs.BoolVar(&g.noCPU, "no-cpu", g.noCPU, "do not sample CPU use")
+	fs.StringVar(&g.statsURL, "stats-url", g.statsURL, "simple-stats-api to read the host load from")
 	fs.BoolVar(&g.hold, "hold", g.hold, "internal: wait for input to end, then leave")
 	fs.BoolVar(&g.noHTTP, "no-http", g.noHTTP, "do not serve the dashboard")
 	fs.BoolVar(&g.noSocket, "no-socket", g.noSocket, "do not serve the file socket")
@@ -161,6 +164,7 @@ func (g *globals) config() jobserver.Config {
 		cfg.SampleInterval = g.sample
 	}
 	cfg.DisableCPU = g.noCPU
+	cfg.StatsURL = g.statsURL
 	cfg.IPC = g.ipc
 	return cfg
 }
