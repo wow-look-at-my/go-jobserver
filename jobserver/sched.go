@@ -354,16 +354,23 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 	return l, nil
 }
 
-// costOf is what a lease is expected to use: what it declared, then what its
-// class measured, then the default.
+// costOf is what a lease is expected to use. What it declared, then what its
+// class measured, then what each fallback class measured, then the default.
 func (s *Scheduler) costOf(req LeaseRequest) float64 {
 	if req.Policy.Cost > 0 {
 		return req.Policy.Cost
 	}
-	if c, ok := s.classes.cost(req.Class); ok {
-		return c
+	for _, class := range req.classes() {
+		if c, ok := s.classes.cost(class); ok {
+			return c
+		}
 	}
 	return s.cfg.DefaultCost
+}
+
+// classes is the lease's class, then its fallbacks.
+func (r LeaseRequest) classes() []string {
+	return append([]string{r.Class}, r.Fallback...)
 }
 
 // release removes a holder and plans again.
