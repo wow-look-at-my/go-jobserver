@@ -130,7 +130,7 @@ The daemon adds up each job's CPU time. It records the total on the job as `cpu_
 
 The daemon does no sampling of its own. Every reading comes from [simple-stats-api](https://github.com/wow-look-at-my/simple-stats-api)'s `cpusample` package, which it imports. On Linux the process table comes from `/proc`. Elsewhere it comes from `ps -Ao pid=,ppid=,pgid=,time=,comm=`. A host with neither says so in the status instead of reporting zero.
 
-`-stats-url URL` (`StatsURL` in `SchedulerConfig`) reads the host load from a running simple-stats-api instead of this host's `/proc/stat`. The scheduler and a dashboard on that server show the same numbers. A server that cannot be reached, answers late, or lacks `cpu/percent`, `cpu/count` or `system/procs_running` is an unreadable host load (below). Process trees are still read on this host, because a PID only means something in the daemon's own PID namespace.
+`--stats-url URL` (`StatsURL` in `SchedulerConfig`) reads the host load from a running simple-stats-api instead of this host's `/proc/stat`. The scheduler and a dashboard on that server show the same numbers. A server that cannot be reached, answers late, or lacks `cpu/percent`, `cpu/count` or `system/procs_running` is an unreadable host load (below). Process trees are still read on this host, because a PID only means something in the daemon's own PID namespace.
 
 #### An unreadable host load is a configuration error
 
@@ -341,7 +341,7 @@ version                      print the version
 
 `queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. With no command arguments, `queue` reads one command line from standard input.
 
-Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
+Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--stats-url`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
 
 ## Build and test
 

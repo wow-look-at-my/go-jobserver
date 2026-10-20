@@ -88,7 +88,7 @@ func (s *Server) startUnix() error {
 		return nil
 	}
 	if n := len(s.cfg.UnixSocket); n > unixPathLimit {
-		return fmt.Errorf("go-jobserver: unix socket path is %d bytes and %s allows %d: pass -socket with a shorter path, or -no-socket to use the ipc service", n, runtime.GOOS, unixPathLimit)
+		return fmt.Errorf("go-jobserver: unix socket path is %d bytes and %s allows %d: pass --socket with a shorter path, or --no-socket to use the ipc service", n, runtime.GOOS, unixPathLimit)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.cfg.UnixSocket), 0o755); err != nil {
 		return err
