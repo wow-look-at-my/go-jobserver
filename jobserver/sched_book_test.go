@@ -66,6 +66,46 @@ func TestNoJobStartsWhileMoreTasksWantACPUThanTheHostHasPlusTwo(t *testing.T) {
 	require.NotNil(t, startedSoon(t, got), "the next sample finds room")
 }
 
+func TestOneSpikeInTheHostLoadHoldsNoJobBack(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
+	host := &scriptedHost{cpus: 4}
+	s.gov.sampler.Host = hostOf(host)
+	admit(t, s, LeaseRequest{ID: "a", Policy: JobPolicy{Cost: 1}}).AttachActuator(newFakeActuator(1))
+	for _, n := range []int{2, 2, 100} {
+		host.setRunning(n)
+		s.gov.tick()
+	}
+	require.Equal(t, 100, s.Readings().HostRunnable)
+
+	_, ok, err := s.TryAcquire(LeaseRequest{ID: "b", Policy: JobPolicy{Cost: 1}})
+	require.NoError(t, err)
+	assert.True(t, ok, "the gate reads the median of the recent samples, not the last spike")
+
+	for _, n := range []int{100, 100} {
+		host.setRunning(n)
+		s.gov.tick()
+	}
+	_, ok, err = s.TryAcquire(LeaseRequest{ID: "c", Policy: JobPolicy{Cost: 1}})
+	require.NoError(t, err)
+	assert.False(t, ok, "a load that stays high still holds the next job back")
+}
+
+func TestACheapJobStartsOnABusyHost(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
+	host := &scriptedHost{cpus: 4}
+	s.gov.sampler.Host = hostOf(host)
+	host.setRunning(100)
+	admit(t, s, LeaseRequest{ID: "a", Policy: JobPolicy{Cost: 1}}).AttachActuator(newFakeActuator(1))
+	s.gov.tick()
+
+	_, ok, err := s.TryAcquire(LeaseRequest{ID: "cheap", Policy: JobPolicy{Cost: freeCost}})
+	require.NoError(t, err)
+	assert.True(t, ok, "a job that costs freeCost or less adds no load, so the host gate skips it")
+	_, ok, err = s.TryAcquire(LeaseRequest{ID: "dear", Policy: JobPolicy{Cost: 1}})
+	require.NoError(t, err)
+	assert.False(t, ok, "a job that costs a CPU still waits for the busy host")
+}
+
 func TestAJobStartsOnABusyHostWhenNoneRuns(t *testing.T) {
 	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
 	host := &scriptedHost{cpus: 4}

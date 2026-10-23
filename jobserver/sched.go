@@ -68,13 +68,6 @@ func bookable(budget float64) float64 {
 	return budget + min(budget, 2)
 }
 
-// hostLoad is how many tasks wanted a CPU at the last sample, on a host with
-// cpus CPUs. cpus is zero.
-type hostLoad struct {
-	cpus     int
-	runnable int
-}
-
 // Scheduler starts leases and governs the ones that run.
 type Scheduler struct {
 	cfg SchedulerConfig
@@ -89,7 +82,7 @@ type Scheduler struct {
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time
-	// host is the host's load at the last sample.
+	// host is the host's load over the last samples.
 	host hostLoad
 
 	classes  *classBook

@@ -160,7 +160,7 @@ func (g *governor) tick() {
 	if okLine != "" {
 		g.sched.cfg.Logf("%s", okLine)
 	}
-	g.sched.sampled(hostLoad{cpus: reading.HostCPUs, runnable: reading.HostRunnable})
+	g.sched.sampled(reading.HostCPUs, reading.HostRunnable)
 	for _, a := range plan {
 		g.perform(a, facts, now)
 	}
