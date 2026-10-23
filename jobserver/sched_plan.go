@@ -26,7 +26,9 @@ type batchState struct {
 // have room: the tasks that want a CPU. That host is with the jobs not
 // measured yet and this counted at their cost, stay within bookable for the
 // host's CPUs. Neither CPU limit holds back the only lease, so work larger
-// than the whole budget still runs on an otherwise idle scheduler.
+// than the whole budget still runs on an otherwise idle scheduler. The host
+// gate reads the median of the last samples, and it skips a lease that costs
+// freeCost or less.
 func (s *Scheduler) planLocked() {
 	if len(s.waiting) == 0 {
 		return
@@ -114,10 +116,13 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 			Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
 				fmtCPUs(p.reserved), fmtCPUs(p.budget), fmtCPUs(cost))}, false
 	}
-	if p.running > 0 && s.host.cpus > 0 && float64(s.host.runnable)+p.unmeasured+cost > bookable(float64(s.host.cpus)) {
+	if cost <= freeCost {
+		return QueueState{}, true
+	}
+	if runnable := s.host.runnable(); p.running > 0 && s.host.cpus > 0 && float64(runnable)+p.unmeasured+cost > bookable(float64(s.host.cpus)) {
 		return QueueState{Kind: WaitCPU, Key: WaitCPU,
 			Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
-				s.host.runnable, s.host.cpus, fmtCPUs(cost))}, false
+				runnable, s.host.cpus, fmtCPUs(cost))}, false
 	}
 	return QueueState{}, true
 }
@@ -166,10 +171,10 @@ func (s *Scheduler) Admits(req LeaseRequest) (Admission, error) {
 
 // sampled takes the host's load at a sample and plans again, so a queued job
 // starts as soon as the host has room.
-func (s *Scheduler) sampled(h hostLoad) {
+func (s *Scheduler) sampled(cpus, runnable int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.host = h
+	s.host.add(cpus, runnable)
 	s.planLocked()
 }
 
