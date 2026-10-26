@@ -1,3 +1,5 @@
+// The journal is an append-only file of frames.
+
 package jobserver
 
 import (
