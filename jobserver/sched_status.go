@@ -1,3 +1,5 @@
+// LeaseInfo is one lease as the status surface shows it.
+
 package jobserver
 
 import (
@@ -30,16 +32,36 @@ type LeaseInfo struct {
 
 // GroupInfo is one named group's use.
 type GroupInfo struct {
-	Name    string `json:"name"`
-	Limit   int    `json:"limit"`
-	Active  int    `json:"active"`
-	Waiting int    `json:"waiting"`
+	Name string `json:"name"`
+	// Limit is the effective limit that admission uses.
+	Limit int `json:"limit"`
+	// Declared is the limit SetGroups or the config gave.
+	Declared int `json:"declared"`
+	// Override is the operator's limit. It is nil when none is set.
+	Override *int `json:"override,omitempty"`
+	Active   int  `json:"active"`
+	Waiting  int  `json:"waiting"`
+}
+
+// BatchInfo is one open batch.
+type BatchInfo struct {
+	Key string `json:"key"`
+	// Holding and Waiting are the IDs of the batch's leases that hold a slot and that wait.
+	Holding []string `json:"holding"`
+	Waiting []string `json:"waiting"`
+	// Closes is when the batch closes. It is nil while a member holds a slot.
+	Closes *time.Time `json:"closes,omitempty"`
 }
 
 // SchedulerStatus is the scheduler's live state.
 type SchedulerStatus struct {
-	MaxConcurrent int     `json:"max_concurrent"`
-	Budget        float64 `json:"budget"`
+	// MaxConcurrent is the effective count cap that admission uses. Zero means no cap.
+	MaxConcurrent int `json:"max_concurrent"`
+	// MaxConcurrentDeclared is the count cap the config or SetMaxConcurrent gave.
+	MaxConcurrentDeclared int `json:"max_concurrent_declared"`
+	// MaxConcurrentOverride is the operator's count cap. It is nil when none is set.
+	MaxConcurrentOverride *int    `json:"max_concurrent_override,omitempty"`
+	Budget                float64 `json:"budget"`
 	// Running is how many counted leases hold a slot.
 	Running int `json:"running"`
 	// Reserved is the CPUs the counted holders were admitted at, together.
@@ -47,6 +69,8 @@ type SchedulerStatus struct {
 	Holding  []LeaseInfo `json:"holding"`
 	Waiting  []LeaseInfo `json:"waiting"`
 	Groups   []GroupInfo `json:"groups"`
+	// Batches are the open batches, sorted by key.
+	Batches []BatchInfo `json:"batches"`
 	// PriorityKeys is the admission order, compared top to bottom.
 	PriorityKeys []PriorityKey `json:"priority_keys"`
 }
@@ -56,14 +80,38 @@ type SchedulerStatus struct {
 func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := SchedulerStatus{MaxConcurrent: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, PriorityKeys: s.PriorityKeys()}
+	now := s.now()
+	st := SchedulerStatus{MaxConcurrent: s.capLocked(), MaxConcurrentDeclared: s.maxRuns, Budget: s.budgetLocked(),
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
+		PriorityKeys: s.PriorityKeys()}
+	if s.capOverridden {
+		st.MaxConcurrentOverride = new(s.capOverride)
+	}
 	groups := map[string]*GroupInfo{}
-	for name, limit := range s.groups {
-		groups[name] = &GroupInfo{Name: name, Limit: limit}
+	for name, declared := range s.groups {
+		limit, _ := s.groupLimitLocked(name)
+		g := &GroupInfo{Name: name, Limit: limit, Declared: declared}
+		if ov, ok := s.groupOverrides[name]; ok {
+			g.Override = new(ov)
+		}
+		groups[name] = g
+	}
+	batches := map[string]*BatchInfo{}
+	for key, sb := range s.batches {
+		if !s.batchOpen(key, now) {
+			continue
+		}
+		b := &BatchInfo{Key: key, Holding: []string{}, Waiting: []string{}}
+		if sb.running <= 0 {
+			b.Closes = new(sb.lastEnd.Add(BatchGrace))
+		}
+		batches[key] = b
 	}
 	for _, l := range s.holding {
 		st.Holding = append(st.Holding, l.info(nil))
+		if b := batches[l.req.Batch]; b != nil && l.req.ID != "" {
+			b.Holding = append(b.Holding, l.req.ID)
+		}
 		if !l.req.GroupOnly {
 			st.Running++
 			st.Reserved += l.cost
@@ -78,10 +126,17 @@ func (s *Scheduler) Status() SchedulerStatus {
 		if g := groups[l.req.Group]; g != nil {
 			g.Waiting++
 		}
+		if b := batches[l.req.Batch]; b != nil && l.req.ID != "" {
+			b.Waiting = append(b.Waiting, l.req.ID)
+		}
 	}
 	for _, g := range groups {
 		st.Groups = append(st.Groups, *g)
 	}
+	for _, b := range batches {
+		st.Batches = append(st.Batches, *b)
+	}
+	sort.Slice(st.Batches, func(i, k int) bool { return st.Batches[i].Key < st.Batches[k].Key })
 	sort.Slice(st.Groups, func(i, k int) bool { return st.Groups[i].Name < st.Groups[k].Name })
 	return st
 }

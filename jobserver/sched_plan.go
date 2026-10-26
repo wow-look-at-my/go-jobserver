@@ -1,3 +1,5 @@
+// BatchGrace is how long a batch stays open after its last member ends, so members that arrive later still go first.
+
 package jobserver
 
 import (
@@ -99,7 +101,7 @@ func (s *Scheduler) planStateLocked() *planState {
 // it waits when it does not. It is the place the admission gates live.
 func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (QueueState, bool) {
 	if g := req.Group; g != "" {
-		if limit := s.groups[g]; p.inGroup[g] >= limit {
+		if limit, _ := s.groupLimitLocked(g); p.inGroup[g] >= limit {
 			return QueueState{Kind: WaitGroup, Key: g,
 				Reason: fmt.Sprintf("group %s: %d of %d running", g, p.inGroup[g], limit)}, false
 		}
@@ -107,9 +109,9 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 	if req.GroupOnly {
 		return QueueState{}, true
 	}
-	if s.maxRuns > 0 && p.running >= s.maxRuns {
+	if limit := s.capLocked(); limit > 0 && p.running >= limit {
 		return QueueState{Kind: WaitCap, Key: WaitCap,
-			Reason: fmt.Sprintf("run cap: %d of %d running", p.running, s.maxRuns)}, false
+			Reason: fmt.Sprintf("run cap: %d of %d running", p.running, limit)}, false
 	}
 	if p.reserved > 0 && p.reserved+cost > bookable(p.budget) {
 		return QueueState{Kind: WaitCPU, Key: WaitCPU,
