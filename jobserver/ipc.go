@@ -1,3 +1,5 @@
+// ipcCallType is the message type the jobserver service carries: a JSON Request in, a JSON Response out.
+
 package jobserver
 
 import (

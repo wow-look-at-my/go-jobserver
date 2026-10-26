@@ -1,3 +1,5 @@
+// A controlKey names one control of a lease: a mechanism, on one process or, with pid zero, on the lease's actuator.
+
 package jobserver
 
 import (

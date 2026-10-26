@@ -1,3 +1,5 @@
+// ClassStats is what the scheduler measured for one class of work.
+
 package jobserver
 
 import (

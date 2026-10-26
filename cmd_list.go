@@ -1,3 +1,5 @@
+// printJobs writes the job table.
+
 package main
 
 import (

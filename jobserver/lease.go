@@ -1,9 +1,22 @@
+// LeaseRequest describes work the scheduler admits.
+
 package jobserver
 
 import (
 	"sync"
 	"time"
+
+	"github.com/wow-look-at-my/go-jobserver/priority"
 )
+
+// leaseOrder is where a queued lease sorts. Priorities compare only under one key list. Across key lists, the lower rank goes first.
+type leaseOrder struct {
+	keys *priority.Keys
+	prio priority.MultiPriority
+	// arrival is when the task behind the lease arrived. Zero means the lease itself is the arrival.
+	arrival int64
+	rank    int
+}
 
 // LeaseRequest describes work the scheduler admits. The daemon's own jobs are
 // leases, and so is work another program runs itself and hands to the
@@ -108,8 +121,8 @@ type Lease struct {
 	ready  chan struct{}
 	err    error
 
-	// Planner state, under the scheduler's lock. rank holds one value per priority key, in key order.
-	rank    []float64
+	// Planner state, under the scheduler's lock.
+	order   leaseOrder
 	cost    float64
 	started time.Time
 	state   QueueState

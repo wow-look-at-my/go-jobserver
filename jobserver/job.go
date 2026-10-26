@@ -4,6 +4,7 @@ package jobserver
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wow-look-at-my/go-containers/set"
@@ -86,6 +87,35 @@ type Job struct {
 	Policy JobPolicy `json:"policy"`
 	// CPUSeconds is how much CPU the job's process tree used across its last run, measured by the daemon.
 	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+	// Inbox names the inbox the task is in. Empty is the default inbox.
+	Inbox string `json:"inbox,omitempty"`
+	// Trigger is what the task waits for on its one dependency: success, fail or ended. Empty is a plain dependency.
+	Trigger     string        `json:"trigger,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Timeout     time.Duration `json:"timeout,omitempty"`
+	// Priority is the task's value per priority key of its inbox.
+	Priority map[string]int `json:"priority,omitempty"`
+	// Spec is the task's spec as JSON, for a task in a named inbox.
+	Spec json.RawMessage `json:"spec,omitempty"`
+	// Result is the task's result as JSON, for a task in a named inbox.
+	Result json.RawMessage `json:"result,omitempty"`
+	// Consumer is the consumer that holds the task now.
+	Consumer string `json:"consumer,omitempty"`
+	// ConsumerName is the Bind name of the consumer that took the task last. The journal keeps it after that consumer is gone.
+	ConsumerName string `json:"consumer_name,omitempty"`
+	// Steps are the named pieces of work the task reported.
+	Steps []TaskStep `json:"steps,omitempty"`
+	// Waits are the spans where the task reported that it waited.
+	Waits []TaskWait `json:"waits,omitempty"`
+	// StepsDropped and WaitsDropped count the closed steps and waits a bound removed.
+	StepsDropped int `json:"steps_dropped,omitempty"`
+	WaitsDropped int `json:"waits_dropped,omitempty"`
+	// Outcome is a short label the consumer sets, so a reader can tell the kind of result without the result.
+	Outcome string `json:"outcome,omitempty"`
+	// Seq is the store change count at the last change of the job. Only this process counts it.
+	Seq uint64 `json:"seq"`
+	// openWaits is how many waits in Waits are open. Each change to Waits keeps it.
+	openWaits int
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.
@@ -113,7 +143,7 @@ func (j *Job) ExpectedCost(fallback float64) float64 {
 	return fallback
 }
 
-// Spec is the caller-supplied half of a job.
+// Deprecated: use CommandSpec with DefaultInbox().AddTask. Spec is the job spec.
 type Spec struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`

@@ -1,5 +1,7 @@
 //go:build cosmo || linux
 
+// affinityHere reports whether this host may carry the Linux CPU mask calls.
+
 package jobserver
 
 import (

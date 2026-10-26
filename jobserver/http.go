@@ -1,3 +1,5 @@
+// pages is parsed once; a parse failure is a build-time mistake, so it panics at first use rather than serving a broken page.
+
 package jobserver
 
 import (
@@ -364,6 +366,8 @@ func statusFor(resp Response) int {
 		return http.StatusNotFound
 	case CodeBadRequest:
 		return http.StatusBadRequest
+	case CodeNotConsumer, CodeNotRunning, CodeStopped:
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }

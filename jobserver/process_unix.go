@@ -1,5 +1,7 @@
 //go:build unix
 
+// prepareProcess puts the command in a process group of its own.
+
 package jobserver
 
 import (

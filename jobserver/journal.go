@@ -1,3 +1,5 @@
+// The journal is an append-only file of frames.
+
 package jobserver
 
 import (
@@ -27,6 +29,10 @@ const (
 	recDeps     byte = 7
 	recPolicy   byte = 8
 	recCPU      byte = 9
+	recTask     byte = 10
+	recResult   byte = 11
+	recDetail   byte = 12
+	recCache    byte = 13
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -71,6 +77,9 @@ type record struct {
 
 	// recCPU
 	cpuSeconds float64
+
+	// recTask, recResult, recDetail, recCache: JSON
+	blob string
 }
 
 // Encode returns the payload bytes of the record without its frame.
@@ -132,6 +141,11 @@ func (r record) encode() []byte {
 	case recCPU:
 		e.str(r.id)
 		e.f64(r.cpuSeconds)
+	case recTask, recResult, recDetail:
+		e.str(r.id)
+		e.str(r.blob)
+	case recCache:
+		e.str(r.blob)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -201,6 +215,11 @@ func decodeRecord(payload []byte) (record, error) {
 	case recCPU:
 		r.id = d.str()
 		r.cpuSeconds = d.f64()
+	case recTask, recResult, recDetail:
+		r.id = d.str()
+		r.blob = d.str()
+	case recCache:
+		r.blob = d.str()
 	default:
 		return record{}, fmt.Errorf("jobserver: unknown record kind %d", r.kind)
 	}

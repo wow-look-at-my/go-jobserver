@@ -248,7 +248,7 @@ func TestServerPauseStopsSchedulingUntilResume(t *testing.T) {
 func TestServerPauseIsDurable(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig(dir)
-	cfg.HTTPAddr, cfg.UnixSocket, cfg.SpoolDir, cfg.IPC = "", "", "", false
+	cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
 	srv, err := New(cfg)
 	require.NoError(t, err)
 	require.NoError(t, srv.Start())
@@ -385,7 +385,7 @@ func TestServerDuplicateExplicitIDIsRefused(t *testing.T) {
 func TestServerSurvivesARestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig(dir)
-	cfg.HTTPAddr, cfg.UnixSocket, cfg.SpoolDir, cfg.IPC = "", "", "", false
+	cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
 	srv, err := New(cfg)
 	require.NoError(t, err)
 	require.NoError(t, srv.Start())

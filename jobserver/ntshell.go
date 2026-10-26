@@ -1,3 +1,5 @@
+// An NT host has no syscall this binary can reach for a process's CPU set or its priority class.
+
 package jobserver
 
 import (

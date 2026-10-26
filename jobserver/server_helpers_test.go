@@ -130,10 +130,8 @@ func newTunedServer(t *testing.T, mutate func(*Config), tune func(*Server)) *Ser
 	cfg := DefaultConfig(t.TempDir())
 	cfg.HTTPAddr = ""
 	cfg.UnixSocket = ""
-	cfg.SpoolDir = ""
 	cfg.IPC = false
 	cfg.MaxConcurrent = 4
-	cfg.SpoolInterval = 10 * time.Millisecond
 	if mutate != nil {
 		mutate(&cfg)
 	}

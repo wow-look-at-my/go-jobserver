@@ -1,3 +1,5 @@
+// ErrNoDaemon is returned when no daemon answers for the given directory.
+
 package jobserver
 
 import (
@@ -142,7 +144,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Enqueue adds a job.
+// Deprecated: use DefaultInbox().AddTask. Enqueue adds a job.
 func (c *Client) Enqueue(ctx context.Context, spec Spec) (Response, error) {
 	return c.Do(ctx, Request{Op: OpEnqueue, Spec: &spec})
 }

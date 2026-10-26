@@ -7,6 +7,8 @@ go-jobserver queue --output app -- make app
 go-jobserver list
 ```
 
+Task and job mean the same thing. New code, docs and API names say task. Existing `Job` names stay until a later rename.
+
 ## Quick start
 
 ```sh
@@ -80,13 +82,19 @@ The CLI prefers the file socket and falls back to the go-ipc service, so any pro
 
 ### Spool files
 
-A file dropped into the spool directory becomes a job and is then moved to `spool/done/`. A file that cannot be read moves to `spool/failed/` with a `.error` sidecar. A file that cannot be moved stays in the spool. The daemon logs that once, and reads the file again only after it changes.
+The daemon opens a `spool.Spool` on its default inbox. A file dropped into the spool directory becomes a task. When the task succeeds, the file moves to `spool/done/`. When the task fails, or the inbox refuses the spec, the file moves to `spool/failed/` with a `.error` sidecar that holds the reason. A file that does not decode is renamed to `<name>.corrupt`, with the reason in `<name>.corrupt.error`. A file that cannot be moved stays in the spool.
 
-- `deploy.json` - a full spec: `{"name":"deploy","command":["make","deploy"],"outputs":["bin/app"]}`
+The daemon logs that once, and reads the file again only after it changes. At start, the files that wait are added oldest first. A task with no title gets the file name without its extension.
+
+- `deploy.json` - a full spec: `{"title":"deploy","command":["make","deploy"],"outputs":["bin/app"]}`
 - `list.json` - a bare argv array: `["ls","-l"]`
 - `backup.cmd` - one command line: `tar czf /backup.tgz /srv` The `command` field also accepts a single string, which is split on whitespace.
 
-Write spool files to a temporary name and rename them into place: a file is read as soon as it appears.
+Write spool files to a temporary name that starts with a dot, and rename them into place. A file is read as soon as it appears, and the spool skips dot files.
+
+The `spool` package works on any inbox. `spool.Open(dir, inbox)` finds the inbox's `AddTask` method through reflection and decodes each file as JSON into its spec type. A spec type with an `UnmarshalText` method also reads a body that is not JSON. `Park(spec)` writes a spec into the spool atomically, and refuses with `spool.ErrFull` at a bound (`WithBounds`, `SetBounds`). A spec that an inbox refuses with `jobserver.ErrStopped` stays in the spool for the next start.
+
+After the spool adds a file, it writes `<name>.task` with the task ID before it waits. A file whose `.task` names a task the inbox's `Lookup` still finds is not added again: the spool waits on that task. This happens when the spool opens again after a crash. A `.task` that names an unknown task, or another version of the file, is removed. The file is added.
 
 ### HTTP API
 
@@ -284,7 +292,7 @@ case <-done:
 
 **Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget plus two CPUs (see "Before a job starts"). Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
 
-A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
+A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value or a default that is not a whole number, are refused.
 
 `open-batch` (`KeyOpenBatch`) is the scheduler's own key: 0 while a member of the lease's batch holds a slot or did within `BatchGrace`, 1 otherwise. A list that leaves it out gets it last. `Status` reports the key list, and each lease's value for every key.
 
@@ -304,6 +312,34 @@ When a lease is released, the scheduler reverts its controls and records what it
 
 An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used. `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
 
+## Inboxes
+
+An inbox is how a task is submitted. The `default` inbox runs commands through the `Runner`. A named inbox holds tasks of its own spec type. Its `Run` method runs them on the server's workers, or a bound consumer takes them with `Take` and settles them with `Done`.
+
+```go
+type FetchInbox struct {
+	jobserver.Inbox[*FetchSpec, int64]
+	Urgent priority.MultiPriorityKey `priority:"urgent,default=0"`
+}
+
+inbox, err := jobserver.NewInbox[FetchInbox](server, "fetch")
+p := inbox.NewPriority()
+p.Set(&inbox.Urgent, -1)
+fetch, err := inbox.AddTask(&FetchSpec{TaskSpec: jobserver.TaskSpec{Title: "fetch"}, URL: url}, p)
+build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.CommandSpec{Command: []string{"make"}})
+```
+
+- **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
+- **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
+- **Consumers.** `Bind` attaches one consumer. `Bind(name)` gives it a name. Each task it takes keeps that name in `ConsumerName`, through a restart and a compaction, after the consumer is gone. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns the queued task that sorts first by `Compare`, then by arrival, and waits for the admission of that task. An admitted task that sorts after it gives back its slot until it is taken. The task holds its slot until `Done`. `Lookup(id)` returns a task of the inbox, or `ErrNotFound`.
+- **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
+- **Task details.** A consumer reports on a task it holds through the inbox. `SetTitle(c, t, title)`, `Step(c, t, parent, title)`, `EndStep(c, t, step, status, msg)` and `RenameStep(c, t, step, title)` for named steps that nest, `OpenWait(c, t, reason)` and `CloseWait(c, t, wait)` for spans where the task waits, and `Log(c, t, line)` for its log. `SetOutcome(c, t, label)` sets a short label for the result, such as `skipped`, so a reader of `Tasks` tells the kind of result without the result. A `Run` method gets its task from `TaskFromContext(ctx)` and passes the empty `Consumer`. `EndStep` takes `succeeded`, `failed`, `skipped` or `abandoned`. A step that ends first ends each sub-step still open under it as `abandoned`, with the message "its parent step ended first". A step still open when the task ends becomes `abandoned`. Past its bound, a task drops its oldest closed step or wait, and `StepsDropped` and `WaitsDropped` count the drops. An open one never goes. A task whose held steps or waits are all open gets `ErrAllOpen`.
+- **Reading tasks.** `Details(t)` reads one task: title, state, timings, steps, waits, log size, and `Queue`, what a queued task waits on in the scheduler. `Tasks(since)` lists the tasks of the inbox that changed after a `Seq`. A new `Epoch` or `Pruned` in the page means the reader reads again from zero. `ReadLog(t, offset, max)` reads the log. `Counts()` gives the queued, running and ended tasks, and `Waiting`: the running tasks that hold at least one open wait. Take reads only the tasks of its own inbox, and `Counts` reads only the index of its inbox.
+- **Retention.** The server drops an ended task, its result and its log after `Config.Retention` (`DefaultRetention`), and beyond `Config.RetainCount` ended tasks per inbox (`DefaultRetainCount`), oldest first. It checks every `Config.PruneInterval`. It keeps a task that a task which has not ended still waits on, and a task a `Wait` blocks on. The dedup cache does not follow the tasks. A prune keeps the identity and the artifacts of each piece of work that succeeded. An same command reuses them after its source task is gone. `Config.CacheRetention` and `Config.CacheCount` bound the cache on its own, and by default it has no bound. A prune compacts the journal: it writes a new file, syncs it, and renames it over the old one. A queued task stays across a start. The next consumer takes it. A named inbox that the process does not open again within `Config.Retention` of its start loses its tasks. Each queued or running task of it ends as cancelled. A later prune drops it as an ended task.
+- **Over the wire.** The ops `inbox.add`, `inbox.bind`, `inbox.unbind`, `inbox.take`, `inbox.started`, `inbox.done`, `inbox.drain`, `inbox.detail`, `inbox.task`, `inbox.tasks`, `inbox.counts` and `inbox.wait` name their inbox. `ClientInbox` gives the same `*Inbox` methods over a `Client`.
+
+`Spec`, `Server.Enqueue` and the `enqueue` op are deprecated. Each adds the task to the default inbox.
+
 ## Durability
 
 Everything lives under the server directory.
@@ -318,7 +354,7 @@ spool/               jobs dropped in as files
 
 A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept.
 
-The journal is flushed to disk after every record. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
+The journal is flushed to disk after every record, except the details a task reports, which the next record flushes. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
 
 ## Command line
 
@@ -376,9 +412,16 @@ go-toolchain
 | `jobserver/govern_hostload.go` | the error for a host whose load is unknown |
 | `jobserver/govern_ctl.go` | the control calls, made outside the governor's lock, and their retries |
 | `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |
+| `priority/` | the priority keys of an inbox and the values a task sets for them |
+| `jobserver/task.go` | TaskSpec, Task, TaskState, TaskError, CommandSpec and CommandResult |
+| `jobserver/inbox.go` | the typed Inbox, NewInbox and the triggers |
+| `jobserver/inbox_core.go` | a named inbox's leases, consumer and checked-out tasks |
+| `jobserver/inbox_server.go` | opening inboxes, the default inbox, Stop and the local backends |
+| `jobserver/inbox_api.go` | the inbox ops and ClientInbox |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |
-| `jobserver/spool.go` | the spool directory watcher |
+| `spool/` | the spool: a watched directory of spec files that become tasks of one inbox, and Park, which writes one |
+| `daemon.go` | the daemon: the server and the spool on its default inbox |
 | `jobserver/graph.go` | each job's dependency depth and its children, for the dashboard and `list` |
 | `jobserver/client.go` | the client the CLI and other programs use |

@@ -1,3 +1,5 @@
+// Outcome is what one attempt to control one process did.
+
 package jobserver
 
 import (

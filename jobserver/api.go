@@ -1,3 +1,5 @@
+// The wire API is one request shape and one response shape, carried by every transport.
+
 package jobserver
 
 import (
@@ -6,9 +8,10 @@ import (
 )
 
 // The wire API is one request shape and one response shape, carried by every
-// transport. The go-ipc service, the file socket, the HTTP server and the
-// spool watcher all end up in Server.Handle.
+// transport. The go-ipc service, the file socket and the HTTP server all end
+// up in Server.Handle.
 const (
+	// Deprecated: use OpInboxAdd on the default inbox. OpEnqueue adds a job.
 	OpEnqueue      = "enqueue"
 	OpActivate     = "activate"
 	OpDepend       = "depend"
@@ -35,6 +38,8 @@ type Request struct {
 	Max    int      `json:"max,omitempty"`
 	// Policy carries a job's CPU cost and process-control settings.
 	Policy *JobPolicy `json:"policy,omitempty"`
+	// TaskRequest carries the fields of the inbox ops.
+	TaskRequest
 }
 
 // ErrorCode classifies a failed call, so a transport can map it to a status without matching on the message text.
@@ -60,6 +65,8 @@ type Response struct {
 	Output   string    `json:"output,omitempty"`
 	Existing bool      `json:"existing,omitempty"`
 	Count    int       `json:"count,omitempty"`
+	// TaskResponse carries the answers of the inbox ops.
+	TaskResponse
 }
 
 // Failure returns a response carrying an error.
@@ -74,8 +81,18 @@ func codeFor(err error) ErrorCode {
 		return ""
 	case errors.Is(err, ErrNotFound):
 		return CodeNotFound
+	case errors.Is(err, ErrNotConsumer):
+		return CodeNotConsumer
+	case errors.Is(err, ErrNotRunning):
+		return CodeNotRunning
+	case errors.Is(err, ErrStopped):
+		return CodeStopped
+	case errors.Is(err, ErrNoStep):
+		return CodeNoStep
+	case errors.Is(err, ErrAllOpen):
+		return CodeAllOpen
 	case errors.Is(err, ErrDuplicate), errors.Is(err, ErrCycle), errors.Is(err, ErrMissingDep),
-		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand):
+		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand), errors.Is(err, ErrBadInbox), errors.Is(err, ErrInboxExists):
 		return CodeBadRequest
 	default:
 		return CodeInternal
@@ -171,6 +188,9 @@ func (s *Server) Handle(req Request) Response {
 		return Response{OK: true, Stats: &st}
 
 	default:
+		if resp, ok := s.handleInbox(req); ok {
+			return resp
+		}
 		return Failure(fmt.Errorf("jobserver: unknown op %q", req.Op))
 	}
 }

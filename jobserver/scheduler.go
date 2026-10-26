@@ -1,3 +1,5 @@
+// The scheduler is pure: every function here reads a snapshot of the job table and returns what should happen next.
+
 package jobserver
 
 import (
@@ -29,7 +31,7 @@ func Ready(jobs []*Job) []string {
 		ok := true
 		for _, d := range j.Deps {
 			dep, found := byID[d]
-			if !found || !dep.State.succeeded() {
+			if !found || !fired(j.Trigger, dep) {
 				ok = false
 				break
 			}
@@ -44,6 +46,7 @@ func Ready(jobs []*Job) []string {
 // Dead returns the IDs of jobs that will never succeed: the ones that already
 // failed or were cancelled, plus everything downstream of them.
 func Dead(jobs []*Job) map[string]bool {
+	byID := Index(jobs)
 	dead := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
 		if j.State.Terminal() && !j.State.succeeded() {
@@ -57,7 +60,7 @@ func Dead(jobs []*Job) map[string]bool {
 				continue
 			}
 			for _, d := range j.Deps {
-				if dead[d] {
+				if neverFires(j.Trigger, byID[d], dead[d]) {
 					dead[j.ID] = true
 					changed = true
 					break
@@ -68,10 +71,33 @@ func Dead(jobs []*Job) map[string]bool {
 	return dead
 }
 
+// fired reports whether a trigger on dep has fired. An empty trigger waits for success.
+func fired(trigger string, dep *Job) bool {
+	switch trigger {
+	case triggerFail:
+		return dep.State.Terminal() && !dep.State.succeeded()
+	case triggerEnded:
+		return dep.State.Terminal()
+	}
+	return dep.State.succeeded()
+}
+
+// neverFires reports whether a trigger on dep can no longer fire. deadDep says dep will never succeed.
+func neverFires(trigger string, dep *Job, deadDep bool) bool {
+	switch trigger {
+	case triggerFail:
+		return dep != nil && dep.State.succeeded()
+	case triggerEnded:
+		return false
+	}
+	return deadDep
+}
+
 // Blocked returns the IDs of jobs that should move to StateBlocked: not
 // terminal yet, and downstream of a job that will never succeed.
 func Blocked(jobs []*Job) []string {
 	dead := Dead(jobs)
+	byID := Index(jobs)
 	var out []string
 	for _, j := range SortedJobs(jobs) {
 		if j.State.Terminal() || !dead[j.ID] {
@@ -79,7 +105,7 @@ func Blocked(jobs []*Job) []string {
 		}
 		hasDeadDep := false
 		for _, d := range j.Deps {
-			if dead[d] {
+			if neverFires(j.Trigger, byID[d], dead[d]) {
 				hasDeadDep = true
 				break
 			}

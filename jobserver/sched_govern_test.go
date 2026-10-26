@@ -266,7 +266,7 @@ func TestSchedulerStatusShowsHoldersWaitersAndGroups(t *testing.T) {
 	assert.Equal(t, WaitCap, st.Waiting[0].Wait.Kind)
 	assert.Equal(t, map[string]float64{KeyOpenBatch: 1}, st.Waiting[0].Priority, "status shows every key, defaults included")
 	assert.Equal(t, []string{KeyOpenBatch}, keyNames(st.PriorityKeys))
-	assert.Equal(t, []GroupInfo{{Name: "g", Limit: 3, Active: 1, Waiting: 1}}, st.Groups)
+	assert.Equal(t, []GroupInfo{{Name: "g", Limit: 3, Declared: 3, Active: 1, Waiting: 1}}, st.Groups)
 
 	assert.True(t, s.SetPolicy("a", throttlePolicy))
 	assert.False(t, s.SetPolicy("missing", throttlePolicy))

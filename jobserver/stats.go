@@ -1,3 +1,5 @@
+// Reading is one sample of what the jobs and the host are using. simple-stats-api's cpusample takes it.
+
 package jobserver
 
 import "github.com/wow-look-at-my/simple-stats-api/cpusample"
