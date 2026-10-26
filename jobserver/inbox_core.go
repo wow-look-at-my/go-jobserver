@@ -38,6 +38,26 @@ type inboxCore struct {
 	runs  sync.WaitGroup
 	// closing stops a Run call that ends from recording its end, so the next open resumes the task.
 	closing bool
+	// isDefault marks the default inbox. The server's executor runs each task it admits.
+	isDefault bool
+}
+
+// pending reports whether a task waits for admission or holds a slot in the inbox.
+func (c *inboxCore) pending(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, leasing := c.leasing[id]
+	return leasing || c.admitted[id] != nil || c.out[id] != nil
+}
+
+// withdraw cancels every request for admission. The tasks stay queued, and the next offer asks again.
+func (c *inboxCore) withdraw() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, cancel := range c.leasing {
+		cancel()
+		delete(c.leasing, id)
+	}
 }
 
 // grant is one admitted task.
@@ -69,7 +89,7 @@ func (c *inboxCore) signal() {
 func (c *inboxCore) offer(j *Job) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closing || (c.run == nil && c.consumer == "") {
+	if c.closing || (c.run == nil && c.consumer == "" && !c.isDefault) {
 		return
 	}
 	if _, ok := c.leasing[j.ID]; ok {
@@ -87,6 +107,9 @@ func (c *inboxCore) offer(j *Job) {
 	c.leasing[j.ID] = cancel
 	g := &grant{id: j.ID, prio: prio, created: j.Created, spec: j.Spec, timeout: j.Timeout}
 	req := LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
+	if c.isDefault {
+		req = c.s.leaseFor(j)
+	}
 	go c.acquire(ctx, g, req)
 }
 
@@ -112,9 +135,16 @@ func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 		return
 	}
 	g.lease = l
-	if j, ok := c.s.store.Job(g.id); !ok || j.State != StateActive {
+	if j, ok := c.s.store.Job(g.id); !ok || j.State != StateActive || c.s.store.Paused() {
 		cancel()
 		l.Release()
+		c.s.Wake()
+		return
+	}
+	if c.isDefault {
+		cancel()
+		// dispatch takes the lease. It runs under c.mu, so no tick offers the task again before it shows as running.
+		c.s.dispatch(g.id, l)
 		return
 	}
 	if c.run == nil {

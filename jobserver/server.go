@@ -101,6 +101,8 @@ type Server struct {
 	// inboxes are the named inboxes open in this process, under mu.
 	inboxes map[string]*inboxCore
 	def     *Inbox[*CommandSpec, CommandResult]
+	// defCore admits the default inbox's tasks. The executor is its consumer.
+	defCore *inboxCore
 	// stopped refuses new tasks once Stop runs.
 	stopped bool
 	// errs holds the error each failed task ended with in this process.
@@ -164,7 +166,9 @@ func New(cfg Config) (*Server, error) {
 		Logf:           cfg.Logf,
 	})
 	s.gov = s.sched.gov
-	s.def = &Inbox[*CommandSpec, CommandResult]{b: localDefault{s}, name: DefaultInboxName, keys: s.sched.priority.keys}
+	s.defCore = newInboxCore(s, DefaultInboxName, defaultKeys, 0, nil)
+	s.defCore.isDefault = true
+	s.def = &Inbox[*CommandSpec, CommandResult]{b: localDefault{s}, name: DefaultInboxName, keys: defaultKeys}
 	return s, nil
 }
 
@@ -358,6 +362,9 @@ func (s *Server) tick() {
 			s.offerInbox(j)
 			continue
 		}
+		if s.defCore.pending(j.ID) {
+			continue
+		}
 		identity, err := s.identityOf(j, byID)
 		if err != nil {
 			s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
@@ -372,15 +379,7 @@ func (s *Server) tick() {
 				}
 			}
 		}
-		// A job the scheduler cannot start now keeps its place in the queue and starts later.
-		l, granted, err := s.sched.TryAcquire(s.leaseFor(j))
-		if err != nil {
-			s.cfg.Logf("go-jobserver: admit %s: %v", id, err)
-			continue
-		}
-		if granted {
-			s.dispatch(j.ID, l)
-		}
+		s.defCore.offer(j)
 	}
 }
 
@@ -599,7 +598,13 @@ func (s *Server) SetDeps(id string, deps []string) (*Job, error) {
 }
 
 // Pause stops scheduling new jobs. Running jobs finish.
-func (s *Server) Pause() error { return s.store.SetPaused(true) }
+func (s *Server) Pause() error {
+	if err := s.store.SetPaused(true); err != nil {
+		return err
+	}
+	s.withdrawLeases()
+	return nil
+}
 
 // Resume allows scheduling again.
 func (s *Server) Resume() error {
@@ -632,6 +637,7 @@ func (s *Server) Interrupt(id string) error {
 			return fmt.Errorf("%w: %s is %s", ErrBadState, id, j.State)
 		}
 		// Not running yet: cancel it outright so the scheduler skips it.
+		s.defCore.forget(id)
 		return s.store.Finish(id, StateCancelled, -1, "interrupted", nil, j.LogBytes)
 	}
 	h.cancel()

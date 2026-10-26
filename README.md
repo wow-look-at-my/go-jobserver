@@ -323,7 +323,7 @@ fetch, err := inbox.AddTask(&FetchSpec{TaskSpec: jobserver.TaskSpec{Title: "fetc
 build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.CommandSpec{Command: []string{"make"}})
 ```
 
-- **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other.
+- **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
 - **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
 - **Consumers.** `Bind` attaches one consumer. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns only admitted tasks. The task holds its slot until `Done`.
 - **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.

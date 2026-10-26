@@ -81,6 +81,27 @@ func TestEnqueueLandsInTheDefaultInboxAndRuns(t *testing.T) {
 	assert.Equal(t, "exit status 3", te.Message)
 }
 
+func TestDefaultInboxAdmitsByPriorityUnderACapOfOne(t *testing.T) {
+	runner := &fakeRunner{}
+	srv := newTestServer(t, func(c *Config) { c.Runner = runner; c.MaxConcurrent = 1 })
+	hold, err := srv.Scheduler().Acquire(context.Background(), LeaseRequest{ID: "hold"}, nil)
+	require.NoError(t, err)
+	def := srv.DefaultInbox()
+	low, err := def.AddTask(&CommandSpec{Command: []string{"low"}})
+	require.NoError(t, err)
+	p := def.NewPriority()
+	p.Set(DefaultPriorityKey, -5)
+	high, err := def.AddTask(&CommandSpec{Command: []string{"high"}}, p)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(srv.Scheduler().Status().Waiting) == 2 }, 5*time.Second, 5*time.Millisecond)
+	hold.Release()
+	require.Nil(t, waitTask(t, low))
+	require.Nil(t, waitTask(t, high))
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	assert.Equal(t, []string{"high", "low"}, runner.commands, "the lower priority value is admitted first, though it arrived second")
+}
+
 func TestDefaultTaskTimesOut(t *testing.T) {
 	runner := &fakeRunner{hold: make(chan struct{})}
 	srv := newTestServer(t, func(c *Config) { c.Runner = runner })

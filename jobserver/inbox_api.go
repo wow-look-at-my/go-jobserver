@@ -327,14 +327,5 @@ func ClientInbox[I any, PI interface {
 
 // DefaultInbox returns the server's default inbox over this client.
 func (c *Client) DefaultInbox() *Inbox[*CommandSpec, CommandResult] {
-	return &Inbox[*CommandSpec, CommandResult]{b: clientInbox{c: c, name: DefaultInboxName}, name: DefaultInboxName, keys: mustLeaseKeys()}
-}
-
-// mustLeaseKeys is the key list a default scheduler uses: open-batch alone.
-func mustLeaseKeys() *priority.Keys {
-	k, err := newLeaseKeys(nil)
-	if err != nil {
-		panic(err)
-	}
-	return k.keys
+	return &Inbox[*CommandSpec, CommandResult]{b: clientInbox{c: c, name: DefaultInboxName}, name: DefaultInboxName, keys: defaultKeys}
 }

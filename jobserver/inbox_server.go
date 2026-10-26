@@ -14,6 +14,36 @@ import (
 // DefaultInboxName is the name of the inbox whose tasks the server's Runner runs.
 const DefaultInboxName = "default"
 
+// DefaultPriorityKey is the priority key of the default inbox. Lower goes first, and arrival breaks a tie.
+var DefaultPriorityKey = &priority.MultiPriorityKey{Name: "priority"}
+
+// defaultKeys is the key list of the default inbox: DefaultPriorityKey, then the open-batch key.
+var defaultKeys = func() *priority.Keys {
+	k, err := priority.NewKeys(DefaultPriorityKey, &priority.MultiPriorityKey{Name: KeyOpenBatch, DefaultPriority: 1})
+	if err != nil {
+		panic(err)
+	}
+	return k
+}()
+
+// withdrawLeases cancels every request for admission, so a paused server starts nothing.
+func (s *Server) withdrawLeases() {
+	for _, c := range s.allCores() {
+		c.withdraw()
+	}
+}
+
+// allCores is the default inbox and every open named inbox.
+func (s *Server) allCores() []*inboxCore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cores := []*inboxCore{s.defCore}
+	for _, c := range s.inboxes {
+		cores = append(cores, c)
+	}
+	return cores
+}
+
 // DefaultInbox returns the inbox whose tasks run as commands through the Runner.
 func (s *Server) DefaultInbox() *Inbox[*CommandSpec, CommandResult] { return s.def }
 
@@ -121,6 +151,9 @@ func (s *Server) drain(name string) {
 		inbox = ""
 	}
 	c := s.inbox(name)
+	if name == DefaultInboxName {
+		c = s.defCore
+	}
 	for _, j := range s.store.Jobs() {
 		if j.Inbox != inbox || j.State.Terminal() || j.State == StateRunning {
 			continue
@@ -158,13 +191,7 @@ func (s *Server) Stop() {
 
 // closeInboxes lets go of every task the open inboxes hold and waits for their Run calls. The journal keeps each task as it was.
 func (s *Server) closeInboxes() {
-	s.mu.Lock()
-	cores := make([]*inboxCore, 0, len(s.inboxes))
-	for _, c := range s.inboxes {
-		cores = append(cores, c)
-	}
-	s.mu.Unlock()
-	for _, c := range cores {
+	for _, c := range s.allCores() {
 		c.close()
 	}
 }
