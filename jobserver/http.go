@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed dashboard.html
+//go:embed dashboard.html dashboard.js
 var dashboardFiles embed.FS
 
 // pages is parsed once; a parse failure is a build-time mistake, so it panics
@@ -216,8 +216,9 @@ type pageData struct {
 	Now        time.Time
 	Mechanisms string
 	// Waits lists what each waiting job waits on, and Summary is the line above the table.
-	Waits   map[string][]Wait
-	Summary string
+	Waits    map[string][]Wait
+	Summary  string
+	Monitors []MonitorView
 }
 
 // enabledMechanisms names the controls a job turns on.
@@ -257,7 +258,7 @@ func (s *Server) pageData(*http.Request) pageData {
 		rows = append(rows, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
 	}
 	waits := s.Explain()
-	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(), Waits: waits, Summary: Summary(jobs, waits)}
+	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(), Waits: waits, Summary: Summary(jobs, waits), Monitors: s.MonitorViews()}
 }
 
 // apiList answers GET /api/jobs.

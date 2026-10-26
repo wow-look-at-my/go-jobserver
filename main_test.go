@@ -196,8 +196,10 @@ func TestCLIListShowsTheDependencyDepth(t *testing.T) {
 	out, err := capture(t, func() error { return run([]string{"--dir", dir, "list"}) })
 	require.NoError(t, err)
 
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Equal(t, "0 running, 0 monitors watching; 3 wait as drafts", lines[0], "the summary line leads the table")
 	depths := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
+	for _, line := range lines[2:] {
 		fields := strings.Fields(line)
 		depths[fields[0]] = fields[2]
 	}

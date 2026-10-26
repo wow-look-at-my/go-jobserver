@@ -94,6 +94,10 @@ func (s *Server) MonitorViews() []MonitorView {
 
 // viewRoutes adds the view routes to the HTTP API.
 func (s *Server) viewRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /dashboard.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		http.ServeFileFS(w, r, dashboardFiles, "dashboard.js")
+	})
 	mux.HandleFunc("GET /api/graph", func(w http.ResponseWriter, r *http.Request) {
 		g := s.Graph()
 		writeJSON(w, Response{OK: true, Graph: &g, Summary: g.Summary})

@@ -68,13 +68,13 @@ type Response struct {
 	Existing bool      `json:"existing,omitempty"`
 	Count    int       `json:"count,omitempty"`
 	// Summary is the line that says what runs, what watches and what the waiting jobs wait on.
-	Summary   string           `json:"summary,omitempty"`
-	Waits     []Wait           `json:"waits,omitempty"`
+	Summary   string            `json:"summary,omitempty"`
+	Waits     []Wait            `json:"waits,omitempty"`
 	JobWaits  map[string][]Wait `json:"job_waits,omitempty"`
-	Monitors  []MonitorView    `json:"monitors,omitempty"`
-	Kinds     []*MonitorKind   `json:"kinds,omitempty"`
-	Graph     *JobGraph        `json:"graph,omitempty"`
-	Scheduler *SchedulerStatus `json:"scheduler,omitempty"`
+	Monitors  []MonitorView     `json:"monitors,omitempty"`
+	Kinds     []*MonitorKind    `json:"kinds,omitempty"`
+	Graph     *JobGraph         `json:"graph,omitempty"`
+	Scheduler *SchedulerStatus  `json:"scheduler,omitempty"`
 }
 
 // Failure returns a response carrying an error.
