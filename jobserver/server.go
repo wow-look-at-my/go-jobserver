@@ -49,6 +49,9 @@ type Config struct {
 	RetainCount int
 	// PruneInterval is how often the server drops ended tasks. Zero means DefaultPruneInterval.
 	PruneInterval time.Duration
+	// CacheRetention and CacheCount bound the dedup cache, apart from the tasks. Zero, the default, is no bound.
+	CacheRetention time.Duration
+	CacheCount     int
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -133,8 +136,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.DefaultCost < 0 {
 		cfg.DefaultCost = 0
 	}
-	if cfg.Retention < 0 || cfg.RetainCount < 0 || cfg.PruneInterval < 0 {
-		return nil, fmt.Errorf("jobserver: Retention, RetainCount and PruneInterval must not be negative")
+	if cfg.Retention < 0 || cfg.RetainCount < 0 || cfg.PruneInterval < 0 || cfg.CacheRetention < 0 || cfg.CacheCount < 0 {
+		return nil, fmt.Errorf("jobserver: Retention, RetainCount, PruneInterval, CacheRetention and CacheCount must not be negative")
 	}
 	if cfg.Retention == 0 {
 		cfg.Retention = DefaultRetention
@@ -402,11 +405,11 @@ func (s *Server) identityOf(j *Job, byID map[string]*Job) (string, error) {
 	return JobIdentity(&resolved, byID), nil
 }
 
-// reuse records that a job's work was already done by another. It reports
-// false when that job is gone, so the job runs after all.
+// reuse records that a job's work was already done by another, from the dedup cache. The source task can be pruned.
+// It reports false when the cache no longer names that task, so the job runs after all.
 func (s *Server) reuse(j *Job, srcID, identity string) bool {
-	src, ok := s.store.Job(srcID)
-	if !ok {
+	src, ok := s.store.cacheEntry(identity)
+	if !ok || src.ID != srcID {
 		return false
 	}
 	if err := s.store.SetIdentity(j.ID, identity, srcID); err != nil {

@@ -105,6 +105,9 @@ type Job struct {
 	Steps []TaskStep `json:"steps,omitempty"`
 	// Waits are the spans where the task reported that it waited.
 	Waits []TaskWait `json:"waits,omitempty"`
+	// StepsDropped and WaitsDropped count the closed steps and waits a bound removed.
+	StepsDropped int `json:"steps_dropped,omitempty"`
+	WaitsDropped int `json:"waits_dropped,omitempty"`
 	// Seq is the store change count at the last change of the job. Only this process counts it.
 	Seq uint64 `json:"seq"`
 }

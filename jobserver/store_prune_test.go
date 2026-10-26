@@ -26,6 +26,9 @@ func addQueued(t *testing.T, st *Store, inbox string, deps ...string) string {
 	return j.ID
 }
 
+// keep bounds the tasks and leaves the cache unbounded.
+func keep(age time.Duration, count int) Retention { return Retention{Age: age, Count: count} }
+
 func ids(jobs []*Job) []string {
 	out := make([]string, 0, len(jobs))
 	for _, j := range jobs {
@@ -45,11 +48,11 @@ func TestPruneDropsEndedTasksPastTheRetention(t *testing.T) {
 	require.NoError(t, err)
 	live := addQueued(t, st, "a")
 
-	dropped, err := st.Prune(time.Now(), time.Hour, 1000)
+	dropped, err := st.Prune(time.Now(), keep(time.Hour, 1000))
 	require.NoError(t, err)
 	assert.Empty(t, dropped, "a task that ended now stays")
 
-	dropped, err = st.Prune(time.Now().Add(2*time.Hour), time.Hour, 1000)
+	dropped, err = st.Prune(time.Now().Add(2*time.Hour), keep(time.Hour, 1000))
 	require.NoError(t, err)
 	assert.Equal(t, []string{old}, dropped)
 	_, ok := st.Job(old)
@@ -74,7 +77,7 @@ func TestPruneKeepsTheNewestEndedTasksOfEachInbox(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	b := addEnded(t, st, "b")
-	dropped, err := st.Prune(time.Now(), time.Hour, 2)
+	dropped, err := st.Prune(time.Now(), keep(time.Hour, 2))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, a[:3], dropped, "the oldest go first")
 	assert.Equal(t, append(append([]string(nil), a[3:]...), b), st.Order())
@@ -93,13 +96,13 @@ func TestPruneKeepsATaskATriggerOrAWaiterNeeds(t *testing.T) {
 	require.NoError(t, st.hold(waited))
 	later := time.Now().Add(2 * time.Hour)
 
-	dropped, err := st.Prune(later, time.Hour, 0)
+	dropped, err := st.Prune(later, keep(time.Hour, 0))
 	require.NoError(t, err)
 	assert.Empty(t, dropped, "a live trigger and a waiter keep their tasks")
 
 	require.NoError(t, st.Finish(j.ID, StateCancelled, -1, msgNeverFires, nil, 0))
 	st.release(waited)
-	dropped, err = st.Prune(later, time.Hour, 0)
+	dropped, err = st.Prune(later, keep(time.Hour, 0))
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{dep, waited, j.ID}, dropped)
 }
@@ -145,10 +148,10 @@ func TestCompactionRebuildsEveryField(t *testing.T) {
 	for _, id := range []string{done.ID, result, blocked} {
 		require.NoError(t, st.hold(id))
 	}
-	dropped, err := st.Prune(time.Now(), time.Hour, 1000)
+	dropped, err := st.Prune(time.Now(), keep(time.Hour, 1000))
 	require.NoError(t, err)
 	require.Empty(t, dropped)
-	dropped, err = st.Prune(time.Now().Add(2*time.Hour), time.Hour, 1000)
+	dropped, err = st.Prune(time.Now().Add(2*time.Hour), keep(time.Hour, 1000))
 	require.NoError(t, err)
 	require.Equal(t, []string{gone}, dropped)
 	require.NoError(t, st.Close())
@@ -173,7 +176,7 @@ func TestCompactionThatStopsBeforeTheRenameKeepsTheJournal(t *testing.T) {
 	gone := addEnded(t, st, "a")
 	kept := addQueued(t, st, "a")
 	st.compactHook = func(string) error { return errors.New("the process died here") }
-	_, err = st.Prune(time.Now().Add(2*time.Hour), time.Hour, 1000)
+	_, err = st.Prune(time.Now().Add(2*time.Hour), keep(time.Hour, 1000))
 	require.ErrorContains(t, err, "the process died here")
 	st.compactHook = nil
 	_, err = os.Stat(st.compactPath())

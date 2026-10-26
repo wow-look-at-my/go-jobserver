@@ -89,8 +89,8 @@ func codeFor(err error) ErrorCode {
 		return CodeStopped
 	case errors.Is(err, ErrNoStep):
 		return CodeNoStep
-	case errors.Is(err, ErrTooMany):
-		return CodeTooMany
+	case errors.Is(err, ErrAllOpen):
+		return CodeAllOpen
 	case errors.Is(err, ErrDuplicate), errors.Is(err, ErrCycle), errors.Is(err, ErrMissingDep),
 		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand), errors.Is(err, ErrBadInbox), errors.Is(err, ErrInboxExists):
 		return CodeBadRequest

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -40,7 +41,7 @@ type TaskWait struct {
 	End    time.Time `json:"end,omitzero"`
 }
 
-// The bounds of what one task reports.
+// The bounds of what one task holds. Past a bound, the oldest closed step or wait goes, and the task counts it.
 const (
 	maxTaskSteps    = 5000
 	maxTaskWaits    = 1000
@@ -50,15 +51,39 @@ const (
 var (
 	// ErrNoStep is returned for a step or a wait the task does not hold open.
 	ErrNoStep = errors.New("jobserver: no such open step or wait")
-	// ErrTooMany is returned when a task holds the most steps or waits it may.
-	ErrTooMany = errors.New("jobserver: the task holds the most steps or waits it may")
+	// ErrAllOpen is returned when a task is at its bound and every step or wait it holds is still open.
+	ErrAllOpen = errors.New("jobserver: every step or wait the task holds is open")
 )
 
-// detailRec is the journal form of a detail change. A step or a wait replaces the one with its ID.
+// detailRec is the journal form of a detail change. A step or a wait replaces the one with its ID, or adds it.
 type detailRec struct {
 	Title *string    `json:"title,omitempty"`
 	Steps []TaskStep `json:"steps,omitempty"`
 	Waits []TaskWait `json:"waits,omitempty"`
+	// DropSteps and DropWaits are the IDs a bound removed. The task counts each.
+	DropSteps []int `json:"drop_steps,omitempty"`
+	DropWaits []int `json:"drop_waits,omitempty"`
+	// StepsDropped and WaitsDropped set the counts outright. A compaction writes them.
+	StepsDropped *int `json:"steps_dropped,omitempty"`
+	WaitsDropped *int `json:"waits_dropped,omitempty"`
+}
+
+func stepAt(j *Job, id int) int {
+	for i := len(j.Steps) - 1; i >= 0; i-- {
+		if j.Steps[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func waitAt(j *Job, id int) int {
+	for i := len(j.Waits) - 1; i >= 0; i-- {
+		if j.Waits[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // merge folds a detail change into a job.
@@ -66,20 +91,48 @@ func (d detailRec) merge(j *Job) {
 	if d.Title != nil {
 		j.Name = *d.Title
 	}
+	if d.StepsDropped != nil {
+		j.StepsDropped = *d.StepsDropped
+	}
+	if d.WaitsDropped != nil {
+		j.WaitsDropped = *d.WaitsDropped
+	}
+	for _, id := range d.DropSteps {
+		if i := stepAt(j, id); i >= 0 {
+			j.Steps = slices.Delete(j.Steps, i, i+1)
+			j.StepsDropped++
+		}
+	}
+	for _, id := range d.DropWaits {
+		if i := waitAt(j, id); i >= 0 {
+			j.Waits = slices.Delete(j.Waits, i, i+1)
+			j.WaitsDropped++
+		}
+	}
 	for _, st := range d.Steps {
-		if st.ID >= 1 && st.ID <= len(j.Steps) {
-			j.Steps[st.ID-1] = st
-		} else if st.ID == len(j.Steps)+1 {
+		if i := stepAt(j, st.ID); i >= 0 {
+			j.Steps[i] = st
+		} else {
 			j.Steps = append(j.Steps, st)
 		}
 	}
 	for _, w := range d.Waits {
-		if w.ID >= 1 && w.ID <= len(j.Waits) {
-			j.Waits[w.ID-1] = w
-		} else if w.ID == len(j.Waits)+1 {
+		if i := waitAt(j, w.ID); i >= 0 {
+			j.Waits[i] = w
+		} else {
 			j.Waits = append(j.Waits, w)
 		}
 	}
+}
+
+// oldestClosed is the ID of the oldest closed entry, or zero when every entry is open.
+func oldestClosed[E any](list []E, id func(E) int, open func(E) bool) int {
+	for _, e := range list {
+		if !open(e) {
+			return id(e)
+		}
+	}
+	return 0
 }
 
 // applyDetail folds a detail record into the table. A blob that does not decode is left out.
@@ -159,14 +212,38 @@ func (s *Store) OpenStep(id string, parent int, title string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if parent != 0 && (parent < 0 || parent > len(j.Steps) || !j.Steps[parent-1].End.IsZero()) {
-		return 0, fmt.Errorf("%w: parent step %d", ErrNoStep, parent)
+	if parent != 0 {
+		if i := stepAt(j, parent); i < 0 || !j.Steps[i].End.IsZero() {
+			return 0, fmt.Errorf("%w: parent step %d", ErrNoStep, parent)
+		}
 	}
-	if len(j.Steps) >= maxTaskSteps {
-		return 0, fmt.Errorf("%w: %s", ErrTooMany, j.ID)
+	// Each ID the task gave out is a held step or a dropped one, so this ID is new.
+	d := detailRec{Steps: []TaskStep{{ID: len(j.Steps) + j.StepsDropped + 1, Parent: parent, Title: clip(title), Start: time.Now()}}}
+	if len(j.Steps) >= s.stepCap {
+		old := oldestClosed(j.Steps, func(st TaskStep) int { return st.ID }, func(st TaskStep) bool { return st.End.IsZero() })
+		if old == 0 {
+			return 0, fmt.Errorf("%w: %s", ErrAllOpen, j.ID)
+		}
+		d.DropSteps = []int{old}
 	}
-	st := TaskStep{ID: len(j.Steps) + 1, Parent: parent, Title: clip(title), Start: time.Now()}
-	return st.ID, s.noteDetail(j, detailRec{Steps: []TaskStep{st}})
+	return d.Steps[0].ID, s.noteDetail(j, d)
+}
+
+// RenameStep replaces the title of a step the task holds, open or closed.
+func (s *Store) RenameStep(id string, step int, title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.liveJob(id)
+	if err != nil {
+		return err
+	}
+	i := stepAt(j, step)
+	if i < 0 {
+		return fmt.Errorf("%w: step %d", ErrNoStep, step)
+	}
+	st := j.Steps[i]
+	st.Title = clip(title)
+	return s.noteDetail(j, detailRec{Steps: []TaskStep{st}})
 }
 
 // EndStep ends an open step. A failed step needs a message that says what went wrong.
@@ -186,10 +263,11 @@ func (s *Store) EndStep(id string, step int, status StepStatus, msg string) erro
 	if err != nil {
 		return err
 	}
-	if step < 1 || step > len(j.Steps) || !j.Steps[step-1].End.IsZero() {
+	i := stepAt(j, step)
+	if i < 0 || !j.Steps[i].End.IsZero() {
 		return fmt.Errorf("%w: step %d", ErrNoStep, step)
 	}
-	st := j.Steps[step-1]
+	st := j.Steps[i]
 	st.End, st.Status, st.Error = time.Now(), status, msg
 	return s.noteDetail(j, detailRec{Steps: []TaskStep{st}})
 }
@@ -202,11 +280,15 @@ func (s *Store) OpenWait(id, reason string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(j.Waits) >= maxTaskWaits {
-		return 0, fmt.Errorf("%w: %s", ErrTooMany, j.ID)
+	d := detailRec{Waits: []TaskWait{{ID: len(j.Waits) + j.WaitsDropped + 1, Reason: clip(reason), Start: time.Now()}}}
+	if len(j.Waits) >= s.waitCap {
+		old := oldestClosed(j.Waits, func(w TaskWait) int { return w.ID }, func(w TaskWait) bool { return w.End.IsZero() })
+		if old == 0 {
+			return 0, fmt.Errorf("%w: %s", ErrAllOpen, j.ID)
+		}
+		d.DropWaits = []int{old}
 	}
-	w := TaskWait{ID: len(j.Waits) + 1, Reason: clip(reason), Start: time.Now()}
-	return w.ID, s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
+	return d.Waits[0].ID, s.noteDetail(j, d)
 }
 
 // CloseWait ends an open wait.
@@ -217,10 +299,11 @@ func (s *Store) CloseWait(id string, wait int) error {
 	if err != nil {
 		return err
 	}
-	if wait < 1 || wait > len(j.Waits) || !j.Waits[wait-1].End.IsZero() {
+	i := waitAt(j, wait)
+	if i < 0 || !j.Waits[i].End.IsZero() {
 		return fmt.Errorf("%w: wait %d", ErrNoStep, wait)
 	}
-	w := j.Waits[wait-1]
+	w := j.Waits[i]
 	w.End = time.Now()
 	return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
 }

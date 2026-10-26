@@ -48,15 +48,28 @@ func endedAt(j *Job) time.Time {
 	return j.Finished
 }
 
-// Prune drops each ended task that ended more than age ago, or that its inbox holds past count, oldest first.
+// Retention bounds what a prune keeps.
+type Retention struct {
+	// Age and Count bound the ended tasks of each inbox.
+	Age   time.Duration
+	Count int
+	// CacheAge and CacheCount bound the dedup cache. Zero is no bound.
+	CacheAge   time.Duration
+	CacheCount int
+}
+
+// Prune drops each ended task that ended more than r.Age ago, or that its inbox holds past r.Count, oldest first.
 // It keeps a task that a task which has not ended depends on, and a task a caller waits on.
-// It compacts the journal when it drops a task, and returns the IDs it dropped.
-func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, error) {
+// It bounds the dedup cache on its own, by r.CacheAge and r.CacheCount.
+// It compacts the journal when it drops anything, and returns the IDs of the tasks it dropped.
+func (s *Store) Prune(now time.Time, r Retention) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, nil
 	}
+	age, count := r.Age, r.Count
+	cacheDropped := s.pruneCache(now, r.CacheAge, r.CacheCount)
 	needed := set.New[string]()
 	for _, ids := range s.idx.live {
 		for id := range ids.All() {
@@ -92,6 +105,9 @@ func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, er
 		}
 	}
 	if len(drop) == 0 {
+		if cacheDropped {
+			return nil, s.compactLocked()
+		}
 		return nil, nil
 	}
 	s.prunes++
@@ -158,6 +174,16 @@ func (s *Store) compactLocked() (err error) {
 			}
 		}
 	}
+	// The cache goes after the tasks, so it replays as it is now.
+	cacheRecs, err := s.cacheRecords()
+	if err != nil {
+		return err
+	}
+	for _, r := range cacheRecs {
+		if _, err := w.Write(frame(r.encode())); err != nil {
+			return err
+		}
+	}
 	if err := w.Flush(); err != nil {
 		return err
 	}
@@ -204,8 +230,9 @@ func snapshot(j *Job) ([]record, error) {
 		}
 		recs = append(recs, record{kind: recTask, id: j.ID, blob: string(blob)})
 	}
-	if len(j.Steps) > 0 || len(j.Waits) > 0 {
-		blob, err := json.Marshal(detailRec{Steps: j.Steps, Waits: j.Waits})
+	if len(j.Steps) > 0 || len(j.Waits) > 0 || j.StepsDropped > 0 || j.WaitsDropped > 0 {
+		stepsDropped, waitsDropped := j.StepsDropped, j.WaitsDropped
+		blob, err := json.Marshal(detailRec{Steps: j.Steps, Waits: j.Waits, StepsDropped: &stepsDropped, WaitsDropped: &waitsDropped})
 		if err != nil {
 			return nil, err
 		}
