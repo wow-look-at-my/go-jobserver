@@ -7,6 +7,8 @@ go-jobserver queue --output app -- make app
 go-jobserver list
 ```
 
+Task and job mean the same thing. New code, docs and API names say task. Existing `Job` names stay until a later rename.
+
 ## Quick start
 
 ```sh
