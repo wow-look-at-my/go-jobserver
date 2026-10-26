@@ -75,6 +75,11 @@ There is no `.env`. Credentials come from a transport: the host registers a name
 
 ## Lifecycle
 
-- The job is `running` while it watches, `completed` when the condition holds, `failed` at an explicit deadline, and `cancelled` by interrupt.
-- Each check appends one line to the job's log: `<time> check <n>: holds|not yet|ERROR: <detail>`.
-- A start puts a watching monitor back to `active`.
+- A monitor is a task in the built-in `monitor` inbox. The server opens that inbox when `Config.Monitors` is set.
+- `Server.Watch(spec, title)` adds one. An unfinished monitor with the same kind and args answers instead, and `Watch` reports it as existing. The CLI form is `go-jobserver queue --monitor <kind> --arg name=value`.
+- A task that must wait for the condition triggers on the monitor: `jobserver.OnSuccess(monitorTask, inbox, spec)`. A plain dependency also works.
+- The scheduler admits a monitor at once, with the run cap and every group full. A monitor holds no slot and counts against no budget. The governor applies the monitor policy at the first sample and never reverts it. While the monitors together use more than `MonitorBudget`, it freezes the heaviest one in turn. It never revokes a monitor.
+- The task is `running` while it watches, succeeds when the condition holds, fails at an explicit deadline, and is cancelled by a cancel. Its result is the last check status.
+- Each check appends one line to the task's log: `<time> check <n>: holds|not yet|ERROR: <detail>`.
+- A daemon start resumes a watching monitor.
+- `go-jobserver why <id>` names the monitor's last check for a task that waits on it. `go-jobserver monitors` lists the monitors and the tasks that wait on each.
