@@ -90,6 +90,8 @@ type Job struct {
 	Monitor *MonitorSpec `json:"monitor,omitempty"`
 	// MonitorStatus is what a running monitor's checks found so far. The server fills it; it is not journaled.
 	MonitorStatus *MonitorStatus `json:"monitor_status,omitempty"`
+	// Task makes the job a host task: the embedding program's registered runner does its work.
+	Task *TaskSpec `json:"task,omitempty"`
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.
@@ -136,6 +138,8 @@ type Spec struct {
 	Policy JobPolicy `json:"policy"`
 	// Monitor makes the job a monitor. A monitor has no command.
 	Monitor *MonitorSpec `json:"monitor,omitempty"`
+	// Task makes the job a host task. A task has no command, and it takes no lease.
+	Task *TaskSpec `json:"task,omitempty"`
 }
 
 var (

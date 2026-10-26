@@ -82,6 +82,9 @@ func (s *Server) waitsOf(j *Job, byID map[string]*Job, paused bool) []Wait {
 	if paused {
 		return []Wait{{Kind: WaitPaused, Detail: "the server is paused: go-jobserver resume starts it again"}}
 	}
+	if j.Task != nil || j.Monitor != nil {
+		return []Wait{{Kind: WaitCap, Detail: "ready: it takes no slot and starts at the next scheduling pass"}}
+	}
 	a, err := s.sched.Admits(s.leaseFor(j))
 	switch {
 	case err != nil:

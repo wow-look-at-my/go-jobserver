@@ -2,6 +2,8 @@ package jobserver
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -154,6 +156,81 @@ func TestAMonitorLeaseStartsWithEveryGateFull(t *testing.T) {
 	_, ok, err = s.TryAcquire(LeaseRequest{ID: "job"})
 	require.NoError(t, err)
 	assert.False(t, ok, "the cap still holds back an ordinary lease")
+}
+
+// A host's own work sits in the graph as a task. It waits on a monitor, takes no slot of the host's full scheduler,
+// and runs through the host's runner. The server leaves the host's scheduler running when it closes.
+func TestAHostTaskWaitsOnAMonitorOnTheHostsScheduler(t *testing.T) {
+	sched := newTestScheduler(t, SchedulerConfig{MaxConcurrent: 1})
+	hog := admit(t, sched, LeaseRequest{ID: "hog"})
+	defer hog.Release()
+	defs, err := ParseMonitorDefs([]byte(goodDefs))
+	require.NoError(t, err)
+	ran := make(chan string, 1)
+	dir := t.TempDir()
+	cfg := DefaultConfig(dir)
+	cfg.HTTPAddr, cfg.UnixSocket, cfg.SpoolDir, cfg.IPC = "", "", "", false
+	cfg.Scheduler = sched
+	cfg.Monitors = &MonitorEnv{Defs: defs, Sleep: func(ctx context.Context, _ time.Duration) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Millisecond):
+			return true
+		}
+	}}
+	cfg.Tasks = map[string]TaskRunner{"spawn": func(ctx context.Context, j *Job, out io.Writer) error {
+		fmt.Fprintf(out, "started %s\n", j.Task.Data)
+		ran <- string(j.Task.Data)
+		return nil
+	}}
+	srv, err := New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv.Start())
+
+	flag := filepath.Join(t.TempDir(), "flag")
+	mon, _, err := srv.Enqueue(Spec{Monitor: &MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": flag}}})
+	require.NoError(t, err)
+	task, _, err := srv.Enqueue(Spec{ID: "spawn-1", Task: &TaskSpec{Kind: "spawn", Data: []byte(`{"hook":"h"}`)}, Deps: []string{mon.ID}})
+	require.NoError(t, err)
+	_, _, err = srv.Enqueue(Spec{Task: &TaskSpec{Kind: "nope"}})
+	assert.ErrorIs(t, err, ErrUnknownTaskKind)
+
+	waitState(t, srv, mon.ID, StateRunning)
+	g := srv.Graph()
+	var node GraphNode
+	for _, n := range g.Nodes {
+		if n.ID == task.ID {
+			node = n
+		}
+	}
+	assert.Equal(t, "spawn", node.Kind)
+	require.Eventually(t, func() bool {
+		ws, _ := srv.Why(task.ID)
+		return len(ws) == 1 && ws[0].Kind == WaitMonitor
+	}, 5*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, os.WriteFile(flag, nil, 0o644))
+	select {
+	case data := <-ran:
+		assert.Equal(t, `{"hook":"h"}`, data, "the task runs with the host's own full scheduler")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the task never ran")
+	}
+	waitState(t, srv, task.ID, StateCompleted)
+	require.NoError(t, srv.Close())
+
+	_, ok, err := sched.TryAcquire(LeaseRequest{ID: "after", Monitor: true})
+	require.NoError(t, err)
+	assert.True(t, ok, "the host's scheduler still runs after the server closed")
+
+	st, err := OpenStore(dir)
+	require.NoError(t, err)
+	defer st.Close()
+	j, _ := st.Job(task.ID)
+	require.NotNil(t, j.Task, "the task is journaled")
+	assert.Equal(t, "spawn", j.Task.Kind)
+	assert.JSONEq(t, `{"hook":"h"}`, string(j.Task.Data))
 }
 
 func TestSummaryWords(t *testing.T) {

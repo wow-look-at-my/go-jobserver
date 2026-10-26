@@ -11,7 +11,7 @@ import (
 type GraphNode struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	// Kind is "monitor" or "job".
+	// Kind is "monitor", "job", or a host task's kind.
 	Kind  string `json:"kind"`
 	State State  `json:"state"`
 	// Waiting says what the job waits on, one line per wait. It is empty for a job that runs or has ended.
@@ -41,8 +41,11 @@ func (s *Server) Graph() JobGraph {
 	g := JobGraph{Summary: Summary(jobs, waits), Nodes: []GraphNode{}, Edges: []GraphEdge{}}
 	for _, j := range jobs {
 		n := GraphNode{ID: j.ID, Label: jobLabel(j), Kind: "job", State: j.State}
-		if j.Monitor != nil {
+		switch {
+		case j.Monitor != nil:
 			n.Kind, n.Label, n.Status = "monitor", j.Monitor.Key(), monitorLine(j)
+		case j.Task != nil:
+			n.Kind = j.Task.Kind
 		}
 		for _, w := range waits[j.ID] {
 			n.Waiting = append(n.Waiting, w.Detail)

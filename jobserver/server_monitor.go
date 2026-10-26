@@ -27,6 +27,9 @@ func (s *Server) checkMonitor(spec *Spec) error {
 
 // run runs one job: a monitor watches its condition, and every other job goes to the runner.
 func (s *Server) run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error) {
+	if j.Task != nil {
+		return s.runTask(ctx, j, out)
+	}
 	if j.Monitor == nil {
 		return s.runner.Run(ctx, j, out, started)
 	}

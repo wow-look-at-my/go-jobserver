@@ -49,6 +49,10 @@ type Config struct {
 	Runner Runner
 	// Monitors runs the monitor jobs. Nil means the server knows no monitor kind, and a monitor job is refused.
 	Monitors *MonitorEnv
+	// Tasks runs the host's own job kinds, by kind. A task job takes no lease: the host's work admits itself.
+	Tasks map[string]TaskRunner
+	// Scheduler, when set, is a scheduler the host already runs.
+	Scheduler *Scheduler
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -94,6 +98,8 @@ type Server struct {
 	closed  bool
 	// watching holds each running monitor's last status, by job ID.
 	watching map[string]MonitorStatus
+	// ownSched is false when the host passed its own scheduler in.
+	ownSched bool
 
 	wake   chan struct{}
 	quit   chan struct{}
@@ -152,6 +158,11 @@ func New(cfg Config) (*Server, error) {
 
 		spoolStuck: make(map[string]int64),
 	}
+	if cfg.Scheduler != nil {
+		s.sched, s.gov = cfg.Scheduler, cfg.Scheduler.gov
+		return s, nil
+	}
+	s.ownSched = true
 	s.sched = NewScheduler(SchedulerConfig{
 		MaxConcurrent:  cfg.MaxConcurrent,
 		CPUBudget:      cfg.CPUBudget,
@@ -188,7 +199,9 @@ func (s *Server) Start() error {
 	go s.loop()
 	s.wg.Add(1)
 	go s.syncLoop()
-	s.sched.Start()
+	if s.ownSched {
+		s.sched.Start()
+	}
 	if s.cfg.SpoolDir != "" {
 		s.wg.Add(1)
 		go s.watchSpool()
@@ -247,7 +260,9 @@ func (s *Server) Close() error {
 	}
 	close(s.quit)
 	s.wg.Wait()
-	s.sched.Close()
+	if s.ownSched {
+		s.sched.Close()
+	}
 	var err error
 	for _, c := range closes {
 		if cerr := c.Close(); cerr == nil {
@@ -355,12 +370,16 @@ func (s *Server) tick() {
 			if err := s.store.SetIdentity(id, identity, ""); err != nil {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
-			// A monitor never answers from the cache: its condition can turn false again.
-			if !j.Force && j.Monitor == nil {
+			// A monitor never answers from the cache: its condition can turn false again. A host task is the host's to dedupe.
+			if !j.Force && j.Monitor == nil && j.Task == nil {
 				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" && s.reuse(j, src, identity) {
 					continue
 				}
 			}
+		}
+		if j.Task != nil {
+			s.dispatch(j.ID, s.sched.Detached(j.ID))
+			continue
 		}
 		// A job the scheduler cannot start now keeps its place in the queue and starts later.
 		l, granted, err := s.sched.TryAcquire(s.leaseFor(j))
@@ -537,6 +556,9 @@ func (s *Server) finish(id string, st State, code int, msg string, artifacts []A
 // already holds, that job is returned instead and nothing is added.
 func (s *Server) Enqueue(spec Spec) (*Job, bool, error) {
 	if err := s.checkMonitor(&spec); err != nil {
+		return nil, false, err
+	}
+	if err := s.checkTask(&spec); err != nil {
 		return nil, false, err
 	}
 	if spec.Key != "" && !spec.Force {

@@ -41,17 +41,24 @@ func TestMonitorsOverTheirBudgetFreezeInRotationAndAreNeverRevoked(t *testing.T)
 	heavy.AttachActuator(ha)
 	light.AttachActuator(la)
 
-	s.gov.tick()
-	s.gov.tick()
+	// The first sample of an actuator has no rate yet.
+	for i := 0; i < 3 && !ha.isApplied(MechFreeze); i++ {
+		s.gov.tick()
+	}
 	require.True(t, ha.isApplied(MechFreeze), "the heaviest monitor freezes while the monitors use 0.8 of 0.5")
 	assert.False(t, la.isApplied(MechFreeze))
-	ha.set(0)
 	s.gov.tick()
 	assert.False(t, ha.isApplied(MechFreeze), "a frozen monitor thaws at the next sample")
-	ha.set(0.6)
+	assert.True(t, la.isApplied(MechFreeze), "and the next heaviest takes its turn")
+	s.gov.tick()
+	assert.True(t, ha.isApplied(MechFreeze), "the rotation comes back to it")
+	assert.False(t, la.isApplied(MechFreeze))
+	la.set(0)
+	ha.set(0.3)
 	s.gov.tick()
 	s.gov.tick()
-	assert.GreaterOrEqual(t, ha.count("apply freeze"), 2, "the rotation comes back to it")
+	assert.False(t, ha.isApplied(MechFreeze), "under the monitor budget, nothing stays frozen")
+	assert.False(t, la.isApplied(MechFreeze))
 	select {
 	case <-heavy.Revoked():
 		t.Fatal("a monitor is never revoked, whatever its limits say")

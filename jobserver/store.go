@@ -146,6 +146,10 @@ func (s *Store) apply(r record) {
 			}
 			j.Monitor = &m
 		}
+	case recTask:
+		if j, ok := s.jobs[r.id]; ok {
+			j.Task = &TaskSpec{Kind: r.monitorKind, Data: []byte(r.errMsg)}
+		}
 	}
 }
 
@@ -251,6 +255,9 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
+	case spec.Task != nil && (len(spec.Command) > 0 || spec.Monitor != nil):
+		return nil, fmt.Errorf("%w: a task job runs its host runner, not a command or a monitor", ErrUnknownTaskKind)
+	case spec.Task != nil:
 	case spec.Monitor != nil && len(spec.Command) > 0:
 		return nil, fmt.Errorf("%w: a monitor job watches its monitor and runs no command", ErrBadMonitorArgs)
 	case spec.Monitor != nil:
@@ -320,6 +327,13 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 			return nil, err
 		}
 		j.Monitor = &m
+	}
+	if spec.Task != nil {
+		t := spec.Task.clone()
+		if err := s.commit(record{kind: recTask, id: j.ID, monitorKind: t.Kind, errMsg: string(t.Data)}); err != nil {
+			return nil, err
+		}
+		j.Task = &t
 	}
 	s.jobs[j.ID] = j
 	s.order = append(s.order, j.ID)
@@ -656,6 +670,10 @@ func (j *Job) clone() *Job {
 	if j.Monitor != nil {
 		m := j.Monitor.clone()
 		c.Monitor = &m
+	}
+	if j.Task != nil {
+		t := j.Task.clone()
+		c.Task = &t
 	}
 	if j.MonitorStatus != nil {
 		ms := *j.MonitorStatus

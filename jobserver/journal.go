@@ -30,6 +30,8 @@ const (
 	recPolicy   byte = 8
 	recCPU      byte = 9
 	recMonitor  byte = 10
+	// recTask carries a host task: monitorKind holds its kind and errMsg its data.
+	recTask byte = 11
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -148,6 +150,10 @@ func (r record) encode() []byte {
 		e.str(r.monitorKind)
 		e.list(r.monitorArgs)
 		e.i64(r.deadline)
+	case recTask:
+		e.str(r.id)
+		e.str(r.monitorKind)
+		e.str(r.errMsg)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -225,6 +231,10 @@ func decodeRecord(payload []byte) (record, error) {
 		r.monitorKind = d.str()
 		r.monitorArgs = d.list()
 		r.deadline = d.i64()
+	case recTask:
+		r.id = d.str()
+		r.monitorKind = d.str()
+		r.errMsg = d.str()
 	default:
 		return record{kind: r.kind}, fmt.Errorf("%w %d", errUnknownRecord, r.kind)
 	}
