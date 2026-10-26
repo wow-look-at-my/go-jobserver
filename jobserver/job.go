@@ -101,6 +101,8 @@ type Job struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	// Consumer is the consumer that holds the task now.
 	Consumer string `json:"consumer,omitempty"`
+	// ConsumerName is the Bind name of the consumer that took the task last. The journal keeps it after that consumer is gone.
+	ConsumerName string `json:"consumer_name,omitempty"`
 	// Steps are the named pieces of work the task reported.
 	Steps []TaskStep `json:"steps,omitempty"`
 	// Waits are the spans where the task reported that it waited.

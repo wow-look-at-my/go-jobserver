@@ -56,6 +56,8 @@ type TaskRequest struct {
 	// On is the task a triggered task waits on.
 	On       string `json:"on,omitempty"`
 	Consumer string `json:"consumer,omitempty"`
+	// ConsumerName is the name a bind gives its consumer.
+	ConsumerName string `json:"consumer_name,omitempty"`
 	// WaitMS is how long a take waits, in milliseconds. A negative value waits with no limit.
 	WaitMS    int64           `json:"wait_ms,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
@@ -151,7 +153,7 @@ func (s *Server) handleInbox(req Request) (Response, bool) {
 		}
 		return Response{OK: true, Job: j}, true
 	case OpInboxBind:
-		c, err := b.bind()
+		c, err := b.bind(req.ConsumerName)
 		if err != nil {
 			return Failure(err), true
 		}
@@ -267,8 +269,8 @@ func (b clientInbox) drain() error {
 	return err
 }
 
-func (b clientInbox) bind() (Consumer, error) {
-	resp, err := b.call(Request{Op: OpInboxBind})
+func (b clientInbox) bind(name string) (Consumer, error) {
+	resp, err := b.call(Request{Op: OpInboxBind, TaskRequest: TaskRequest{ConsumerName: name}})
 	return Consumer(resp.Consumer), err
 }
 

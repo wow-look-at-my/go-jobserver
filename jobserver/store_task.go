@@ -77,13 +77,22 @@ func (s *Store) SetResult(id string, result json.RawMessage) error {
 	return s.commit(record{kind: recResult, id: j.ID, blob: string(result)})
 }
 
-// setConsumer names the consumer that holds a task. Only memory holds it: a restart ends every consumer.
-func (s *Store) setConsumer(id, consumer string) {
+// startTaken starts a task that a consumer took. Only memory holds the handle, because a restart ends every consumer.
+// The journal holds the consumer's name.
+func (s *Store) startTaken(id, consumer, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if j, ok := s.jobs[CanonicalID(id)]; ok {
-		j.Consumer = consumer
+	j, ok := s.jobs[CanonicalID(id)]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
+	if j.ConsumerName != name {
+		if err := s.noteDetail(j, detailRec{ConsumerName: &name}); err != nil {
+			return err
+		}
+	}
+	j.Consumer = consumer
+	return s.startLocked(j)
 }
 
 // requeue puts a running or blocked task back to active. It ends the open steps and waits of the run that stopped.

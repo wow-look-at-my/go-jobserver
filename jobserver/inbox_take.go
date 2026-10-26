@@ -103,7 +103,7 @@ func (c *inboxCore) take(ctx context.Context, who Consumer, wait time.Duration) 
 		if b, ok := c.best(queued); ok {
 			if g := c.admitted[b.id]; g != nil {
 				delete(c.admitted, g.id)
-				if err := c.s.store.Start(g.id); err != nil {
+				if err := c.s.store.startTaken(g.id, string(who), c.consumerName); err != nil {
 					c.mu.Unlock()
 					g.lease.Release()
 					continue
@@ -113,7 +113,6 @@ func (c *inboxCore) take(ctx context.Context, who Consumer, wait time.Duration) 
 				if g.timeout > 0 {
 					g.timer = time.AfterFunc(g.timeout, func() { c.expire(g.id) })
 				}
-				c.s.store.setConsumer(g.id, string(who))
 				wake = len(c.held) > 0
 				clear(c.held)
 				c.mu.Unlock()

@@ -272,11 +272,11 @@ func (s *Server) addNamed(name string, raw json.RawMessage, values map[string]in
 }
 
 func (b localNamed) drain() error { b.Server.drain(b.c.name); return nil }
-func (b localNamed) bind() (Consumer, error) {
+func (b localNamed) bind(name string) (Consumer, error) {
 	if b.c.run != nil {
 		return "", fmt.Errorf("%w: inbox %s runs its own tasks", ErrBadInbox, b.c.name)
 	}
-	return b.c.bind(), nil
+	return b.c.bind(name), nil
 }
 func (b localNamed) unbind(who Consumer) error { return b.c.unbind(who) }
 func (b localNamed) take(ctx context.Context, who Consumer, wait time.Duration) (string, json.RawMessage, bool, error) {
@@ -311,7 +311,7 @@ func (b localDefault) add(raw json.RawMessage, values map[string]int, trigger, o
 }
 
 func (b localDefault) drain() error { b.Server.drain(DefaultInboxName); return nil }
-func (b localDefault) bind() (Consumer, error) {
+func (b localDefault) bind(string) (Consumer, error) {
 	return "", fmt.Errorf("%w: the default inbox runs its own tasks", ErrBadInbox)
 }
 func (b localDefault) unbind(Consumer) error { return ErrNotConsumer }

@@ -586,6 +586,11 @@ func (s *Store) Start(id string) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
+	return s.startLocked(j)
+}
+
+// startLocked marks a job as running and journals the start. Caller holds s.mu.
+func (s *Store) startLocked(j *Job) error {
 	j.State = StateRunning
 	j.Started = time.Now()
 	j.Attempts++

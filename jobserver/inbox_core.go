@@ -29,6 +29,8 @@ type inboxCore struct {
 
 	mu       sync.Mutex
 	consumer Consumer
+	// consumerName is the name the bound consumer gave to Bind. Each task it takes keeps the name.
+	consumerName string
 	// leasing holds the tasks that wait for admission, admitted the ones a consumer has not taken, and out the checked-out ones.
 	leasing  map[string]context.CancelFunc
 	admitted map[string]*grant
@@ -266,14 +268,14 @@ func (c *inboxCore) expire(id string) {
 	c.s.Wake()
 }
 
-// bind attaches a new consumer. The one loses every task it held.
-func (c *inboxCore) bind() Consumer {
+// bind attaches a new consumer under name. The one loses every task it held.
+func (c *inboxCore) bind(name string) Consumer {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	who := Consumer("c-" + hex.EncodeToString(b[:]))
 	c.mu.Lock()
 	lost := c.dropConsumerLocked()
-	c.consumer = who
+	c.consumer, c.consumerName = who, clip(name)
 	c.signal()
 	c.mu.Unlock()
 	c.failLost(lost)
@@ -289,7 +291,7 @@ func (c *inboxCore) unbind(who Consumer) error {
 		return ErrNotConsumer
 	}
 	lost := c.dropConsumerLocked()
-	c.consumer = ""
+	c.consumer, c.consumerName = "", ""
 	c.signal()
 	c.mu.Unlock()
 	c.failLost(lost)

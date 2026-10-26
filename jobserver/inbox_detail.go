@@ -10,20 +10,22 @@ import (
 
 // TaskDetails is what one task did: its title, its timings, its steps, its waits and the size of its log.
 type TaskDetails struct {
-	ID          string     `json:"id"`
-	Inbox       string     `json:"inbox"`
-	Seq         uint64     `json:"seq"`
-	Title       string     `json:"title"`
-	Description string     `json:"description,omitempty"`
-	State       TaskState  `json:"state"`
-	Error       string     `json:"error,omitempty"`
-	Consumer    string     `json:"consumer,omitempty"`
-	Created     time.Time  `json:"created"`
-	Started     time.Time  `json:"started,omitzero"`
-	Finished    time.Time  `json:"finished,omitzero"`
-	Attempts    int        `json:"attempts"`
-	Steps       []TaskStep `json:"steps,omitempty"`
-	Waits       []TaskWait `json:"waits,omitempty"`
+	ID          string    `json:"id"`
+	Inbox       string    `json:"inbox"`
+	Seq         uint64    `json:"seq"`
+	Title       string    `json:"title"`
+	Description string    `json:"description,omitempty"`
+	State       TaskState `json:"state"`
+	Error       string    `json:"error,omitempty"`
+	Consumer    string    `json:"consumer,omitempty"`
+	// ConsumerName is the Bind name of the consumer that took the task last. It stays after that consumer is gone.
+	ConsumerName string     `json:"consumer_name,omitempty"`
+	Created      time.Time  `json:"created"`
+	Started      time.Time  `json:"started,omitzero"`
+	Finished     time.Time  `json:"finished,omitzero"`
+	Attempts     int        `json:"attempts"`
+	Steps        []TaskStep `json:"steps,omitempty"`
+	Waits        []TaskWait `json:"waits,omitempty"`
 	// StepsDropped and WaitsDropped count the closed steps and waits the bound removed.
 	StepsDropped int `json:"steps_dropped,omitempty"`
 	WaitsDropped int `json:"waits_dropped,omitempty"`
@@ -137,7 +139,7 @@ func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
 		inbox = DefaultInboxName
 	}
 	return &TaskDetails{ID: j.ID, Inbox: inbox, Seq: j.Seq, Title: j.Name, Description: j.Description,
-		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, Created: j.Created, Started: j.Started,
+		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, ConsumerName: j.ConsumerName, Created: j.Created, Started: j.Started,
 		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
 		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
 		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome}

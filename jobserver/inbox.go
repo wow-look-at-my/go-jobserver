@@ -28,7 +28,7 @@ type inboxBackend interface {
 	taskBackend
 	add(spec json.RawMessage, values map[string]int, trigger, on string) (string, error)
 	drain() error
-	bind() (Consumer, error)
+	bind(name string) (Consumer, error)
 	unbind(c Consumer) error
 	take(ctx context.Context, c Consumer, wait time.Duration) (string, json.RawMessage, bool, error)
 	started(c Consumer, id string, pid int) error
@@ -185,9 +185,9 @@ func OnEnded[T iSpec, R any](t *Task, inbox *Inbox[T, R], spec T, p priority.Mul
 // Drain cancels every queued task of the inbox. Running tasks go on.
 func (ib *Inbox[T, R]) Drain() error { return ib.b.drain() }
 
-// Bind attaches a new consumer. A refused bind gives the empty handle.
-func (ib *Inbox[T, R]) Bind() Consumer {
-	c, err := ib.b.bind()
+// Bind attaches a new consumer under name. Each task the consumer takes keeps the name. A refused bind gives the empty handle.
+func (ib *Inbox[T, R]) Bind(name string = "") Consumer {
+	c, err := ib.b.bind(name)
 	if err != nil {
 		return ""
 	}

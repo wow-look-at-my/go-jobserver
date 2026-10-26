@@ -62,10 +62,12 @@ var (
 
 // detailRec is the journal form of a detail change. A step or a wait replaces the one with its ID, or adds it.
 type detailRec struct {
-	Title   *string    `json:"title,omitempty"`
-	Outcome *string    `json:"outcome,omitempty"`
-	Steps   []TaskStep `json:"steps,omitempty"`
-	Waits   []TaskWait `json:"waits,omitempty"`
+	Title   *string `json:"title,omitempty"`
+	Outcome *string `json:"outcome,omitempty"`
+	// ConsumerName is the Bind name of the consumer that took the task.
+	ConsumerName *string    `json:"consumer_name,omitempty"`
+	Steps        []TaskStep `json:"steps,omitempty"`
+	Waits        []TaskWait `json:"waits,omitempty"`
 	// DropSteps and DropWaits are the IDs a bound removed. The task counts each.
 	DropSteps []int `json:"drop_steps,omitempty"`
 	DropWaits []int `json:"drop_waits,omitempty"`
@@ -99,6 +101,9 @@ func (d detailRec) merge(j *Job) {
 	}
 	if d.Outcome != nil {
 		j.Outcome = *d.Outcome
+	}
+	if d.ConsumerName != nil {
+		j.ConsumerName = *d.ConsumerName
 	}
 	if d.StepsDropped != nil {
 		j.StepsDropped = *d.StepsDropped
