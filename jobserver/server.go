@@ -42,6 +42,8 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
+	// Scheduler is a scheduler the host already admits other work through.
+	Scheduler *Scheduler
 	// Monitors runs the tasks of the monitor inbox. Nil means the server knows no monitor kind and opens no monitor inbox.
 	Monitors *MonitorEnv
 	// MonitorPolicy and MonitorBudget go to the scheduler's fields of the same names.
@@ -91,6 +93,8 @@ type Server struct {
 	store  *Store
 	runner Runner
 	sched  *Scheduler
+	// sharedSched is true when Config.Scheduler gave the scheduler. Its owner closes it, not Close.
+	sharedSched bool
 	// gov is the scheduler's governor.
 	gov *governor
 
@@ -173,18 +177,21 @@ func New(cfg Config) (*Server, error) {
 
 		watching: make(map[string]MonitorStatus),
 	}
-	s.sched = NewScheduler(SchedulerConfig{
-		MaxConcurrent:  cfg.MaxConcurrent,
-		CPUBudget:      cfg.CPUBudget,
-		DefaultCost:    cfg.DefaultCost,
-		SampleInterval: cfg.SampleInterval,
-		DisableCPU:     cfg.DisableCPU,
-		StatsURL:       cfg.StatsURL,
-		HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
-		Logf:           cfg.Logf,
-		MonitorPolicy:  cfg.MonitorPolicy,
-		MonitorBudget:  cfg.MonitorBudget,
-	})
+	s.sched, s.sharedSched = cfg.Scheduler, cfg.Scheduler != nil
+	if s.sched == nil {
+		s.sched = NewScheduler(SchedulerConfig{
+			MaxConcurrent:  cfg.MaxConcurrent,
+			CPUBudget:      cfg.CPUBudget,
+			DefaultCost:    cfg.DefaultCost,
+			SampleInterval: cfg.SampleInterval,
+			DisableCPU:     cfg.DisableCPU,
+			StatsURL:       cfg.StatsURL,
+			HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
+			Logf:           cfg.Logf,
+			MonitorPolicy:  cfg.MonitorPolicy,
+			MonitorBudget:  cfg.MonitorBudget,
+		})
+	}
 	s.gov = s.sched.gov
 	s.defCore = newInboxCore(s, DefaultInboxName, defaultKeys, 0, nil)
 	s.defCore.isDefault = true
@@ -275,7 +282,9 @@ func (s *Server) Close() error {
 	s.closeInboxes()
 	close(s.quit)
 	s.wg.Wait()
-	s.sched.Close()
+	if !s.sharedSched {
+		s.sched.Close()
+	}
 	var err error
 	for _, c := range closes {
 		if cerr := c.Close(); cerr == nil {
