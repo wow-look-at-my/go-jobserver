@@ -230,9 +230,9 @@ func snapshot(j *Job) ([]record, error) {
 		}
 		recs = append(recs, record{kind: recTask, id: j.ID, blob: string(blob)})
 	}
-	if len(j.Steps) > 0 || len(j.Waits) > 0 || j.StepsDropped > 0 || j.WaitsDropped > 0 {
-		stepsDropped, waitsDropped := j.StepsDropped, j.WaitsDropped
-		blob, err := json.Marshal(detailRec{Steps: j.Steps, Waits: j.Waits, StepsDropped: &stepsDropped, WaitsDropped: &waitsDropped})
+	if len(j.Steps) > 0 || len(j.Waits) > 0 || j.StepsDropped > 0 || j.WaitsDropped > 0 || j.Outcome != "" {
+		stepsDropped, waitsDropped, outcome := j.StepsDropped, j.WaitsDropped, j.Outcome
+		blob, err := json.Marshal(detailRec{Steps: j.Steps, Waits: j.Waits, StepsDropped: &stepsDropped, WaitsDropped: &waitsDropped, Outcome: &outcome})
 		if err != nil {
 			return nil, err
 		}

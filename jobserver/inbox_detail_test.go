@@ -39,7 +39,7 @@ func TestTakeAndCountsReadOnlyTheirOwnInbox(t *testing.T) {
 	counts, err := small.Counts()
 	require.NoError(t, err)
 	assert.Equal(t, TaskCounts{Running: 1}, counts)
-	assert.Equal(t, int64(1), srv.store.visits.Load()-before)
+	assert.Equal(t, int64(0), srv.store.visits.Load()-before, "a count reads the index, not the tasks")
 	counts, err = big.Counts()
 	require.NoError(t, err)
 	assert.Equal(t, TaskCounts{Queued: 500, Ended: 2000}, counts)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"slices"
 	"strings"
 	"time"
@@ -18,9 +19,12 @@ const (
 	StepSucceeded StepStatus = "succeeded"
 	StepFailed    StepStatus = "failed"
 	StepSkipped   StepStatus = "skipped"
-	// StepAbandoned is a step that was open when its task ended.
+	// StepAbandoned is a step that was open when its task or its parent step ended, or that a consumer gave up.
 	StepAbandoned StepStatus = "abandoned"
 )
+
+// msgParentEnded is the message of a sub-step that was open when its parent step ended.
+const msgParentEnded = "its parent step ended first"
 
 // TaskStep is one named piece of work inside a task. Parent is the ID of the step it sits in, or zero.
 type TaskStep struct {
@@ -46,6 +50,7 @@ const (
 	maxTaskSteps    = 5000
 	maxTaskWaits    = 1000
 	maxTaskTitleLen = 200
+	maxOutcomeLen   = 64
 )
 
 var (
@@ -57,9 +62,10 @@ var (
 
 // detailRec is the journal form of a detail change. A step or a wait replaces the one with its ID, or adds it.
 type detailRec struct {
-	Title *string    `json:"title,omitempty"`
-	Steps []TaskStep `json:"steps,omitempty"`
-	Waits []TaskWait `json:"waits,omitempty"`
+	Title   *string    `json:"title,omitempty"`
+	Outcome *string    `json:"outcome,omitempty"`
+	Steps   []TaskStep `json:"steps,omitempty"`
+	Waits   []TaskWait `json:"waits,omitempty"`
 	// DropSteps and DropWaits are the IDs a bound removed. The task counts each.
 	DropSteps []int `json:"drop_steps,omitempty"`
 	DropWaits []int `json:"drop_waits,omitempty"`
@@ -91,6 +97,9 @@ func (d detailRec) merge(j *Job) {
 	if d.Title != nil {
 		j.Name = *d.Title
 	}
+	if d.Outcome != nil {
+		j.Outcome = *d.Outcome
+	}
 	if d.StepsDropped != nil {
 		j.StepsDropped = *d.StepsDropped
 	}
@@ -105,6 +114,9 @@ func (d detailRec) merge(j *Job) {
 	}
 	for _, id := range d.DropWaits {
 		if i := waitAt(j, id); i >= 0 {
+			if j.Waits[i].End.IsZero() {
+				j.openWaits--
+			}
 			j.Waits = slices.Delete(j.Waits, i, i+1)
 			j.WaitsDropped++
 		}
@@ -117,7 +129,13 @@ func (d detailRec) merge(j *Job) {
 		}
 	}
 	for _, w := range d.Waits {
+		if w.End.IsZero() {
+			j.openWaits++
+		}
 		if i := waitAt(j, w.ID); i >= 0 {
+			if j.Waits[i].End.IsZero() {
+				j.openWaits--
+			}
 			j.Waits[i] = w
 		} else {
 			j.Waits = append(j.Waits, w)
@@ -159,6 +177,7 @@ func closeOpen(j *Job, at time.Time) {
 			j.Waits[i].End = at
 		}
 	}
+	j.openWaits = 0
 }
 
 // liveJob returns a job that has not ended. Caller holds s.mu.
@@ -246,10 +265,16 @@ func (s *Store) RenameStep(id string, step int, title string) error {
 	return s.noteDetail(j, detailRec{Steps: []TaskStep{st}})
 }
 
+// hasOpenStep reports whether a step of the task is open.
+func hasOpenStep(j *Job) bool {
+	return slices.ContainsFunc(j.Steps, func(st TaskStep) bool { return st.End.IsZero() })
+}
+
 // EndStep ends an open step. A failed step needs a message that says what went wrong.
+// Each sub-step still open under it ends as abandoned, with the message msgParentEnded.
 func (s *Store) EndStep(id string, step int, status StepStatus, msg string) error {
 	switch status {
-	case StepSucceeded, StepSkipped:
+	case StepSucceeded, StepSkipped, StepAbandoned:
 	case StepFailed:
 		if strings.TrimSpace(msg) == "" {
 			return fmt.Errorf("%w: a failed step needs a message", ErrBadState)
@@ -267,9 +292,38 @@ func (s *Store) EndStep(id string, step int, status StepStatus, msg string) erro
 	if i < 0 || !j.Steps[i].End.IsZero() {
 		return fmt.Errorf("%w: step %d", ErrNoStep, step)
 	}
+	now := time.Now()
 	st := j.Steps[i]
-	st.End, st.Status, st.Error = time.Now(), status, msg
-	return s.noteDetail(j, detailRec{Steps: []TaskStep{st}})
+	st.End, st.Status, st.Error = now, status, msg
+	changed := []TaskStep{st}
+	// A sub-step has a higher ID than its parent, so one pass in ID order finds each descendant.
+	under := set.Of[int](step)
+	for _, sub := range j.Steps[i+1:] {
+		if !under.Contains(sub.Parent) {
+			continue
+		}
+		under.Add(sub.ID)
+		if sub.End.IsZero() {
+			sub.End, sub.Status, sub.Error = now, StepAbandoned, msgParentEnded
+			changed = append(changed, sub)
+		}
+	}
+	return s.noteDetail(j, detailRec{Steps: changed})
+}
+
+// SetOutcome sets the short outcome label of a task that has not ended.
+func (s *Store) SetOutcome(id, outcome string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.liveJob(id)
+	if err != nil {
+		return err
+	}
+	outcome = strings.TrimSpace(outcome)
+	if len(outcome) > maxOutcomeLen {
+		return fmt.Errorf("%w: an outcome is at most %d bytes", ErrBadState, maxOutcomeLen)
+	}
+	return s.noteDetail(j, detailRec{Outcome: &outcome})
 }
 
 // OpenWait opens a wait in a task and returns its ID.

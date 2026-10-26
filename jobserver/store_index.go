@@ -4,22 +4,36 @@ package jobserver
 
 import (
 	"maps"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/wow-look-at-my/go-containers/set"
 )
 
-// inboxIndex holds, for each inbox, every task the store holds and the tasks that have not ended.
+// inboxIndex holds, for each inbox, every task the store holds. The tasks that have not ended, the running tasks
+// and the running tasks that hold an open wait.
 type inboxIndex struct {
 	// where is the inbox each task is indexed under.
 	where   map[string]string
 	members map[string]*set.Set[string]
 	live    map[string]*set.Set[string]
+	running map[string]*set.Set[string]
+	waiting map[string]*set.Set[string]
 }
 
 func newInboxIndex() inboxIndex {
-	return inboxIndex{where: map[string]string{}, members: map[string]*set.Set[string]{}, live: map[string]*set.Set[string]{}}
+	return inboxIndex{where: map[string]string{}, members: map[string]*set.Set[string]{}, live: map[string]*set.Set[string]{},
+		running: map[string]*set.Set[string]{}, waiting: map[string]*set.Set[string]{}}
+}
+
+// mark adds the task to a set when on is true, and takes it out when on is false.
+func mark(m map[string]*set.Set[string], on bool, inbox, id string) {
+	if on {
+		addTo(m, inbox, id)
+		return
+	}
+	dropFrom(m, inbox, id)
 }
 
 func addTo(m map[string]*set.Set[string], inbox, id string) {
@@ -65,11 +79,10 @@ func (x inboxIndex) put(j *Job) {
 	}
 	x.where[j.ID] = j.Inbox
 	addTo(x.members, j.Inbox, j.ID)
-	if j.State.Terminal() {
-		dropFrom(x.live, j.Inbox, j.ID)
-		return
-	}
-	addTo(x.live, j.Inbox, j.ID)
+	running := j.State == StateRunning
+	mark(x.live, !j.State.Terminal(), j.Inbox, j.ID)
+	mark(x.running, running, j.Inbox, j.ID)
+	mark(x.waiting, running && j.openWaits > 0, j.Inbox, j.ID)
 }
 
 // remove forgets a job.
@@ -81,12 +94,16 @@ func (x inboxIndex) remove(id string) {
 	delete(x.where, id)
 	dropFrom(x.members, inbox, id)
 	dropFrom(x.live, inbox, id)
+	dropFrom(x.running, inbox, id)
+	dropFrom(x.waiting, inbox, id)
 }
 
 // TaskCounts says how many tasks of an inbox wait and how many run or are checked out.
 type TaskCounts struct {
 	Queued  int `json:"queued"`
 	Running int `json:"running"`
+	// Waiting is how many running tasks hold at least one open wait.
+	Waiting int `json:"waiting"`
 	// Ended is how many ended tasks the store still holds.
 	Ended int `json:"ended"`
 }
@@ -99,22 +116,21 @@ func inboxKey(name string) string {
 	return name
 }
 
-// Counts reports the tasks of one inbox. It reads only that inbox's tasks.
+// Counts reports the tasks of one inbox from the sizes of its index sets. It reads no task.
 func (s *Store) Counts(inbox string) TaskCounts {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := inboxKey(inbox)
-	var c TaskCounts
-	for id := range each(s.idx.live[key]) {
-		s.visits.Add(1)
-		if s.jobs[id].State == StateRunning {
-			c.Running++
-		} else {
-			c.Queued++
-		}
-	}
-	c.Ended = size(s.idx.members[key]) - size(s.idx.live[key])
-	return c
+	live, running := size(s.idx.live[key]), size(s.idx.running[key])
+	return TaskCounts{Queued: live - running, Running: running, Waiting: size(s.idx.waiting[key]),
+		Ended: size(s.idx.members[key]) - live}
+}
+
+// liveInboxes returns the key of each inbox that holds a task that has not ended.
+func (s *Store) liveInboxes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Collect(maps.Keys(s.idx.live))
 }
 
 // readyTask is a task of an inbox whose trigger fired and that has not started.

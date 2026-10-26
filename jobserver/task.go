@@ -113,6 +113,7 @@ const (
 	msgCancelled    = "cancelled"
 	msgDrained      = "drained"
 	msgNeverFires   = "the trigger can no longer fire"
+	msgInboxGone    = "its inbox was not opened again within the retention period"
 )
 
 // taskBackend is what a Task reads and controls its job through: the local server or a client.

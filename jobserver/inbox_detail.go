@@ -30,6 +30,8 @@ type TaskDetails struct {
 	// Queue is what a queued task waits on in the scheduler. It is nil when the task asks for no slot.
 	Queue    *QueueState `json:"queue,omitempty"`
 	LogBytes int64       `json:"log_bytes"`
+	// Outcome is the short label the consumer set with SetOutcome. A reader tells the kind of result from it.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // TaskPage is the tasks of one inbox that changed after a seq. A new Epoch or a new Pruned means the reader reads again from zero.
@@ -64,6 +66,7 @@ const (
 	DetailWait    = "wait"
 	DetailEndWait = "end_wait"
 	DetailLog     = "log"
+	DetailOutcome = "outcome"
 )
 
 // DetailOp is one change to the details of a checked-out task, as the wire carries it.
@@ -91,6 +94,8 @@ func (s *Server) applyDetail(id string, op DetailOp) (int, error) {
 		return s.store.OpenWait(id, op.Text)
 	case DetailEndWait:
 		return 0, s.store.CloseWait(id, op.Ref)
+	case DetailOutcome:
+		return 0, s.store.SetOutcome(id, op.Text)
 	case DetailLog:
 		return 0, s.store.AppendLog(id, op.Text)
 	}
@@ -135,7 +140,7 @@ func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
 		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, Created: j.Created, Started: j.Started,
 		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
 		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
-		LogBytes: s.store.LogBytes(j.ID)}
+		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome}
 }
 
 // taskDetails reads one task of an inbox.
@@ -186,7 +191,8 @@ func (ib *Inbox[T, R]) Step(c Consumer, t *Task, parent int, title string) (int,
 	return ib.b.detail(c, t.ID, DetailOp{Kind: DetailStep, Parent: parent, Text: title})
 }
 
-// EndStep ends an open step. A failed step needs a message that says what went wrong.
+// EndStep ends an open step as succeeded, failed, skipped or abandoned. A
+// failed step needs a message that says what went wrong.
 func (ib *Inbox[T, R]) EndStep(c Consumer, t *Task, step int, status StepStatus, msg string) error {
 	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailEndStep, Ref: step, Status: status, Text: msg})
 	return err
@@ -206,6 +212,12 @@ func (ib *Inbox[T, R]) OpenWait(c Consumer, t *Task, reason string) (int, error)
 // CloseWait ends an open wait.
 func (ib *Inbox[T, R]) CloseWait(c Consumer, t *Task, wait int) error {
 	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailEndWait, Ref: wait})
+	return err
+}
+
+// SetOutcome sets a short label for the result of a checked-out task, such as "skipped". Tasks and Details carry it.
+func (ib *Inbox[T, R]) SetOutcome(c Consumer, t *Task, outcome string) error {
+	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailOutcome, Text: outcome})
 	return err
 }
 

@@ -108,8 +108,12 @@ type Job struct {
 	// StepsDropped and WaitsDropped count the closed steps and waits a bound removed.
 	StepsDropped int `json:"steps_dropped,omitempty"`
 	WaitsDropped int `json:"waits_dropped,omitempty"`
+	// Outcome is a short label the consumer sets, so a reader can tell the kind of result without the result.
+	Outcome string `json:"outcome,omitempty"`
 	// Seq is the store change count at the last change of the job. Only this process counts it.
 	Seq uint64 `json:"seq"`
+	// openWaits is how many waits in Waits are open. Each change to Waits keeps it.
+	openWaits int
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.

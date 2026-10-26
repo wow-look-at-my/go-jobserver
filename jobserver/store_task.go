@@ -86,9 +86,16 @@ func (s *Store) setConsumer(id, consumer string) {
 	}
 }
 
-// requeue puts a running or blocked task back to active.
+// requeue puts a running or blocked task back to active. It ends the open steps and waits of the run that stopped.
 func (s *Store) requeue(id, msg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if j, ok := s.jobs[CanonicalID(id)]; ok && (j.openWaits > 0 || hasOpenStep(j)) {
+		c := j.clone()
+		closeOpen(c, time.Now())
+		if err := s.noteDetail(j, detailRec{Steps: c.Steps, Waits: c.Waits}); err != nil {
+			return err
+		}
+	}
 	return s.setState(id, StateActive, msg)
 }
