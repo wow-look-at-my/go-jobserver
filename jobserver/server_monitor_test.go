@@ -2,11 +2,10 @@ package jobserver
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,49 +13,68 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newMonitorServer runs one job at a time and checks monitors every few milliseconds.
-func newMonitorServer(t *testing.T, runner Runner) *Server {
+// fastMonitors is a monitor env on goodDefs that checks every few milliseconds.
+func fastMonitors(t *testing.T) *MonitorEnv {
 	t.Helper()
 	defs, err := ParseMonitorDefs([]byte(goodDefs))
 	require.NoError(t, err)
+	return &MonitorEnv{Defs: defs, Sleep: func(ctx context.Context, _ time.Duration) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Millisecond):
+			return true
+		}
+	}}
+}
+
+// newMonitorServer runs one task at a time and checks monitors every few milliseconds.
+func newMonitorServer(t *testing.T, runner Runner) *Server {
+	t.Helper()
+	env := fastMonitors(t)
 	return newTestServer(t, func(c *Config) {
 		c.MaxConcurrent = 1
 		c.Runner = runner
-		c.Monitors = &MonitorEnv{Defs: defs, Sleep: func(ctx context.Context, _ time.Duration) bool {
-			select {
-			case <-ctx.Done():
-				return false
-			case <-time.After(5 * time.Millisecond):
-				return true
-			}
-		}}
+		c.Monitors = env
 	})
 }
 
-// A monitor starts while the run cap is full. A job that depends on it waits and says why, the same monitor is not
-// started twice. The job runs once the condition holds.
-func TestAMonitorGatesAJobWithoutASlot(t *testing.T) {
-	hold := make(chan struct{})
-	runner := &fakeRunner{hold: hold}
-	srv := newMonitorServer(t, runner)
+// fileMonitor watches for a file.
+func fileMonitor(path string) MonitorSpec {
+	return MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": path}}
+}
 
+// holdBusy starts a default task that holds the only run slot. The fake runner holds it.
+func holdBusy(t *testing.T, srv *Server) *Job {
+	t.Helper()
 	busy, _, err := srv.Enqueue(Spec{ID: "busy", Command: []string{"long"}})
 	require.NoError(t, err)
 	waitState(t, srv, busy.ID, StateRunning)
+	return busy
+}
+
+// A monitor starts while the run cap is full. A task that triggers on it waits and says why. The same monitor is not
+// started twice. The task runs once the condition holds.
+func TestAMonitorGatesATaskWithoutASlot(t *testing.T) {
+	hold := make(chan struct{})
+	runner := &fakeRunner{hold: hold}
+	srv := newMonitorServer(t, runner)
+	run, err := NewInbox[runInbox](srv, "run")
+	require.NoError(t, err)
+	holdBusy(t, srv)
 
 	flag := filepath.Join(t.TempDir(), "flag")
-	spec := MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": flag}}
-	mon, existing, err := srv.Enqueue(Spec{ID: "mon", Monitor: &spec})
+	mon, existing, err := srv.Watch(fileMonitor(flag), "")
 	require.NoError(t, err)
 	assert.False(t, existing)
 	waitState(t, srv, mon.ID, StateRunning)
 
-	again, existing, err := srv.Enqueue(Spec{Monitor: &MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": flag}}})
+	again, existing, err := srv.Watch(fileMonitor(flag), "another title")
 	require.NoError(t, err)
 	assert.True(t, existing, "the same condition answers with the monitor already watching it")
 	assert.Equal(t, mon.ID, again.ID)
 
-	after, _, err := srv.Enqueue(Spec{ID: "after", Command: []string{"deploy"}, Deps: []string{mon.ID}})
+	after, err := OnSuccess(mon, &run.Inbox, work(3))
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -83,58 +101,82 @@ func TestAMonitorGatesAJobWithoutASlot(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(flag, nil, 0o644))
 	waitState(t, srv, mon.ID, StateCompleted)
-	ws, _ = srv.Why(after.ID)
-	require.Len(t, ws, 1)
-	assert.Equal(t, WaitCap, ws[0].Kind, "with the monitor done, the run cap is what holds it")
-	assert.Contains(t, ws[0].Detail, "run cap")
+	require.Eventually(t, func() bool {
+		ws, err := srv.Why(after.ID)
+		return err == nil && len(ws) == 1 && ws[0].Kind == WaitCap && strings.Contains(ws[0].Detail, "run cap")
+	}, 5*time.Second, 5*time.Millisecond, "with the monitor done, the run cap is what holds the task")
 	close(hold)
-	waitState(t, srv, after.ID, StateCompleted)
-	assert.True(t, runner.ran(after.ID))
+	r, te := run.Wait(context.Background(), after)
+	require.Nil(t, te)
+	assert.Equal(t, 6, r)
 	assert.False(t, runner.ran(mon.ID), "a monitor never reaches the command runner")
+	j, err := srv.Get(mon.ID)
+	require.NoError(t, err)
+	assert.Contains(t, string(j.Result), `"checks"`, "the result is the last status")
 }
 
-func TestAMonitorJobIsRefusedWhenItCannotRun(t *testing.T) {
+func TestAMonitorTaskIsRefusedWhenItCannotRun(t *testing.T) {
 	srv := newMonitorServer(t, &fakeRunner{})
-	_, _, err := srv.Enqueue(Spec{Monitor: &MonitorSpec{Kind: "nope"}})
+	_, _, err := srv.Watch(MonitorSpec{Kind: "nope"}, "")
 	assert.ErrorIs(t, err, ErrUnknownMonitorKind)
-	_, _, err = srv.Enqueue(Spec{Monitor: &MonitorSpec{Kind: "file-exists"}})
+	_, _, err = srv.Watch(MonitorSpec{Kind: "file-exists"}, "")
 	assert.ErrorIs(t, err, ErrBadMonitorArgs)
-	_, _, err = srv.Enqueue(Spec{Command: []string{"x"}, Monitor: &MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": "/x"}}})
-	assert.ErrorIs(t, err, ErrBadMonitorArgs, "a monitor runs no command")
+	resp := srv.Handle(Request{Op: OpWatch, Monitor: &MonitorSpec{Kind: "nope"}})
+	assert.Equal(t, CodeBadRequest, resp.Code)
+	_, err = NewInbox[runInbox](srv, MonitorInboxName)
+	assert.ErrorIs(t, err, ErrInboxExists, "the monitor inbox name is taken")
 
 	bare := newTestServer(t, nil)
-	_, _, err = bare.Enqueue(Spec{Monitor: &MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": "/x"}}})
+	_, _, err = bare.Watch(fileMonitor("/x"), "")
 	assert.ErrorIs(t, err, ErrUnknownMonitorKind, "a server with no definitions says so")
 	assert.Nil(t, bare.MonitorKinds())
 	assert.Len(t, srv.MonitorKinds(), 3)
 }
 
-// A restart puts a watching monitor back to active, where a command job fails.
+// A monitor whose deadline passes fails.
+func TestAMonitorPastItsDeadlineFails(t *testing.T) {
+	srv := newMonitorServer(t, &fakeRunner{})
+	spec := fileMonitor(filepath.Join(t.TempDir(), "never"))
+	spec.Deadline = time.Now().Add(-time.Second)
+	mon, _, err := srv.Watch(spec, "late")
+	require.NoError(t, err)
+	te := waitTask(t, mon)
+	require.NotNil(t, te)
+	assert.Equal(t, Failed, te.State)
+	assert.ErrorIs(t, te, ErrMonitorDeadline)
+}
+
+// A restart resumes a watching monitor: the task runs again and succeeds when the condition holds.
 func TestARestartResumesAMonitor(t *testing.T) {
 	dir := t.TempDir()
-	st, err := OpenStore(dir)
+	open := func() *Server {
+		cfg := DefaultConfig(dir)
+		cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
+		cfg.Monitors = fastMonitors(t)
+		srv, err := New(cfg)
+		require.NoError(t, err)
+		require.NoError(t, srv.Start())
+		return srv
+	}
+	srv := open()
+	flag := filepath.Join(t.TempDir(), "flag")
+	mon, _, err := srv.Watch(fileMonitor(flag), "")
 	require.NoError(t, err)
-	deadline := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	_, err = st.Create(&Spec{ID: "mon", Monitor: &MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": "/x"}, Deadline: deadline}})
-	require.NoError(t, err)
-	_, err = st.Create(&Spec{ID: "cmd", Command: []string{"true"}})
-	require.NoError(t, err)
-	require.NoError(t, st.Start("mon"))
-	require.NoError(t, st.Start("cmd"))
-	require.NoError(t, st.Close())
+	require.Eventually(t, func() bool {
+		j, err := srv.Get(mon.ID)
+		return err == nil && j.MonitorStatus != nil && j.MonitorStatus.Checks > 0
+	}, 5*time.Second, 5*time.Millisecond)
+	require.NoError(t, srv.Close())
 
-	st2, err := OpenStore(dir)
+	srv = open()
+	t.Cleanup(func() { srv.Close() })
+	waitState(t, srv, mon.ID, StateRunning)
+	again, existing, err := srv.Watch(fileMonitor(flag), "")
 	require.NoError(t, err)
-	defer st2.Close()
-	mon, _ := st2.Job("mon")
-	assert.Equal(t, StateActive, mon.State)
-	assert.Equal(t, "resumed after a daemon restart", mon.Error)
-	require.NotNil(t, mon.Monitor, "the monitor spec is journaled")
-	assert.Equal(t, map[string]string{"path": "/x"}, mon.Monitor.Args)
-	assert.True(t, deadline.Equal(mon.Monitor.Deadline))
-	assert.Equal(t, "monitor:file-exists path=/x", mon.Key)
-	cmd, _ := st2.Job("cmd")
-	assert.Equal(t, StateFailed, cmd.State)
+	assert.True(t, existing, "the resumed monitor still answers for its condition")
+	assert.Equal(t, mon.ID, again.ID)
+	require.NoError(t, os.WriteFile(flag, nil, 0o644))
+	waitState(t, srv, mon.ID, StateCompleted)
 }
 
 func TestAMonitorLeaseStartsWithEveryGateFull(t *testing.T) {
