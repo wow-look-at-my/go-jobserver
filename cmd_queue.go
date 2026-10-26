@@ -21,6 +21,7 @@ func newQueueCmd(g *globals) *cobra.Command {
 		wait  bool
 		shell bool
 		pol   policyFlags
+		mon   monitorFlags
 	)
 	cmd := &cobra.Command{
 		Use:     "queue [flags] [--] command [args...]",
@@ -31,6 +32,17 @@ func newQueueCmd(g *globals) *cobra.Command {
 With no command arguments, queue reads one command line from standard input.
 Flags stop at the first argument that is not a flag, so "queue sh -c x" works.`,
 		RunE: func(cmd *cobra.Command, argv []string) error {
+			if mon.kind != "" {
+				if len(argv) > 0 {
+					return errors.New("a monitor job runs no command: drop the command, or drop --monitor")
+				}
+				m, err := mon.spec()
+				if err != nil {
+					return err
+				}
+				spec.Monitor = &m
+				return queue(g, spec, wait)
+			}
 			if len(argv) == 0 {
 				line, err := readCommandLine(os.Stdin)
 				if err != nil {
@@ -64,7 +76,32 @@ Flags stop at the first argument that is not a flag, so "queue sh -c x" works.`,
 	f.BoolVar(&wait, "wait", false, "wait for the job and report its final state")
 	f.BoolVar(&shell, "shell", false, `run the command through "sh -c"`)
 	pol.bind(f)
+	f.StringVar(&mon.kind, "monitor", "", "make the job a monitor of this kind (see go-jobserver kinds)")
+	f.Var((*listFlag)(&mon.args), "arg", "a monitor arg as name=value (repeatable)")
+	f.DurationVar(&mon.deadline, "deadline", 0, "end the monitor as failed after this long")
 	return cmd
+}
+
+// monitorFlags are the queue flags that make a monitor job.
+type monitorFlags struct {
+	kind     string
+	args     []string
+	deadline time.Duration
+}
+
+func (m monitorFlags) spec() (jobserver.MonitorSpec, error) {
+	out := jobserver.MonitorSpec{Kind: m.kind, Args: map[string]string{}}
+	for _, kv := range m.args {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return out, fmt.Errorf("--arg %q is not name=value", kv)
+		}
+		out.Args[k] = v
+	}
+	if m.deadline > 0 {
+		out.Deadline = time.Now().Add(m.deadline)
+	}
+	return out, nil
 }
 
 // queue enqueues one job and prints its id, then waits for it when asked.
@@ -87,6 +124,9 @@ func queue(g *globals, spec jobserver.Spec, wait bool) error {
 		return errors.New("the daemon returned no job")
 	}
 	fmt.Println(j.ID)
+	if resp.Existing {
+		fmt.Fprintf(os.Stderr, "%s already watches or runs this (%s); no new job was added\n", j.ID, j.State)
+	}
 	if !wait {
 		return nil
 	}

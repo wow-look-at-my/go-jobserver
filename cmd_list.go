@@ -40,7 +40,8 @@ func newListCmd(g *globals) *cobra.Command {
 			if asJSON {
 				return printJSON(resp.Jobs)
 			}
-			return printJobs(resp.Jobs)
+			fmt.Println(resp.Summary)
+			return printJobs(resp.Jobs, resp.JobWaits)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the raw API answer")
@@ -48,17 +49,33 @@ func newListCmd(g *globals) *cobra.Command {
 }
 
 // printJobs writes the job table.
-func printJobs(jobs []*jobserver.Job) error {
+func printJobs(jobs []*jobserver.Job, waits map[string][]jobserver.Wait) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATE\tDEPTH\tCOMMAND\tDEPS\tTOOK")
+	fmt.Fprintln(w, "ID\tSTATE\tDEPTH\tCOMMAND\tDEPS\tTOOK\tWAITING ON")
 	depths := jobserver.Depths(jobs)
 	for _, j := range jobs {
 		took := "-"
 		if !j.Started.IsZero() && !j.Finished.IsZero() {
 			took = j.Finished.Sub(j.Started).Round(time.Millisecond).String()
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", j.ID, j.State, depths[j.ID],
-			strings.Join(j.Command, " "), strings.Join(j.Deps, ","), took)
+		what := strings.Join(j.Command, " ")
+		if j.Monitor != nil {
+			what = "[" + j.Monitor.Key() + "]"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", j.ID, j.State, depths[j.ID],
+			what, strings.Join(j.Deps, ","), took, waitText(waits[j.ID]))
 	}
 	return w.Flush()
+}
+
+// waitText is a job's waits on one line, or a dash.
+func waitText(ws []jobserver.Wait) string {
+	if len(ws) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(ws))
+	for _, wt := range ws {
+		parts = append(parts, wt.Detail)
+	}
+	return strings.Join(parts, "; ")
 }

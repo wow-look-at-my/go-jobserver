@@ -70,6 +70,7 @@ type Response struct {
 	// Summary is the line that says what runs, what watches and what the waiting jobs wait on.
 	Summary   string           `json:"summary,omitempty"`
 	Waits     []Wait           `json:"waits,omitempty"`
+	JobWaits  map[string][]Wait `json:"job_waits,omitempty"`
 	Monitors  []MonitorView    `json:"monitors,omitempty"`
 	Kinds     []*MonitorKind   `json:"kinds,omitempty"`
 	Graph     *JobGraph        `json:"graph,omitempty"`
@@ -136,7 +137,8 @@ func (s *Server) Handle(req Request) Response {
 
 	case OpList:
 		jobs := s.List()
-		return Response{OK: true, Jobs: jobs, Summary: Summary(jobs, s.Explain())}
+		waits := s.Explain()
+		return Response{OK: true, Jobs: jobs, JobWaits: waits, Summary: Summary(jobs, waits)}
 
 	case OpGet:
 		j, err := s.Get(req.ID)
