@@ -235,6 +235,52 @@ func TestAHostTaskWaitsOnAMonitorOnTheHostsScheduler(t *testing.T) {
 	assert.JSONEq(t, `{"hook":"h"}`, string(j.Task.Data))
 }
 
+// Why names each kind of wait in words: a draft, a missing dependency, a running one, the run cap and a pause.
+func TestWhyNamesEveryWaitKind(t *testing.T) {
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	srv := newMonitorServer(t, &fakeRunner{hold: hold})
+	busy, _, err := srv.Enqueue(Spec{ID: "busy", Command: []string{"long"}})
+	require.NoError(t, err)
+	waitState(t, srv, busy.ID, StateRunning)
+
+	why := func(spec Spec) Wait {
+		t.Helper()
+		j, _, err := srv.Enqueue(spec)
+		require.NoError(t, err)
+		ws, err := srv.Why(j.ID)
+		require.NoError(t, err)
+		require.Len(t, ws, 1, "%s waits on one thing", j.ID)
+		return ws[0]
+	}
+	w := why(Spec{ID: "draft", Command: []string{"x"}, Draft: true})
+	assert.Equal(t, WaitDraft, w.Kind)
+	assert.Contains(t, w.Detail, "go-jobserver activate draft")
+
+	w = why(Spec{ID: "orphan", Command: []string{"x"}, Deps: []string{"ghost"}})
+	assert.Equal(t, WaitDep, w.Kind)
+	assert.Equal(t, "ghost", w.ID)
+	assert.Equal(t, "no such job", w.Detail)
+
+	w = why(Spec{ID: "next", Command: []string{"x"}, Deps: []string{busy.ID}})
+	assert.Equal(t, WaitDep, w.Kind)
+	assert.Equal(t, "busy is running", w.Detail)
+
+	w = why(Spec{ID: "queued", Command: []string{"x"}})
+	assert.Equal(t, WaitCap, w.Kind)
+	assert.Contains(t, w.Detail, "run cap")
+
+	require.NoError(t, srv.Pause())
+	ws, err := srv.Why("queued")
+	require.NoError(t, err)
+	require.Len(t, ws, 1)
+	assert.Equal(t, WaitPaused, ws[0].Kind)
+	assert.Contains(t, ws[0].Detail, "go-jobserver resume")
+
+	assert.Equal(t, "1 running, 0 monitors watching; 2 wait on unfinished jobs, 1 waits as drafts, 1 waits because the server is paused",
+		Summary(srv.List(), srv.Explain()))
+}
+
 func TestSummaryWords(t *testing.T) {
 	jobs := []*Job{{ID: "a", State: StateRunning}, {ID: "m", State: StateRunning, Monitor: &MonitorSpec{Kind: "k"}}}
 	assert.Equal(t, "1 running, 1 monitor watching; nothing waits", Summary(jobs, nil))
