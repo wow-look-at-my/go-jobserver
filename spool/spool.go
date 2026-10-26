@@ -44,6 +44,8 @@ type Options struct {
 	Logf func(format string, args ...any)
 	// DirMode is the mode of the directories Open makes. A drop directory for other users needs more.
 	DirMode os.FileMode
+	// ByName orders entries by name only. Use it when the writer encodes the order in the name, as Name does.
+	ByName bool
 }
 
 // Store is one spool directory.
@@ -143,7 +145,8 @@ type listed struct {
 	mtime time.Time
 }
 
-// list is every committed entry, oldest first: by mtime, then by name. A temp file or a directory is not an entry.
+// list is every committed entry, oldest first: by mtime, then by name, or by name alone with ByName. A temp file or a
+// directory is not an entry.
 func (s *Store) list() ([]listed, error) {
 	ents, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -161,7 +164,7 @@ func (s *Store) list() ([]listed, error) {
 		out = append(out, listed{name: e.Name(), size: info.Size(), mtime: info.ModTime()})
 	}
 	sort.Slice(out, func(a, b int) bool {
-		if !out[a].mtime.Equal(out[b].mtime) {
+		if !s.opt.ByName && !out[a].mtime.Equal(out[b].mtime) {
 			return out[a].mtime.Before(out[b].mtime)
 		}
 		return out[a].name < out[b].name

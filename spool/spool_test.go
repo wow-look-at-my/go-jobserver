@@ -44,6 +44,25 @@ func TestPutAndProcessInAgeOrder(t *testing.T) {
 	assert.Zero(t, n, "a done entry is deleted without KeepDone")
 }
 
+func TestByNameIgnoresTheModTime(t *testing.T) {
+	s := open(t, Options{ByName: true})
+	base := time.Unix(1000, 0)
+	first, second := Name(base, "a", ".json"), Name(base.Add(time.Second), "b", ".json")
+	require.NoError(t, s.Put(first, []byte("a")))
+	require.NoError(t, s.Put(second, []byte("b")))
+	// The older name has the newer mtime. ByName must still take it first.
+	require.NoError(t, os.Chtimes(filepath.Join(s.Dir(), first), base.Add(time.Hour), base.Add(time.Hour)))
+	require.NoError(t, os.Chtimes(filepath.Join(s.Dir(), second), base, base))
+
+	var seen []string
+	_, err := s.Process(func(e Entry) error {
+		seen = append(seen, string(e.Body))
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a", "b"}, seen)
+}
+
 func TestATempFileIsNeverAnEntry(t *testing.T) {
 	s := open(t, Options{})
 	require.NoError(t, os.WriteFile(filepath.Join(s.Dir(), ".spool-123.tmp"), []byte("half"), 0o600))
