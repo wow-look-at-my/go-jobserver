@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/wow-look-at-my/go-jobserver/jobserver"
 )
@@ -78,6 +79,28 @@ func (s *Spool) resume(e entry) (task *jobserver.Task, known bool, err error) {
 		return nil, false, fmt.Errorf("Lookup(%s) returned no task and no error", body.Task)
 	}
 	return task, true, nil
+}
+
+// dropOrphans removes each sidecar whose file left the spool, so a new file with the same name and time is a new task.
+func (s *Spool) dropOrphans() {
+	list, err := os.ReadDir(s.dir)
+	if err != nil {
+		s.logf("spool: %v", err)
+		return
+	}
+	for _, de := range list {
+		name := de.Name()
+		base, isSidecar := strings.CutSuffix(name, taskSuffix)
+		if de.IsDir() || !isSidecar || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(s.dir, base)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logf("spool: %s: %v", name, err)
+		}
+	}
 }
 
 // drop removes a sidecar the spool cannot use, and logs why. The file is then added again.

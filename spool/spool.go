@@ -101,7 +101,7 @@ type Spool struct {
 }
 
 var (
-	taskType  = reflect.TypeFor[*jobserver.Task]()
+	taskType   = reflect.TypeFor[*jobserver.Task]()
 	errorType  = reflect.TypeFor[error]()
 	lookupType = reflect.TypeFor[func(string) (*jobserver.Task, error)]()
 )
@@ -273,6 +273,7 @@ func (s *Spool) scan() {
 		}
 	}
 	s.mu.Unlock()
+	s.dropOrphans()
 }
 
 // take decodes one file and adds it to the inbox. A wait then moves the file when its task ends.
