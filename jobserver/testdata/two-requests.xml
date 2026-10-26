@@ -1,0 +1,11 @@
+<monitors>
+	<monitor name="settled" description="the status settled, or nothing started before the given time">
+		<arg name="after" required="true" description="Unix seconds"/>
+		<poll every="1s">
+			<request name="status" transport="api"><url><value name="var.base"/>/status</url></request>
+			<request name="runs" transport="api"><url><value name="var.base"/>/runs</url></request>
+		</poll>
+		<until>{{ or (ne .req.status.response.state "pending") (and (eq (len .req.runs.response.runs) 0) (gt .now (atoi .arg.after))) }}</until>
+		<describe>status {{ .req.status.response.state }}, {{ len .req.runs.response.runs }} run(s)</describe>
+	</monitor>
+</monitors>
