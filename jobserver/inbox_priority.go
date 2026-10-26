@@ -14,9 +14,10 @@ func (ib *Inbox[T, R]) SetPriority(t *Task, p priority.MultiPriority) error {
 	return ib.b.setPriority(t.ID, ib.keys.Values(p))
 }
 
-// setPriority writes the new values and asks for admission again with them.
+// setPriority writes the new values and moves the task's waiting lease to its new place.
 func (c *inboxCore) setPriority(id string, values map[string]int) error {
-	if _, err := c.keys.FromValues(values); err != nil {
+	prio, err := c.keys.FromValues(values)
+	if err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -34,12 +35,29 @@ func (c *inboxCore) setPriority(id string, values map[string]int) error {
 	if err := c.s.store.SetPriority(j.ID, values); err != nil {
 		return err
 	}
-	if cancel, ok := c.leasing[j.ID]; ok {
-		delete(c.leasing, j.ID)
-		cancel()
+	cancel, ok := c.leasing[j.ID]
+	if !ok || c.s.sched.reorder(j.ID, prio) {
+		return nil
 	}
+	// The lease is not in the queue yet, so its order is still the one. Offer the task again.
+	delete(c.leasing, j.ID)
+	cancel()
 	c.s.Wake()
 	return nil
+}
+
+// reorder gives a waiting lease a new priority and plans again. It is false when no lease with the ID waits.
+func (s *Scheduler) reorder(id string, p priority.MultiPriority) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.waiting {
+		if l.req.ID == id {
+			l.order.prio = p
+			s.planLocked()
+			return true
+		}
+	}
+	return false
 }
 
 // SetPriority replaces the priority values of a task that has not ended.
