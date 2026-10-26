@@ -30,14 +30,22 @@ type Wait struct {
 	Detail string `json:"detail"`
 }
 
-// Explain lists what each waiting job waits on. A job that runs, or will never run, is left out.
+// Explain lists what each waiting job waits on. A running host task that waits for a scheduler lease counts as
+// waiting. A job that runs, or will never run, is left out.
 func (s *Server) Explain() map[string][]Wait {
 	jobs := s.List()
 	byID := Index(jobs)
 	paused := s.store.Paused()
+	queued := s.queued()
 	out := map[string][]Wait{}
 	for _, j := range jobs {
-		if j.State.Terminal() || j.State == StateRunning {
+		if j.State.Terminal() {
+			continue
+		}
+		if j.State == StateRunning {
+			if w := queuedWait(queued, j); w != nil {
+				out[j.ID] = []Wait{*w}
+			}
 			continue
 		}
 		if w := s.waitsOf(j, byID, paused); len(w) > 0 {
@@ -47,13 +55,43 @@ func (s *Server) Explain() map[string][]Wait {
 	return out
 }
 
-// Why lists what one job waits on. It is empty for a job that runs or has ended.
+// queued maps each lease that waits on the scheduler to where it stands.
+func (s *Server) queued() map[string]QueueState {
+	out := map[string]QueueState{}
+	for _, l := range s.sched.Status().Waiting {
+		if l.Wait != nil {
+			out[l.ID] = *l.Wait
+		}
+	}
+	return out
+}
+
+// queuedWait is the scheduler wait of a running host task, which asks the scheduler for a lease under its own job ID.
+func queuedWait(queued map[string]QueueState, j *Job) *Wait {
+	if j.Task == nil {
+		return nil
+	}
+	q, ok := queued[j.ID]
+	if !ok {
+		return nil
+	}
+	return &Wait{Kind: q.Kind, ID: q.Key, State: j.State, Detail: q.Reason}
+}
+
+// Why lists what one job waits on. It is empty for a job that has ended, and for a running job unless it is a host
+// task. That task waits for a scheduler lease.
 func (s *Server) Why(id string) ([]Wait, error) {
 	j, err := s.Get(id)
 	if err != nil {
 		return nil, err
 	}
-	if j.State.Terminal() || j.State == StateRunning {
+	if j.State.Terminal() {
+		return nil, nil
+	}
+	if j.State == StateRunning {
+		if w := queuedWait(s.queued(), j); w != nil {
+			return []Wait{*w}, nil
+		}
 		return nil, nil
 	}
 	return s.waitsOf(j, Index(s.List()), s.store.Paused()), nil
@@ -123,7 +161,8 @@ func jobLabel(j *Job) string {
 func Summary(jobs []*Job, waits map[string][]Wait) string {
 	watching, running := 0, 0
 	for _, j := range jobs {
-		if j.State != StateRunning {
+		// A running task that waits for its lease counts as waiting, not as running.
+		if _, waits := waits[j.ID]; j.State != StateRunning || waits {
 			continue
 		}
 		if j.Monitor != nil {

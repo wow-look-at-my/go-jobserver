@@ -55,6 +55,8 @@ type Config struct {
 	Tasks map[string]TaskRunner
 	// Scheduler, when set, is a scheduler the host already runs.
 	Scheduler *Scheduler
+	// Retention is how long a finished job stays. A job an unfinished job depends on stays until that one ends.
+	Retention time.Duration
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -82,6 +84,7 @@ func DefaultConfig(dir string) Config {
 		CPUBudget:      float64(runtime.NumCPU()),
 		DefaultCost:    1,
 		SampleInterval: time.Second,
+		Retention:      7 * 24 * time.Hour,
 	}
 }
 
@@ -299,6 +302,7 @@ func (s *Server) loop() {
 	// The ticker re-runs the decision.
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
+	var pruned time.Time
 	for {
 		select {
 		case <-s.quit:
@@ -307,6 +311,32 @@ func (s *Server) loop() {
 		case <-t.C:
 		}
 		s.tick()
+		if now := time.Now(); now.Sub(pruned) >= pruneInterval {
+			pruned = now
+			s.prune(now)
+		}
+	}
+}
+
+// The retention pass runs this often, and rewrites the journal once this many jobs left it and they outnumber the
+// jobs that stay.
+const (
+	pruneInterval = time.Minute
+	compactAfter  = 1000
+)
+
+// prune forgets the finished jobs past the retention, and rewrites the journal when enough of them left.
+func (s *Server) prune(now time.Time) {
+	if s.cfg.Retention <= 0 {
+		return
+	}
+	if _, err := s.store.Forget(Expired(s.store.Jobs(), now.Add(-s.cfg.Retention))); err != nil {
+		s.cfg.Logf("go-jobserver: ERROR: retention: %v", err)
+	}
+	if n := s.store.Forgotten(); n >= compactAfter && n > len(s.store.Order()) {
+		if err := s.store.Compact(); err != nil {
+			s.cfg.Logf("go-jobserver: ERROR: journal rewrite: %v", err)
+		}
 	}
 }
 

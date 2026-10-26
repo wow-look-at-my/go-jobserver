@@ -34,6 +34,8 @@ type Store struct {
 	closed bool
 	// skipped names each journal record the replay could not read and kept.
 	skipped []string
+	// forgotten counts the jobs removed since the journal was last rewritten.
+	forgotten int
 }
 
 // Skipped names each journal record the last replay skipped because a newer build wrote it. The caller logs them at error level.
@@ -150,6 +152,18 @@ func (s *Store) apply(r record) {
 		if j, ok := s.jobs[r.id]; ok {
 			j.Task = &TaskSpec{Kind: r.monitorKind, Data: []byte(r.errMsg)}
 		}
+	case recForget:
+		if _, ok := s.jobs[r.id]; !ok {
+			return
+		}
+		delete(s.jobs, r.id)
+		for i, id := range s.order {
+			if id == r.id {
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
+		}
+		s.forgotten++
 	}
 }
 

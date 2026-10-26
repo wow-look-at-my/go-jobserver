@@ -154,6 +154,8 @@ func (r record) encode() []byte {
 		e.str(r.id)
 		e.str(r.monitorKind)
 		e.str(r.errMsg)
+	case recForget:
+		e.str(r.id)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -235,6 +237,8 @@ func decodeRecord(payload []byte) (record, error) {
 		r.id = d.str()
 		r.monitorKind = d.str()
 		r.errMsg = d.str()
+	case recForget:
+		r.id = d.str()
 	default:
 		return record{kind: r.kind}, fmt.Errorf("%w %d", errUnknownRecord, r.kind)
 	}

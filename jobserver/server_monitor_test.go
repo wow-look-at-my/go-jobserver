@@ -235,6 +235,43 @@ func TestAHostTaskWaitsOnAMonitorOnTheHostsScheduler(t *testing.T) {
 	assert.JSONEq(t, `{"hook":"h"}`, string(j.Task.Data))
 }
 
+// A host task that asks the scheduler for a lease under its own job ID waits for it in the open: Why, the summary.
+// And the running count all say it waits for the run cap.
+func TestAHostTaskQueuedOnTheSchedulerSaysSo(t *testing.T) {
+	hold := make(chan struct{})
+	var srv *Server
+	srv = newTestServer(t, func(c *Config) {
+		c.MaxConcurrent = 1
+		c.Runner = &fakeRunner{hold: hold}
+		c.Tasks = map[string]TaskRunner{"run": func(ctx context.Context, j *Job, out io.Writer) error {
+			l, err := srv.sched.Acquire(ctx, LeaseRequest{ID: j.ID, Class: j.Name}, nil)
+			if err != nil {
+				return err
+			}
+			l.Release()
+			return nil
+		}}
+	})
+	busy, _, err := srv.Enqueue(Spec{ID: "busy", Command: []string{"long"}})
+	require.NoError(t, err)
+	waitState(t, srv, busy.ID, StateRunning)
+	task, _, err := srv.Enqueue(Spec{ID: "hook-run-1", Task: &TaskSpec{Kind: "run"}})
+	require.NoError(t, err)
+	waitState(t, srv, task.ID, StateRunning)
+
+	require.Eventually(t, func() bool {
+		ws, err := srv.Why(task.ID)
+		require.NoError(t, err)
+		return len(ws) == 1 && ws[0].Kind == WaitCap
+	}, 5*time.Second, 5*time.Millisecond)
+	ws, _ := srv.Why(task.ID)
+	assert.Contains(t, ws[0].Detail, "run cap")
+	assert.Equal(t, "1 running, 0 monitors watching; 1 waits for the run cap", Summary(srv.List(), srv.Explain()))
+
+	close(hold)
+	waitState(t, srv, task.ID, StateCompleted)
+}
+
 // Why names each kind of wait in words: a draft, a running dependency, the run cap and a pause.
 func TestWhyNamesEveryWaitKind(t *testing.T) {
 	hold := make(chan struct{})
