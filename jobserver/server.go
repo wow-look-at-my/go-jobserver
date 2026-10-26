@@ -24,8 +24,6 @@ type Config struct {
 	Dir string
 	// MaxConcurrent bounds how many jobs run at once. Zero means one per CPU.
 	MaxConcurrent int
-	// SpoolDir is watched for job files. Empty disables the watch.
-	SpoolDir string
 	// HTTPAddr is the dashboard and JSON API address. Empty disables it.
 	HTTPAddr string
 	// UnixSocket is the file socket path. Empty disables it.
@@ -34,8 +32,6 @@ type Config struct {
 	IPCName string
 	// IPC enables the go-ipc service over the name derived from Dir.
 	IPC bool
-	// SpoolInterval is how often the spool directory is scanned.
-	SpoolInterval time.Duration
 	// SyncInterval is how often running job logs are flushed to disk.
 	SyncInterval time.Duration
 	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
@@ -50,16 +46,15 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
-	// Monitors runs the monitor jobs. Nil means the server knows no monitor kind, and a monitor job is refused.
-	Monitors *MonitorEnv
-	// Tasks runs the host's own job kinds, by kind. A task job takes no lease: the host's work admits itself.
-	Tasks map[string]TaskRunner
-	// Scheduler, when set, is a scheduler the host already runs.
-	Scheduler *Scheduler
-	// OnEnd hears each job that reaches its end, by whatever path. It runs on the server's goroutine and must not block.
-	OnEnd func(j *Job)
-	// Retention is how long a finished job stays. A job an unfinished job depends on stays until that one ends.
+	// Retention is how long the server keeps an ended task, its result and its log. Zero means DefaultRetention.
 	Retention time.Duration
+	// RetainCount is how many ended tasks the server keeps per inbox. Zero means DefaultRetainCount.
+	RetainCount int
+	// PruneInterval is how often the server drops ended tasks. Zero means DefaultPruneInterval.
+	PruneInterval time.Duration
+	// CacheRetention and CacheCount bound the dedup cache, apart from the tasks. Zero, the default, is no bound.
+	CacheRetention time.Duration
+	CacheCount     int
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -78,11 +73,9 @@ func DefaultConfig(dir string) Config {
 	return Config{
 		Dir:            dir,
 		MaxConcurrent:  runtime.NumCPU(),
-		SpoolDir:       filepath.Join(dir, "spool"),
 		HTTPAddr:       "127.0.0.1:8059",
 		UnixSocket:     filepath.Join(dir, "go-jobserver.sock"),
 		IPC:            true,
-		SpoolInterval:  250 * time.Millisecond,
 		SyncInterval:   time.Second,
 		CPUBudget:      float64(runtime.NumCPU()),
 		DefaultCost:    1,
@@ -117,8 +110,15 @@ type Server struct {
 	wg     sync.WaitGroup
 	start  time.Time
 	closes []io.Closer
-	// spool is the job-file directory. Only the spool watcher uses it.
-	spool *spool.Store
+	// inboxes are the named inboxes open in this process, under mu.
+	inboxes map[string]*inboxCore
+	def     *Inbox[*CommandSpec, CommandResult]
+	// defCore admits the default inbox's tasks. The executor is its consumer.
+	defCore *inboxCore
+	// stopped refuses new tasks once Stop runs.
+	stopped bool
+	// errs holds the error each failed task ended with in this process.
+	errs map[string]error
 }
 
 // New opens the server's directory and replays its journal.
@@ -135,9 +135,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Runner == nil {
 		cfg.Runner = ExecRunner{}
 	}
-	if cfg.SpoolInterval <= 0 {
-		cfg.SpoolInterval = 250 * time.Millisecond
-	}
 	if cfg.SyncInterval <= 0 {
 		cfg.SyncInterval = time.Second
 	}
@@ -150,12 +147,32 @@ func New(cfg Config) (*Server, error) {
 	if cfg.DefaultCost < 0 {
 		cfg.DefaultCost = 0
 	}
+	if cfg.Retention < 0 || cfg.RetainCount < 0 || cfg.PruneInterval < 0 || cfg.CacheRetention < 0 || cfg.CacheCount < 0 {
+		return nil, fmt.Errorf("jobserver: Retention, RetainCount, PruneInterval, CacheRetention and CacheCount must not be negative")
+	}
+	if cfg.Retention == 0 {
+		cfg.Retention = DefaultRetention
+	}
+	if cfg.RetainCount == 0 {
+		cfg.RetainCount = DefaultRetainCount
+	}
+	if cfg.PruneInterval == 0 {
+		cfg.PruneInterval = DefaultPruneInterval
+	}
 	st, err := OpenStore(cfg.Dir)
 	if err != nil {
 		return nil, err
 	}
-	for _, line := range st.Skipped() {
-		cfg.Logf("go-jobserver: ERROR: %s", line)
+	s := &Server{
+		cfg:     cfg,
+		store:   st,
+		runner:  cfg.Runner,
+		running: make(map[string]*runHandle),
+		wake:    make(chan struct{}, 1),
+		quit:    make(chan struct{}),
+		start:   time.Now(),
+		inboxes: make(map[string]*inboxCore),
+		errs:    make(map[string]error),
 	}
 	s := &Server{
 		cfg:      cfg,
@@ -183,6 +200,9 @@ func New(cfg Config) (*Server, error) {
 		Logf:           cfg.Logf,
 	})
 	s.gov = s.sched.gov
+	s.defCore = newInboxCore(s, DefaultInboxName, defaultKeys, 0, nil)
+	s.defCore.isDefault = true
+	s.def = &Inbox[*CommandSpec, CommandResult]{b: localDefault{s}, name: DefaultInboxName, keys: defaultKeys}
 	return s, nil
 }
 
@@ -208,13 +228,9 @@ func (s *Server) Start() error {
 	go s.loop()
 	s.wg.Add(1)
 	go s.syncLoop()
-	if s.ownSched {
-		s.sched.Start()
-	}
-	if s.cfg.SpoolDir != "" {
-		s.wg.Add(1)
-		go s.watchSpool()
-	}
+	s.wg.Add(1)
+	go s.pruneLoop()
+	s.sched.Start()
 	if err := s.startUnix(); err != nil {
 		s.Close()
 		return err
@@ -267,6 +283,7 @@ func (s *Server) Close() error {
 	for _, c := range cancels {
 		c()
 	}
+	s.closeInboxes()
 	close(s.quit)
 	s.wg.Wait()
 	if s.ownSched {
@@ -365,6 +382,10 @@ func (s *Server) tick() {
 		if !ok || j.State != StateActive {
 			continue
 		}
+		if j.Trigger != "" {
+			s.finish(id, StateCancelled, -1, msgNeverFires, nil, j.LogBytes)
+			continue
+		}
 		if err := s.store.setState(id, StateBlocked, "a dependency failed"); err != nil {
 			s.cfg.Logf("go-jobserver: block %s: %v", id, err)
 		}
@@ -375,6 +396,13 @@ func (s *Server) tick() {
 	for _, id := range Ready(jobs) {
 		j, ok := s.store.Job(id)
 		if !ok {
+			continue
+		}
+		if j.Inbox != "" {
+			s.offerInbox(j)
+			continue
+		}
+		if s.defCore.pending(j.ID) {
 			continue
 		}
 		identity, err := s.identityOf(j, byID)
@@ -392,20 +420,9 @@ func (s *Server) tick() {
 				}
 			}
 		}
-		if j.Task != nil {
-			s.dispatch(j.ID, s.sched.Detached(j.ID))
-			continue
-		}
-		// A job the scheduler cannot start now keeps its place in the queue and starts later.
-		l, granted, err := s.sched.TryAcquire(s.leaseFor(j))
-		if err != nil {
-			s.cfg.Logf("go-jobserver: admit %s: %v", id, err)
-			continue
-		}
-		if granted {
-			s.dispatch(j.ID, l)
-		}
+		s.defCore.offer(j)
 	}
+	s.signalTakers()
 }
 
 // leaseFor is what the scheduler admits a job as. The job's own cost comes
@@ -426,11 +443,11 @@ func (s *Server) identityOf(j *Job, byID map[string]*Job) (string, error) {
 	return JobIdentity(&resolved, byID), nil
 }
 
-// reuse records that a job's work was already done by another. It reports
-// false when that job is gone, so the job runs after all.
+// reuse records that a job's work was already done by another, from the dedup cache. The source task can be pruned.
+// It reports false when the cache no longer names that task, so the job runs after all.
 func (s *Server) reuse(j *Job, srcID, identity string) bool {
-	src, ok := s.store.Job(srcID)
-	if !ok {
+	src, ok := s.store.cacheEntry(identity)
+	if !ok || src.ID != srcID {
 		return false
 	}
 	if err := s.store.SetIdentity(j.ID, identity, srcID); err != nil {
@@ -532,7 +549,13 @@ func (s *Server) runOnce(ctx context.Context, j *Job, h *runHandle, started func
 		s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
-	code, runErr := s.run(ctx, j, w, started)
+	parent := ctx
+	if j.Timeout > 0 {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(ctx, j.Timeout)
+		defer stop()
+	}
+	code, runErr := s.runner.Run(ctx, j, w, started)
 	if err := w.Sync(); err != nil {
 		s.cfg.Logf("go-jobserver: sync log %s: %v", j.ID, err)
 	}
@@ -545,6 +568,8 @@ func (s *Server) runOnce(ctx context.Context, j *Job, h *runHandle, started func
 	switch {
 	case revoked != "":
 		s.finish(j.ID, StateFailed, -1, "revoked by the scheduler: "+revoked, nil, n)
+	case parent.Err() == nil && ctx.Err() != nil:
+		s.finish(j.ID, StateFailed, -1, msgTimedOut, nil, n)
 	case ctx.Err() != nil:
 		s.finish(j.ID, StateCancelled, -1, "interrupted", nil, n)
 	case runErr != nil:
@@ -569,23 +594,22 @@ func (s *Server) finish(id string, st State, code int, msg string, artifacts []A
 	s.ended(id)
 }
 
-// Enqueue adds a job. When the spec carries a key that an unfinished job
-// already holds, that job is returned instead and nothing is added.
-func (s *Server) Enqueue(spec Spec) (*Job, bool, error) {
-	if err := s.checkMonitor(&spec); err != nil {
-		return nil, false, err
-	}
-	if err := s.checkTask(&spec); err != nil {
-		return nil, false, err
+// Deprecated: use DefaultInbox().AddTask. Enqueue adds a job to the default inbox.
+func (s *Server) Enqueue(spec Spec) (*Job, bool, error) { return s.enqueue(spec, nil) }
+
+// enqueue adds a job to the default inbox with the task fields meta carries.
+func (s *Server) enqueue(spec Spec, meta *taskMeta) (*Job, bool, error) {
+	if s.isStopped() {
+		return nil, false, ErrStopped
 	}
 	if spec.Key != "" && !spec.Force {
-		for _, j := range s.store.Jobs() {
-			if j.Key == spec.Key && !j.State.Terminal() {
+		for _, j := range s.store.liveIn(DefaultInboxName) {
+			if j.Key == spec.Key {
 				return j, true, nil
 			}
 		}
 	}
-	j, err := s.store.Create(&spec)
+	j, err := s.store.create(&spec, meta)
 	if err != nil {
 		return nil, false, err
 	}
@@ -621,7 +645,13 @@ func (s *Server) SetDeps(id string, deps []string) (*Job, error) {
 }
 
 // Pause stops scheduling new jobs. Running jobs finish.
-func (s *Server) Pause() error { return s.store.SetPaused(true) }
+func (s *Server) Pause() error {
+	if err := s.store.SetPaused(true); err != nil {
+		return err
+	}
+	s.withdrawLeases()
+	return nil
+}
 
 // Resume allows scheduling again.
 func (s *Server) Resume() error {
@@ -634,6 +664,37 @@ func (s *Server) Resume() error {
 
 // Paused reports whether scheduling is paused.
 func (s *Server) Paused() bool { return s.store.Paused() }
+
+// Interrupt stops one running job and returns once it has stopped, so the
+// job's state is settled by the time the caller looks at it.
+func (s *Server) Interrupt(id string) error {
+	id = CanonicalID(id)
+	s.mu.Lock()
+	h, ok := s.running[id]
+	s.mu.Unlock()
+	if !ok {
+		j, found := s.store.Job(id)
+		if !found {
+			return fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		if j.Inbox != "" && !j.State.Terminal() {
+			return s.cancel(id)
+		}
+		if j.State.Terminal() {
+			return fmt.Errorf("%w: %s is %s", ErrBadState, id, j.State)
+		}
+		// Not running yet: cancel it outright so the scheduler skips it.
+		s.defCore.forget(id)
+		return s.store.Finish(id, StateCancelled, -1, "interrupted", nil, j.LogBytes)
+	}
+	h.cancel()
+	select {
+	case <-h.done:
+		return nil
+	case <-time.After(interruptTimeout):
+		return fmt.Errorf("go-jobserver: %s did not stop within %s", id, interruptTimeout)
+	}
+}
 
 // InterruptAll cancels every running job.
 func (s *Server) InterruptAll() int {

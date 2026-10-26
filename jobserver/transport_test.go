@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,7 +120,6 @@ func TestStartRefusesASocketPathThePlatformCannotBind(t *testing.T) {
 	cfg := DefaultConfig(dir)
 	cfg.UnixSocket = filepath.Join(dir, strings.Repeat("x", 200), "go-jobserver.sock")
 	cfg.HTTPAddr = ""
-	cfg.SpoolDir = ""
 	cfg.IPC = false
 	srv, err := New(cfg)
 	require.NoError(t, err)
@@ -216,80 +214,45 @@ func TestDialReportsAMissingDaemon(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoDaemon)
 }
 
-func TestSpoolTransport(t *testing.T) {
-	spool := t.TempDir()
-	runner := &fakeRunner{}
-	srv := newTestServer(t, func(c *Config) {
-		c.SpoolDir = spool
-		c.Runner = runner
-		c.SpoolInterval = 10 * time.Millisecond
-	})
-	require.NoError(t, os.WriteFile(filepath.Join(spool, "hello.cmd"), []byte("echo hello\n"), 0o644))
-	waitForJobs(t, srv, 1)
-	jobs := srv.List()
-	require.Len(t, jobs, 1)
-	assert.Equal(t, []string{"echo", "hello"}, jobs[0].Command)
-	assert.Equal(t, "hello", jobs[0].Name)
-	waitState(t, srv, jobs[0].ID, StateCompleted)
-	require.FileExists(t, filepath.Join(spool, spoolDoneDir, "hello.cmd"))
-
-	spec := Spec{Command: []string{"one", "two"}, Name: "spec-job", Draft: true}
-	body, err := json.Marshal(spec)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(spool, "spec.json"), body, 0o644))
-	waitForJobs(t, srv, 2)
-
-	require.NoError(t, os.WriteFile(filepath.Join(spool, "bad.json"), []byte("{not json"), 0o644))
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(spool, spoolFailedDir, "bad.json"))
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
-	require.FileExists(t, filepath.Join(spool, spoolFailedDir, "bad.json.error"))
-}
-
-func waitForJobs(t *testing.T, srv *Server, want int) {
-	t.Helper()
-	require.Eventually(t, func() bool { return len(srv.List()) >= want }, 5*time.Second, 10*time.Millisecond)
-}
-
-func TestSpoolAcceptsAnArgvArray(t *testing.T) {
-	spool := t.TempDir()
-	srv := newTestServer(t, func(c *Config) {
-		c.SpoolDir = spool
-		c.Runner = &fakeRunner{}
-		c.SpoolInterval = 10 * time.Millisecond
-	})
-	require.NoError(t, os.WriteFile(filepath.Join(spool, "argv.json"), []byte(`["echo","hi"]`), 0o644))
-	waitForJobs(t, srv, 1)
-	assert.Equal(t, []string{"echo", "hi"}, srv.List()[0].Command)
-}
-
-func TestSpecFromFile(t *testing.T) {
+func TestCommandSpecDecodesEachForm(t *testing.T) {
 	cases := []struct {
 		name    string
 		body    string
 		want    []string
+		title   string
 		wantErr bool
 	}{
-		{"cmd", "echo hi\n", []string{"echo", "hi"}, false},
-		{"json spec", `{"command":["make","-j4"]}`, []string{"make", "-j4"}, false},
-		{"json array", `["ls","-l"]`, []string{"ls", "-l"}, false},
-		{"json string", `"echo quoted"`, []string{"echo", "quoted"}, false},
-		{"empty", "   ", nil, true},
-		{"no command", `{"name":"x"}`, nil, true},
-		{"bad json", `{"command":`, nil, true},
+		{"json spec", `{"title":"t","command":["make","-j4"],"draft":true}`, []string{"make", "-j4"}, "t", false},
+		{"json array", `["ls","-l"]`, []string{"ls", "-l"}, "", false},
+		{"json string", `"echo quoted"`, []string{"echo", "quoted"}, "", false},
+		{"no command", `{"title":"x"}`, nil, "x", false},
+		{"bad json", `{"command":`, nil, "", true},
+		{"bad array", `[1]`, nil, "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			spec, err := specFromFile(c.name, []byte(c.body))
+			var spec CommandSpec
+			err := json.Unmarshal([]byte(c.body), &spec)
 			if c.wantErr {
 				assert.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
 			assert.Equal(t, c.want, spec.Command)
+			assert.Equal(t, c.title, spec.Title)
 		})
 	}
+	var line CommandSpec
+	require.NoError(t, line.UnmarshalText([]byte("  echo hi\n")))
+	assert.Equal(t, []string{"echo", "hi"}, line.Command)
+	require.NoError(t, line.UnmarshalText([]byte("   ")))
+	assert.Empty(t, line.Command)
+}
+
+func TestDefaultInboxRefusesASpecWithNoCommand(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) { c.Runner = &fakeRunner{} })
+	_, err := srv.DefaultInbox().AddTask(&CommandSpec{TaskSpec: TaskSpec{Title: "x"}})
+	assert.ErrorIs(t, err, ErrNoCommand)
 }
 
 func TestDecodeSpec(t *testing.T) {

@@ -30,8 +30,10 @@ var (
 
 // SchedulerConfig is how a Scheduler is built.
 type SchedulerConfig struct {
-	// MaxConcurrent bounds how many counted leases hold a slot at once. Zero means no bound.
+	// MaxConcurrent bounds how many counted leases hold a slot at once. Zero means no bound. It is the declared value.
 	MaxConcurrent int
+	// Groups are the declared named groups and their limits, as SetGroups takes them.
+	Groups map[string]int
 	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
 	CPUBudget float64
 	// DefaultCost is the CPU cost of a lease that declares none and whose class has no history.
@@ -83,19 +85,22 @@ type Scheduler struct {
 	seq     uint64
 	waiting []*Lease
 	holding []*Lease
-	groups  map[string]int
-	maxRuns int
-	// limits holds the declared cap and groups and the overrides; maxRuns and groups are what they make.
-	limits  limitLayer
-	budget  float64
-	batches map[string]*batchState
-	now     func() time.Time
+	// groups holds the declared limits and groupOverrides the operator's. An override with no declared group has no effect.
+	groups         map[string]int
+	groupOverrides map[string]int
+	// maxRuns is the declared cap. capOverride replaces it while capOverridden is set.
+	maxRuns       int
+	capOverride   int
+	capOverridden bool
+	budget        float64
+	batches       map[string]*batchState
+	now           func() time.Time
 	// host is the host's load over the last samples.
 	host hostLoad
 
 	classes  *classBook
 	gov      *governor
-	priority priorityTable
+	priority leaseKeys
 
 	quit      chan struct{}
 	wg        sync.WaitGroup
@@ -126,20 +131,20 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = DefaultRetryInterval
 	}
-	priority, err := newPriorityTable(cfg.PriorityKeys)
+	priority, err := newLeaseKeys(cfg.PriorityKeys)
 	if err != nil {
 		panic(err)
 	}
 	s := &Scheduler{
-		priority: priority,
-		cfg:      cfg,
-		groups:   map[string]int{},
-		maxRuns:  cfg.MaxConcurrent,
-		limits:   limitLayer{capDeclared: cfg.MaxConcurrent},
-		budget:   cfg.CPUBudget,
-		batches:  map[string]*batchState{},
-		now:      time.Now,
-		quit:     make(chan struct{}),
+		priority:       priority,
+		cfg:            cfg,
+		groups:         clampGroups(cfg.Groups),
+		groupOverrides: map[string]int{},
+		maxRuns:        cfg.MaxConcurrent,
+		budget:         cfg.CPUBudget,
+		batches:        map[string]*batchState{},
+		now:            time.Now,
+		quit:           make(chan struct{}),
 	}
 	s.classes = openClassBook(cfg.HistoryPath, cfg.Logf)
 	s.gov = newGovernor(s)
@@ -201,14 +206,25 @@ func (s *Scheduler) SetCPUBudget(cpus float64) {
 	s.planLocked()
 }
 
-// MaxConcurrent is the count cap now. Zero means no cap.
+// ErrInvalidLimit is returned for an override below the smallest limit it may take.
+var ErrInvalidLimit = errors.New("jobserver: invalid limit")
+
+// MaxConcurrent is the effective count cap: the override when one is set, else the declared value. Zero means no cap.
 func (s *Scheduler) MaxConcurrent() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.capLocked()
+}
+
+// capLocked is the effective count cap. Caller holds s.mu.
+func (s *Scheduler) capLocked() int {
+	if s.capOverridden {
+		return s.capOverride
+	}
 	return s.maxRuns
 }
 
-// SetMaxConcurrent moves the declared count cap. Zero means no cap. An override, while set, still wins.
+// SetMaxConcurrent moves the declared count cap. Zero means no cap. An override stays in effect over it.
 func (s *Scheduler) SetMaxConcurrent(n int) {
 	if n < 0 {
 		n = 0
@@ -219,15 +235,75 @@ func (s *Scheduler) SetMaxConcurrent(n int) {
 	s.applyCapLocked()
 }
 
-// SetGroups replaces the declared groups and their limits. A limit below one
-// is one. A queued lease whose group is gone fails with ErrGroupRemoved. A
-// holder of a removed group keeps its slot, and counts again if the group
-// returns.
-func (s *Scheduler) SetGroups(limits map[string]int) {
+// OverrideMaxConcurrent sets the count cap over the declared value. Zero means no cap. A negative value is ErrInvalidLimit.
+func (s *Scheduler) OverrideMaxConcurrent(n int) error {
+	if n < 0 {
+		return fmt.Errorf("%w: count cap %d", ErrInvalidLimit, n)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.capOverride, s.capOverridden = n, true
+	s.planLocked()
+	return nil
+}
+
+// ClearMaxConcurrentOverride removes the cap override, so the declared value applies again.
+func (s *Scheduler) ClearMaxConcurrentOverride() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.capOverride, s.capOverridden = 0, false
+	s.planLocked()
+}
+
+// OverrideGroup sets a group's limit over its declared limit. The scheduler keeps
+// an override for a group that is not declared, and applies it when SetGroups
+// declares the group. A limit below one is ErrInvalidLimit.
+func (s *Scheduler) OverrideGroup(name string, limit int) error {
+	if limit < 1 {
+		return fmt.Errorf("%w: group %q limit %d", ErrInvalidLimit, name, limit)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.groupOverrides[name] = limit
+	s.planLocked()
+	return nil
+}
+
+// ClearGroupOverride removes a group's override, so its declared limit applies again.
+func (s *Scheduler) ClearGroupOverride(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.groupOverrides, name)
+	s.planLocked()
+}
+
+// groupLimitLocked is a declared group's effective limit. Caller holds s.mu.
+func (s *Scheduler) groupLimitLocked(name string) (int, bool) {
+	limit, ok := s.groups[name]
+	if !ok {
+		return 0, false
+	}
+	if ov, set := s.groupOverrides[name]; set {
+		limit = ov
+	}
+	return limit, true
+}
+
+// clampGroups copies limits and raises a limit below one to one.
+func clampGroups(limits map[string]int) map[string]int {
 	next := make(map[string]int, len(limits))
 	for name, limit := range limits {
 		next[name] = max(limit, 1)
 	}
+	return next
+}
+
+// SetGroups replaces the declared groups and their limits. A limit below one is
+// one. An override keeps its effect over the new declared limit. A queued
+// lease whose group is gone fails with ErrGroupRemoved. A holder of a removed
+// group keeps its slot, and counts again if the group returns.
+func (s *Scheduler) SetGroups(limits map[string]int) {
+	next := clampGroups(limits)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.limits.groupDeclared = next
@@ -252,21 +328,22 @@ func (s *Scheduler) applyGroupsLocked() {
 	s.planLocked()
 }
 
-// HasGroup reports whether a group is declared, and its limit.
+// HasGroup reports whether a group is declared, and its effective limit.
 func (s *Scheduler) HasGroup(name string) (int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	limit, ok := s.groups[name]
-	return limit, ok
+	return s.groupLimitLocked(name)
 }
 
 // Acquire queues a lease and blocks until the scheduler grants it, ctx ends,
-// or the lease cannot be granted at all. onQueue follows the queue contract:
-// its first call means the lease has to wait, and later calls mean its place
-// or reason changed. Calls are serialized under the scheduler's lock, so keep
-// them fast and never call back into the scheduler.
+// or the lease cannot be granted at all.
 func (s *Scheduler) Acquire(ctx context.Context, req LeaseRequest, onQueue func(QueueState)) (*Lease, error) {
-	l, err := s.enqueue(req, onQueue)
+	return s.acquire(ctx, req, nil, onQueue)
+}
+
+// acquire is Acquire with the lease's place in the order. A nil order reads it from req.Priority.
+func (s *Scheduler) acquire(ctx context.Context, req LeaseRequest, order *leaseOrder, onQueue func(QueueState)) (*Lease, error) {
+	l, err := s.enqueue(req, order, onQueue)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +383,7 @@ func (s *Scheduler) Acquire(ctx context.Context, req LeaseRequest, onQueue func(
 // TryAcquire grants a lease only if the plan grants it now. It never waits, so
 // a lease that has to queue is withdrawn and ok is false.
 func (s *Scheduler) TryAcquire(req LeaseRequest) (l *Lease, ok bool, err error) {
-	l, err = s.enqueue(req, nil)
+	l, err = s.enqueue(req, nil, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -325,7 +402,7 @@ func (s *Scheduler) TryAcquire(req LeaseRequest) (l *Lease, ok bool, err error) 
 }
 
 // enqueue adds a lease to the queue and plans once.
-func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease, error) {
+func (s *Scheduler) enqueue(req LeaseRequest, order *leaseOrder, onQueue func(QueueState)) (*Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -348,9 +425,12 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 			}
 		}
 	}
-	rank, err := s.priority.rank(req.Priority)
-	if err != nil {
-		return nil, err
+	if order == nil {
+		p, err := s.priority.priorityOf(req.Priority)
+		if err != nil {
+			return nil, err
+		}
+		order = &leaseOrder{keys: s.priority.keys, prio: p}
 	}
 	if req.Monitor {
 		// A monitor runs under the monitor policy and costs nothing against the budget, whatever it asked for.
@@ -358,7 +438,7 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 	}
 	s.seq++
 	l := newLease(s, req, s.seq, s.now().UTC(), onQueue)
-	l.rank = rank
+	l.order = *order
 	l.cost = s.costOf(req)
 	s.waiting = append(s.waiting, l)
 	s.planLocked()

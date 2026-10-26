@@ -44,32 +44,45 @@ type BatchInfo struct {
 
 // GroupInfo is one named group's use.
 type GroupInfo struct {
-	Name  string `json:"name"`
-	Limit int    `json:"limit"`
-	// Declared is the limit the host declared. Limit differs from it while Overridden.
-	Declared   int  `json:"declared"`
-	Overridden bool `json:"overridden,omitempty"`
-	Active     int  `json:"active"`
-	Waiting    int  `json:"waiting"`
+	Name string `json:"name"`
+	// Limit is the effective limit that admission uses.
+	Limit int `json:"limit"`
+	// Declared is the limit SetGroups or the config gave.
+	Declared int `json:"declared"`
+	// Override is the operator's limit. It is nil when none is set.
+	Override *int `json:"override,omitempty"`
+	Active   int  `json:"active"`
+	Waiting  int  `json:"waiting"`
+}
+
+// BatchInfo is one open batch.
+type BatchInfo struct {
+	Key string `json:"key"`
+	// Holding and Waiting are the IDs of the batch's leases that hold a slot and that wait.
+	Holding []string `json:"holding"`
+	Waiting []string `json:"waiting"`
+	// Closes is when the batch closes. It is nil while a member holds a slot.
+	Closes *time.Time `json:"closes,omitempty"`
 }
 
 // SchedulerStatus is the scheduler's live state.
 type SchedulerStatus struct {
-	MaxConcurrent int     `json:"max_concurrent"`
-	Budget        float64 `json:"budget"`
+	// MaxConcurrent is the effective count cap that admission uses. Zero means no cap.
+	MaxConcurrent int `json:"max_concurrent"`
+	// MaxConcurrentDeclared is the count cap the config or SetMaxConcurrent gave.
+	MaxConcurrentDeclared int `json:"max_concurrent_declared"`
+	// MaxConcurrentOverride is the operator's count cap. It is nil when none is set.
+	MaxConcurrentOverride *int    `json:"max_concurrent_override,omitempty"`
+	Budget                float64 `json:"budget"`
 	// Running is how many counted leases hold a slot.
 	Running int `json:"running"`
 	// Reserved is the CPUs the counted holders were admitted at, together.
 	Reserved float64     `json:"reserved"`
 	Holding  []LeaseInfo `json:"holding"`
 	Waiting  []LeaseInfo `json:"waiting"`
-	// Monitors are the monitor leases. They hold no slot, so Holding and Running leave them out.
-	Monitors []LeaseInfo `json:"monitors"`
-	// Batches are the batches the scheduler keeps open or has members of, by key.
+	Groups   []GroupInfo `json:"groups"`
+	// Batches are the open batches, sorted by key.
 	Batches []BatchInfo `json:"batches"`
-	// Cap is the count cap's declared and override layers. MaxConcurrent is its effective value.
-	Cap    LimitInfo   `json:"cap"`
-	Groups []GroupInfo `json:"groups"`
 	// PriorityKeys is the admission order, compared top to bottom.
 	PriorityKeys []PriorityKey `json:"priority_keys"`
 }
@@ -79,12 +92,32 @@ type SchedulerStatus struct {
 func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := SchedulerStatus{MaxConcurrent: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, Batches: []BatchInfo{}, PriorityKeys: s.PriorityKeys()}
+	now := s.now()
+	st := SchedulerStatus{MaxConcurrent: s.capLocked(), MaxConcurrentDeclared: s.maxRuns, Budget: s.budgetLocked(),
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
+		PriorityKeys: s.PriorityKeys()}
+	if s.capOverridden {
+		st.MaxConcurrentOverride = new(s.capOverride)
+	}
 	groups := map[string]*GroupInfo{}
-	for name, limit := range s.groups {
-		_, over := s.limits.groupOverride[name]
-		groups[name] = &GroupInfo{Name: name, Limit: limit, Declared: s.limits.groupDeclared[name], Overridden: over}
+	for name, declared := range s.groups {
+		limit, _ := s.groupLimitLocked(name)
+		g := &GroupInfo{Name: name, Limit: limit, Declared: declared}
+		if ov, ok := s.groupOverrides[name]; ok {
+			g.Override = new(ov)
+		}
+		groups[name] = g
+	}
+	batches := map[string]*BatchInfo{}
+	for key, sb := range s.batches {
+		if !s.batchOpen(key, now) {
+			continue
+		}
+		b := &BatchInfo{Key: key, Holding: []string{}, Waiting: []string{}}
+		if sb.running <= 0 {
+			b.Closes = new(sb.lastEnd.Add(BatchGrace))
+		}
+		batches[key] = b
 	}
 	st.Cap = s.capInfoLocked()
 	for _, l := range s.holding {
@@ -93,6 +126,9 @@ func (s *Scheduler) Status() SchedulerStatus {
 			continue
 		}
 		st.Holding = append(st.Holding, l.info(nil))
+		if b := batches[l.req.Batch]; b != nil && l.req.ID != "" {
+			b.Holding = append(b.Holding, l.req.ID)
+		}
 		if !l.req.GroupOnly {
 			st.Running++
 			st.Reserved += l.cost
@@ -107,50 +143,27 @@ func (s *Scheduler) Status() SchedulerStatus {
 		if g := groups[l.req.Group]; g != nil {
 			g.Waiting++
 		}
+		if b := batches[l.req.Batch]; b != nil && l.req.ID != "" {
+			b.Waiting = append(b.Waiting, l.req.ID)
+		}
 	}
 	for _, g := range groups {
 		st.Groups = append(st.Groups, *g)
 	}
-	st.Batches = s.batchInfoLocked()
+	for _, b := range batches {
+		st.Batches = append(st.Batches, *b)
+	}
+	sort.Slice(st.Batches, func(i, k int) bool { return st.Batches[i].Key < st.Batches[k].Key })
 	sort.Slice(st.Groups, func(i, k int) bool { return st.Groups[i].Name < st.Groups[k].Name })
 	return st
 }
 
-// batchInfoLocked lists every batch the scheduler tracks or a live lease names, sorted by key. Caller holds s.mu.
-func (s *Scheduler) batchInfoLocked() []BatchInfo {
-	now := s.now()
-	byKey := map[string]*BatchInfo{}
-	get := func(key string) *BatchInfo {
-		b := byKey[key]
-		if b == nil {
-			b = &BatchInfo{Key: key, Open: s.batchOpen(key, now), Holding: []string{}, Waiting: []string{}}
-			if st := s.batches[key]; st != nil {
-				b.Running, b.LastEnd = st.running, st.lastEnd
-			}
-			byKey[key] = b
-		}
-		return b
+// priorityValues names each value of a lease's priority by its key.
+func priorityValues(o leaseOrder) map[string]float64 {
+	out := map[string]float64{}
+	for name, v := range o.keys.Values(o.prio) {
+		out[name] = float64(v)
 	}
-	for key := range s.batches {
-		get(key)
-	}
-	for _, l := range s.holding {
-		if l.req.Batch != "" {
-			b := get(l.req.Batch)
-			b.Holding = append(b.Holding, l.req.ID)
-		}
-	}
-	for _, l := range s.waiting {
-		if l.req.Batch != "" {
-			b := get(l.req.Batch)
-			b.Waiting = append(b.Waiting, l.req.ID)
-		}
-	}
-	out := make([]BatchInfo, 0, len(byKey))
-	for _, b := range byKey {
-		out = append(out, *b)
-	}
-	sort.Slice(out, func(i, k int) bool { return out[i].Key < out[k].Key })
 	return out
 }
 
@@ -163,7 +176,7 @@ func (l *Lease) info(wait *QueueState) LeaseInfo {
 		since = l.started
 	}
 	return LeaseInfo{
-		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: l.sched.priority.values(l.rank),
+		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: priorityValues(l.order),
 		Batch: l.req.Batch, GroupOnly: l.req.GroupOnly, Since: since, Cost: l.cost, CPUs: l.cpus,
 		CPUSeconds: l.cpuSeconds, Revoked: l.reason, Wait: wait,
 	}

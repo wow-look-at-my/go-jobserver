@@ -1,4 +1,4 @@
-// PriorityKey is one row of the admission order.
+// PriorityKey is one key of the lease priority order.
 
 package jobserver
 
@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"slices"
+
+	"github.com/wow-look-at-my/go-jobserver/priority"
 )
 
-// PriorityKey is one row of the admission order.
+// PriorityKey is one key of the lease priority order. Its default must be a whole number.
 type PriorityKey struct {
 	// Name is hyphenated lowercase words, such as "infra-priority".
 	Name        string  `json:"name"`
@@ -24,89 +25,73 @@ const KeyOpenBatch = "open-batch"
 var (
 	// ErrUnknownPriorityKey is returned for a lease that sets a key the scheduler does not have.
 	ErrUnknownPriorityKey = errors.New("jobserver: unknown priority key")
-	// ErrBadPriorityValue is returned for a lease value that is not a finite number.
-	ErrBadPriorityValue = errors.New("jobserver: priority value is not finite")
+	// ErrBadPriorityValue is returned for a lease value that is not a whole number.
+	ErrBadPriorityValue = errors.New("jobserver: priority value is not a whole number")
 )
 
 var priorityKeyName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
-// priorityTable is the validated key list.
-type priorityTable struct {
-	keys  []PriorityKey
-	index map[string]int
-	batch int
+// leaseKeys is the key list of the leases that come with no inbox. The default inbox uses it too.
+type leaseKeys struct {
+	described []PriorityKey
+	keys      *priority.Keys
 }
 
-// newPriorityTable checks the key list and adds KeyOpenBatch when it is missing.
-func newPriorityTable(keys []PriorityKey) (priorityTable, error) {
-	t := priorityTable{index: map[string]int{}, batch: -1}
-	for _, k := range keys {
+// newLeaseKeys checks the key list and adds KeyOpenBatch when it is missing.
+func newLeaseKeys(list []PriorityKey) (leaseKeys, error) {
+	var out leaseKeys
+	var keys []*priority.MultiPriorityKey
+	hasBatch := false
+	for _, k := range list {
 		if !priorityKeyName.MatchString(k.Name) {
-			return t, fmt.Errorf("jobserver: priority key %q is not hyphenated lowercase words", k.Name)
+			return out, fmt.Errorf("jobserver: priority key %q is not hyphenated lowercase words", k.Name)
 		}
-		if _, dup := t.index[k.Name]; dup {
-			return t, fmt.Errorf("jobserver: priority key %q is listed twice", k.Name)
+		def, ok := wholeNumber(k.Default)
+		if !ok {
+			return out, fmt.Errorf("jobserver: priority key %q: %w", k.Name, ErrBadPriorityValue)
 		}
-		if math.IsNaN(k.Default) || math.IsInf(k.Default, 0) {
-			return t, fmt.Errorf("jobserver: priority key %q: %w", k.Name, ErrBadPriorityValue)
-		}
-		t.index[k.Name] = len(t.keys)
-		t.keys = append(t.keys, k)
+		hasBatch = hasBatch || k.Name == KeyOpenBatch
+		keys = append(keys, &priority.MultiPriorityKey{Name: k.Name, DefaultPriority: def})
+		out.described = append(out.described, k)
 	}
-	if at, ok := t.index[KeyOpenBatch]; ok {
-		t.batch = at
-	} else {
-		t.batch = len(t.keys)
-		t.index[KeyOpenBatch] = t.batch
-		t.keys = append(t.keys, PriorityKey{Name: KeyOpenBatch, Description: "0 while a member of the lease's batch holds a slot, else 1", Default: 1})
+	if !hasBatch {
+		keys = append(keys, &priority.MultiPriorityKey{Name: KeyOpenBatch, DefaultPriority: 1})
+		out.described = append(out.described, PriorityKey{Name: KeyOpenBatch, Description: "0 while a member of the lease's batch holds a slot, else 1", Default: 1})
 	}
-	return t, nil
-}
-
-// rank resolves a lease's values into one value per key, in key order. The open-batch row is filled at plan time.
-func (t priorityTable) rank(values map[string]float64) ([]float64, error) {
-	out := make([]float64, len(t.keys))
-	for idx, k := range t.keys {
-		out[idx] = k.Default
+	pk, err := priority.NewKeys(keys...)
+	if err != nil {
+		return out, err
 	}
-	for name, v := range values {
-		at, ok := t.index[name]
-		if !ok || at == t.batch {
-			return nil, fmt.Errorf("%w: %q", ErrUnknownPriorityKey, name)
-		}
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, fmt.Errorf("priority key %q: %w", name, ErrBadPriorityValue)
-		}
-		out[at] = v
-	}
+	out.keys = pk
 	return out, nil
 }
 
-// values names each value of a rank by its key.
-func (t priorityTable) values(rank []float64) map[string]float64 {
-	out := make(map[string]float64, len(t.keys))
-	for idx, k := range t.keys {
-		out[k.Name] = rank[idx]
+// wholeNumber converts v to an int when it is a whole number in range.
+func wholeNumber(v float64) (int, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || math.Abs(v) > 1<<53 {
+		return 0, false
 	}
-	return out
+	return int(v), true
 }
 
-// PriorityTable is a validated key list, for a queue of the caller's own that orders the way the scheduler does.
-type PriorityTable struct{ t priorityTable }
-
-// NewPriorityTable checks a key list the way NewScheduler does, and adds KeyOpenBatch when it is missing.
-func NewPriorityTable(keys []PriorityKey) (PriorityTable, error) {
-	t, err := newPriorityTable(keys)
-	return PriorityTable{t}, err
+// priorityOf resolves a lease's named values against the key list. The scheduler fills the open-batch key at plan time.
+func (t leaseKeys) priorityOf(values map[string]float64) (priority.MultiPriority, error) {
+	var p priority.MultiPriority
+	for name, v := range values {
+		k := t.keys.Lookup(name)
+		if k == nil || name == KeyOpenBatch {
+			return p, fmt.Errorf("%w: %q", ErrUnknownPriorityKey, name)
+		}
+		n, ok := wholeNumber(v)
+		if !ok {
+			return p, fmt.Errorf("priority key %q: %w", name, ErrBadPriorityValue)
+		}
+		p.Set(k, n)
+	}
+	return p, nil
 }
 
-// Rank resolves values into one value per key, in key order, with defaults filled in.
-func (p PriorityTable) Rank(values map[string]float64) ([]float64, error) { return p.t.rank(values) }
-
-// CompareRanks orders ranks the way the scheduler does: the first key that differs decides, lower first.
-func CompareRanks(a, b []float64) int { return slices.Compare(a, b) }
-
-// PriorityKeys returns the scheduler's key list, in comparison order.
+// PriorityKeys returns the key list of leases with no inbox, in comparison order.
 func (s *Scheduler) PriorityKeys() []PriorityKey {
-	return append([]PriorityKey(nil), s.priority.keys...)
+	return append([]PriorityKey(nil), s.priority.described...)
 }

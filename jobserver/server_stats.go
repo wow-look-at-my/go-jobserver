@@ -1,4 +1,4 @@
-// Stats summarizes the job table for the stats call and the dashboard.
+// Stats summarizes the job table.
 
 package jobserver
 

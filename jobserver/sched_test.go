@@ -219,7 +219,7 @@ func TestSchedulerKeysCompareTopToBottom(t *testing.T) {
 		{ID: "w2", Batch: "workflow"},
 		{ID: "second-row", Priority: map[string]float64{"weight": -1}},
 		{ID: "first-row", Priority: map[string]float64{"urgency": -1, "weight": 99}},
-		{ID: "late", Priority: map[string]float64{"urgency": 0.5}},
+		{ID: "late", Priority: map[string]float64{"urgency": 1}},
 		{ID: "w3", Priority: map[string]float64{"urgency": 0}, Batch: "workflow"},
 		{ID: "plain"},
 	} {
@@ -261,6 +261,8 @@ func TestSchedulerRefusesUnknownAndNonFinitePriorities(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnknownPriorityKey, "the scheduler fills open-batch itself")
 	_, err = s.Acquire(context.Background(), LeaseRequest{ID: "c", Priority: map[string]float64{"urgency": math.NaN()}}, nil)
 	require.ErrorIs(t, err, ErrBadPriorityValue)
+	_, err = s.Acquire(context.Background(), LeaseRequest{ID: "d", Priority: map[string]float64{"urgency": 0.5}}, nil)
+	require.ErrorIs(t, err, ErrBadPriorityValue, "a priority value is a whole number")
 	assert.Equal(t, []string{"urgency", "weight", KeyOpenBatch}, keyNames(s.PriorityKeys()), "a list without open-batch gets it last")
 }
 
@@ -270,6 +272,7 @@ func TestNewSchedulerPanicsOnABadKeyList(t *testing.T) {
 		{{Name: "dup"}, {Name: "dup"}},
 		{{Name: "-lead"}},
 		{{Name: "inf", Default: math.Inf(1)}},
+		{{Name: "half", Default: 0.5}},
 	} {
 		assert.Panics(t, func() { NewScheduler(SchedulerConfig{DisableCPU: true, PriorityKeys: keys}) }, "%v", keys)
 	}

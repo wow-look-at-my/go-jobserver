@@ -29,9 +29,10 @@ const (
 	recDeps     byte = 7
 	recPolicy   byte = 8
 	recCPU      byte = 9
-	recMonitor  byte = 10
-	// recTask carries a host task: monitorKind holds its kind and errMsg its data.
-	recTask byte = 11
+	recTask     byte = 10
+	recResult   byte = 11
+	recDetail   byte = 12
+	recCache    byte = 13
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -80,10 +81,8 @@ type record struct {
 	// recCPU
 	cpuSeconds float64
 
-	// recMonitor
-	monitorKind string
-	monitorArgs []string
-	deadline    int64
+	// recTask, recResult, recDetail, recCache: JSON
+	blob string
 }
 
 // Encode returns the payload bytes of the record without its frame.
@@ -145,17 +144,11 @@ func (r record) encode() []byte {
 	case recCPU:
 		e.str(r.id)
 		e.f64(r.cpuSeconds)
-	case recMonitor:
+	case recTask, recResult, recDetail:
 		e.str(r.id)
-		e.str(r.monitorKind)
-		e.list(r.monitorArgs)
-		e.i64(r.deadline)
-	case recTask:
-		e.str(r.id)
-		e.str(r.monitorKind)
-		e.str(r.errMsg)
-	case recForget:
-		e.str(r.id)
+		e.str(r.blob)
+	case recCache:
+		e.str(r.blob)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -228,17 +221,11 @@ func decodeRecord(payload []byte) (record, error) {
 	case recCPU:
 		r.id = d.str()
 		r.cpuSeconds = d.f64()
-	case recMonitor:
+	case recTask, recResult, recDetail:
 		r.id = d.str()
-		r.monitorKind = d.str()
-		r.monitorArgs = d.list()
-		r.deadline = d.i64()
-	case recTask:
-		r.id = d.str()
-		r.monitorKind = d.str()
-		r.errMsg = d.str()
-	case recForget:
-		r.id = d.str()
+		r.blob = d.str()
+	case recCache:
+		r.blob = d.str()
 	default:
 		return record{kind: r.kind}, fmt.Errorf("%w %d", errUnknownRecord, r.kind)
 	}
