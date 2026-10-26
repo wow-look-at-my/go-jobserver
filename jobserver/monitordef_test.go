@@ -1,5 +1,7 @@
 package jobserver
 
+import _ "embed"
+
 import (
 	"testing"
 	"time"
@@ -8,30 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const goodDefs = `<monitors>
-	<vars><var name="base">http://example.invalid</var></vars>
-	<monitor name="status-ok" description="the status endpoint says ok">
-		<arg name="svc" required="true"/>
-		<arg name="note"/>
-		<poll every="2s" timeout="1s">
-			<request method="get" transport="api">
-				<url><value name="var.base"/>/status/<value name="arg.svc"/></url>
-				<header name="Accept">application/json</header>
-			</request>
-		</poll>
-		<until>{{ eq .response.state "ok" }}</until>
-		<describe>state <value name="response.state"/></describe>
-	</monitor>
-	<monitor name="file-exists">
-		<arg name="path" required="true"/>
-		<poll every="1s"><argv>test</argv><argv>-e</argv><argv><value name="arg.path"/></argv></poll>
-	</monitor>
-	<monitor name="line">
-		<arg name="path" required="true"/>
-		<stream restart="3s"><argv>cat</argv><argv><value name="arg.path"/></argv></stream>
-		<until>{{ eq .line "READY" }}</until>
-	</monitor>
-</monitors>`
+//go:embed testdata/good-defs.xml
+var goodDefs string
 
 func TestParseMonitorDefs(t *testing.T) {
 	defs, err := ParseMonitorDefs([]byte(goodDefs))
