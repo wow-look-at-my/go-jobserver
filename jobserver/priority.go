@@ -1,5 +1,3 @@
-// PriorityKey is one row of the admission order.
-
 package jobserver
 
 import (
