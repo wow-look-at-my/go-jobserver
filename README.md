@@ -331,6 +331,9 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 
 - **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
 - **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
+- **Lease shaping.** An optional `LeaseFor(spec) LeaseRequest` method sets the `Class`, `Fallback`, `Group`, `Batch`, `GroupOnly`, `Policy` and `Limits` each task asks admission with. The lease ID stays the task ID, and the inbox's keys still order its tasks. An optional `OnQueue(taskID, QueueState)` method hears where each task waits for admission, then a zero `QueueState` when the task is admitted. It runs under the scheduler's lock. It must not block.
+- **Monitors.** With `Config.Monitors` set, the server opens the `monitor` inbox. `Server.Watch(spec, title)` adds a task that watches a condition, and a dependent task triggers on it. See [docs/monitors.md](docs/monitors.md).
+- **Why.** `Server.Why(id)` says what a task waits on. This covers a trigger or dependency, a monitor's last check, the run cap, a group, CPU, a consumer, a draft or a pause. `Explain`, `Summary`, `Graph` and `MonitorViews` give the same for every task. HTTP serves them at `/api/why/{id}`, `/api/graph`, `/api/monitors`, `/api/kinds` and `/api/scheduler`.
 - **Consumers.** `Bind` attaches one consumer. `Bind(name)` gives it a name. Each task it takes keeps that name in `ConsumerName`, through a restart and a compaction, after the consumer is gone. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns the queued task that sorts first by `Compare`, then by arrival, and waits for the admission of that task. An admitted task that sorts after it gives back its slot until it is taken. The task holds its slot until `Done`. `Lookup(id)` returns a task of the inbox, or `ErrNotFound`.
 - **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
 - **Task details.** A consumer reports on a task it holds through the inbox. `SetTitle(c, t, title)`, `Step(c, t, parent, title)`, `EndStep(c, t, step, status, msg)` and `RenameStep(c, t, step, title)` for named steps that nest, `OpenWait(c, t, reason)` and `CloseWait(c, t, wait)` for spans where the task waits, and `Log(c, t, line)` for its log. `SetOutcome(c, t, label)` sets a short label for the result, such as `skipped`, so a reader of `Tasks` tells the kind of result without the result. A `Run` method gets its task from `TaskFromContext(ctx)` and passes the empty `Consumer`. `EndStep` takes `succeeded`, `failed`, `skipped` or `abandoned`. A step that ends first ends each sub-step still open under it as `abandoned`, with the message "its parent step ended first". A step still open when the task ends becomes `abandoned`. Past its bound, a task drops its oldest closed step or wait, and `StepsDropped` and `WaitsDropped` count the drops. An open one never goes. A task whose held steps or waits are all open gets `ErrAllOpen`.
@@ -363,7 +366,10 @@ go-jobserver [global flags] <command> [args]
 
 run                          run the daemon in the foreground
 queue [flags] cmd...         enqueue a job and print its id
-list                         list jobs
+list                         list jobs, with what each one waits on
+why <id>                     say what a task waits on
+monitors                     list the monitors and the tasks that wait on each
+kinds                        list the monitor kinds the daemon loads
 status <id>                  show one job
 logs [-f] <id>               print a job's output
 activate <id>                move a draft job to active
@@ -375,7 +381,7 @@ stats                        show server counters, CPU use and active controls
 version                      print the version
 ```
 
-`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. With no command arguments, `queue` reads one command line from standard input.
+`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. `queue --monitor <kind> --arg name=value [--deadline d]` adds a monitor task instead of a command. `run --monitors <file.xml>` loads the monitor kinds. With no command arguments, `queue` reads one command line from standard input.
 
 Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--stats-url`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
 
