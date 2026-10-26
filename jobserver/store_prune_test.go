@@ -172,11 +172,10 @@ func TestCompactionThatStopsBeforeTheRenameKeepsTheJournal(t *testing.T) {
 	require.NoError(t, err)
 	gone := addEnded(t, st, "a")
 	kept := addQueued(t, st, "a")
-	compactHook = func(string) error { return errors.New("the process died here") }
-	t.Cleanup(func() { compactHook = nil })
+	st.compactHook = func(string) error { return errors.New("the process died here") }
 	_, err = st.Prune(time.Now().Add(2*time.Hour), time.Hour, 1000)
 	require.ErrorContains(t, err, "the process died here")
-	compactHook = nil
+	st.compactHook = nil
 	_, err = os.Stat(st.compactPath())
 	assert.True(t, errors.Is(err, os.ErrNotExist), "the half compaction is removed")
 	later := addQueued(t, st, "a")

@@ -48,6 +48,8 @@ type Store struct {
 	prunes uint64
 	// visits counts the tasks an index read looked at.
 	visits atomic.Int64
+	// compactHook lets a test stop a compaction at a stage. Nil in production.
+	compactHook func(stage string) error
 }
 
 // OpenStore opens (or creates) the server directory and replays its journal.

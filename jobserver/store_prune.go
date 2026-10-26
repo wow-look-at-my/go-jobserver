@@ -7,14 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/wow-look-at-my/go-containers/set"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 )
 
-// compactHook lets a test stop a compaction at a stage. Nil in production.
-var compactHook func(stage string) error
 
 func (s *Store) compactPath() string { return filepath.Join(s.dir, journalName+".compact") }
 
@@ -59,11 +58,11 @@ func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, er
 	if s.closed {
 		return nil, nil
 	}
-	needed := map[string]bool{}
+	needed := set.New[string]()
 	for _, ids := range s.idx.live {
 		for id := range ids.All() {
 			for _, d := range s.jobs[id].Deps {
-				needed[d] = true
+				needed.Add(d)
 			}
 		}
 	}
@@ -84,7 +83,7 @@ func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, er
 		})
 		left := len(ended)
 		for _, j := range ended {
-			if needed[j.ID] || s.waiters[j.ID] > 0 {
+			if needed.Contains(j.ID) || s.waiters[j.ID] > 0 {
 				continue
 			}
 			if left > count || now.Sub(endedAt(j)) > age {
@@ -97,10 +96,10 @@ func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, er
 		return nil, nil
 	}
 	s.prunes++
-	gone := make(map[string]bool, len(drop))
+	gone := set.New[string]()
 	var errs []error
 	for _, id := range drop {
-		gone[id] = true
+		gone.Add(id)
 		delete(s.jobs, id)
 		s.idx.remove(id)
 		if err := s.closeLog(id); err != nil {
@@ -112,7 +111,7 @@ func (s *Store) Prune(now time.Time, age time.Duration, count int) ([]string, er
 	}
 	order := s.order[:0]
 	for _, id := range s.order {
-		if !gone[id] {
+		if !gone.Contains(id) {
 			order = append(order, id)
 		}
 	}
@@ -166,8 +165,8 @@ func (s *Store) compactLocked() (err error) {
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	if compactHook != nil {
-		if err := compactHook("written"); err != nil {
+	if s.compactHook != nil {
+		if err := s.compactHook("written"); err != nil {
 			return err
 		}
 	}
