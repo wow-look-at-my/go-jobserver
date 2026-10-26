@@ -12,6 +12,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/wow-look-at-my/go-jobserver/spool"
 )
 
 // Config is how a server is built. The zero value is usable: DefaultConfig
@@ -106,8 +108,8 @@ type Server struct {
 	wg     sync.WaitGroup
 	start  time.Time
 	closes []io.Closer
-	// spoolStuck maps each unmovable spool file to its modification time. Only the spool watcher uses it.
-	spoolStuck map[string]int64
+	// spool is the job-file directory. Only the spool watcher uses it.
+	spool *spool.Store
 }
 
 // New opens the server's directory and replays its journal.
@@ -156,7 +158,6 @@ func New(cfg Config) (*Server, error) {
 		quit:     make(chan struct{}),
 		start:    time.Now(),
 
-		spoolStuck: make(map[string]int64),
 	}
 	if cfg.Scheduler != nil {
 		s.sched, s.gov = cfg.Scheduler, cfg.Scheduler.gov
