@@ -100,7 +100,9 @@ const (
 
 // MonitorEnv is what monitor checks run with.
 type MonitorEnv struct {
+	// Defs are the monitor kinds. SetDefs replaces them while monitors run.
 	Defs *MonitorDefs
+	mu   sync.RWMutex
 	// Transports are the named HTTP transports a <request transport="..."> may use. They carry credentials, so the XML never does.
 	Transports map[string]http.RoundTripper
 	// Vars override the document's vars by name.
@@ -108,6 +110,20 @@ type MonitorEnv struct {
 	// Now and Sleep are the clock. Sleep returns false when ctx ended first.
 	Now   func() time.Time
 	Sleep func(ctx context.Context, d time.Duration) bool
+}
+
+// SetDefs replaces the monitor kinds. A monitor already watching keeps the kind it started with.
+func (e *MonitorEnv) SetDefs(d *MonitorDefs) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.Defs = d
+}
+
+// Definitions returns the monitor kinds in use now.
+func (e *MonitorEnv) Definitions() *MonitorDefs {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.Defs
 }
 
 func (e *MonitorEnv) now() time.Time {
@@ -142,12 +158,13 @@ type checkResult struct {
 // the same cadence; it never reads as "not yet" and never ends the watch. It returns ctx.Err() when cancelled and
 // ErrMonitorDeadline at the deadline. started receives each process it starts, so the caller can govern it.
 func (e *MonitorEnv) Watch(ctx context.Context, spec MonitorSpec, out io.Writer, started func(pid int), report func(MonitorStatus)) error {
-	if err := e.Defs.Validate(spec); err != nil {
+	defs := e.Definitions()
+	if err := defs.Validate(spec); err != nil {
 		return err
 	}
-	k, _ := e.Defs.Kind(spec.Kind)
+	k, _ := defs.Kind(spec.Kind)
 	st := MonitorStatus{WatchingSince: e.now()}
-	data := map[string]any{"arg": stringMap(spec.Args), "var": apidsl.MergeVars(e.Defs.vars, e.Vars)}
+	data := map[string]any{"arg": stringMap(spec.Args), "var": apidsl.MergeVars(defs.vars, e.Vars)}
 	for {
 		if !spec.Deadline.IsZero() && !e.now().Before(spec.Deadline) {
 			fmt.Fprintf(out, "%s deadline %s passed after %d checks\n", stamp(e.now()), spec.Deadline.UTC().Format(time.RFC3339), st.Checks)

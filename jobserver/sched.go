@@ -86,7 +86,7 @@ type Scheduler struct {
 	groups  map[string]int
 	maxRuns int
 	// limits holds the declared cap and groups and the overrides; maxRuns and groups are what they make.
-	limits limitLayer
+	limits  limitLayer
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time

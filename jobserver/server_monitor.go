@@ -18,7 +18,7 @@ func (s *Server) checkMonitor(spec *Spec) error {
 	if s.cfg.Monitors == nil {
 		return fmt.Errorf("%w %q: this server loads no monitor definitions", ErrUnknownMonitorKind, spec.Monitor.Kind)
 	}
-	if err := s.cfg.Monitors.Defs.Validate(*spec.Monitor); err != nil {
+	if err := s.cfg.Monitors.Definitions().Validate(*spec.Monitor); err != nil {
 		return err
 	}
 	spec.Key = spec.Monitor.Key()
@@ -87,5 +87,5 @@ func (s *Server) MonitorKinds() []*MonitorKind {
 	if s.cfg.Monitors == nil {
 		return nil
 	}
-	return s.cfg.Monitors.Defs.Kinds()
+	return s.cfg.Monitors.Definitions().Kinds()
 }

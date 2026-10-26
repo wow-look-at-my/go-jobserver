@@ -49,8 +49,8 @@ type GroupInfo struct {
 	// Declared is the limit the host declared. Limit differs from it while Overridden.
 	Declared   int  `json:"declared"`
 	Overridden bool `json:"overridden,omitempty"`
-	Active  int    `json:"active"`
-	Waiting int    `json:"waiting"`
+	Active     int  `json:"active"`
+	Waiting    int  `json:"waiting"`
 }
 
 // SchedulerStatus is the scheduler's live state.
@@ -68,8 +68,8 @@ type SchedulerStatus struct {
 	// Batches are the batches the scheduler keeps open or has members of, by key.
 	Batches []BatchInfo `json:"batches"`
 	// Cap is the count cap's declared and override layers. MaxConcurrent is its effective value.
-	Cap LimitInfo `json:"cap"`
-	Groups   []GroupInfo `json:"groups"`
+	Cap    LimitInfo   `json:"cap"`
+	Groups []GroupInfo `json:"groups"`
 	// PriorityKeys is the admission order, compared top to bottom.
 	PriorityKeys []PriorityKey `json:"priority_keys"`
 }
