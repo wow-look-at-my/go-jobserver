@@ -50,6 +50,7 @@ github.com/stretchr/testify v1.11.1 git:2a57335dc9cd6833daa820bc94d9b40c26a7917d
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/yuin/goldmark v1.4.13/go.mod git:c0856327b39b00b39b5d7e1f5ed0eed8bb1b6a23
+github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 go.yaml.in/yaml/v3 v3.0.4/go.mod git:c3552c15f996075a7634df5159d9161c67bf3d76
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod git:c2843e01d9a2bc60bb26ad24e09734fdc2d9ec58
