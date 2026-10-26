@@ -23,16 +23,12 @@ type InboxPrioritizer interface {
 	InboxPriority() int
 }
 
-// InboxLeaser is the LeaseFor method an inbox type may have. With it, each task asks for admission with the request
-// LeaseFor returns. The scheduler reads its Class, Fallback, Group, Batch, GroupOnly, Policy and Limits. The ID is always
-// the task ID, and the inbox's keys still order its tasks. An empty Class or a nil Fallback takes the default.
+// InboxLeaser is the optional LeaseFor method. It shapes each task's lease. The ID stays the task ID, and the keys still order.
 type InboxLeaser[T iSpec] interface {
 	LeaseFor(spec T) LeaseRequest
 }
 
-// InboxQueueObserver is the OnQueue method an inbox type may have. It hears where each task waits for admission. When
-// the task is admitted, it hears a zero QueueState. It runs under the scheduler's lock: it must not block or call the
-// scheduler.
+// InboxQueueObserver is the optional OnQueue method. It hears each queue state, then a zero one at admission. It must not block.
 type InboxQueueObserver interface {
 	OnQueue(taskID string, q QueueState)
 }
