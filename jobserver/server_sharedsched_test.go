@@ -66,4 +66,14 @@ func TestARunReachesItsLease(t *testing.T) {
 	require.Nil(t, terr)
 	assert.Equal(t, task.ID, id)
 	assert.Nil(t, LeaseFromContext(context.Background()))
+
+	handle, err := srv.Task(task.ID)
+	require.NoError(t, err)
+	next, err := OnSuccess(handle, &in.Inbox, work(2))
+	require.NoError(t, err)
+	id, terr = in.Wait(context.Background(), next)
+	require.Nil(t, terr)
+	assert.Equal(t, next.ID, id, "a handle from Server.Task triggers a task in another call")
+	_, err = srv.Task("no-such-task")
+	assert.ErrorIs(t, err, ErrNotFound)
 }

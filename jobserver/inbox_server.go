@@ -210,6 +210,16 @@ func (s *Server) closeInboxes() {
 // job reads a task's job.
 func (s *Server) job(id string) (*Job, error) { return mustJob(s.store, id) }
 
+// Task returns a handle to the task with the ID, whatever its inbox, so
+// another task can trigger on it.
+func (s *Server) Task(id string) (*Task, error) {
+	j, err := mustJob(s.store, id)
+	if err != nil {
+		return nil, err
+	}
+	return &Task{ID: j.ID, b: s}, nil
+}
+
 // waitJob blocks until a task's job ends.
 func (s *Server) waitJob(ctx context.Context, id string) (*Job, error) {
 	if err := s.store.hold(id); err != nil {

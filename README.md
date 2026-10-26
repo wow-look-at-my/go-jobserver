@@ -330,7 +330,7 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 ```
 
 - **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
-- **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
+- **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task. `Server.Task(id)` gives a handle to any task by ID, to trigger on.
 - **Reprioritize.** `SetPriority(t, p)` replaces the priority of a task that is not admitted yet. A task that waits for admission goes back in line at its new place. An admitted task keeps its priority. The call fails with `ErrBadState`.
 - **Shared scheduler.** `Config.Scheduler` hands the server a scheduler the host already admits its own leases through. The tasks then share its slots, groups and CPU budget, and the host closes it. A `Run` method gets its lease from `LeaseFromContext(ctx)`.
 - **Lease shaping.** An optional `LeaseFor(spec) LeaseRequest` method sets the `Class`, `Fallback`, `Group`, `Batch`, `GroupOnly`, `Policy` and `Limits` each task asks admission with. The lease ID stays the task ID, and the inbox's keys still order its tasks. An optional `OnQueue(taskID, QueueState)` method hears where each task waits for admission, then a zero `QueueState` when the task is admitted. It runs under the scheduler's lock. It must not block.
