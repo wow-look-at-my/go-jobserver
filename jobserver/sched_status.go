@@ -84,7 +84,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	defer s.mu.Unlock()
 	now := s.now()
 	st := SchedulerStatus{MaxConcurrent: s.capLocked(), MaxConcurrentDeclared: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{},Groups: []GroupInfo{}, Batches: []BatchInfo{},
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
 		PriorityKeys: s.PriorityKeys()}
 	if s.capOverridden {
 		st.MaxConcurrentOverride = new(s.capOverride)

@@ -203,14 +203,14 @@ func Summary(jobs []*Job, waits map[string][]Wait) string {
 		return strings.Join(parts, ", ") + "; nothing waits"
 	}
 	words := map[string]string{
-		WaitMonitor: fmt.Sprintf("on %d %s", len(monitors), plural(len(monitors), "monitor", "monitors")),
+		WaitMonitor:  fmt.Sprintf("on %d %s", len(monitors), plural(len(monitors), "monitor", "monitors")),
 		WaitDep:      "on unfinished tasks",
 		WaitConsumer: "for a consumer",
-		WaitCap:     "for the run cap",
-		WaitGroup:   "for a group slot",
-		WaitCPU:     "for CPU",
-		WaitDraft:   "as drafts",
-		WaitPaused:  "because the server is paused",
+		WaitCap:      "for the run cap",
+		WaitGroup:    "for a group slot",
+		WaitCPU:      "for CPU",
+		WaitDraft:    "as drafts",
+		WaitPaused:   "because the server is paused",
 	}
 	kinds := make([]string, 0, len(byKind))
 	for k := range byKind {

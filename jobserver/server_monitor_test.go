@@ -375,7 +375,9 @@ func TestSummaryWords(t *testing.T) {
 // monitorLine says where a monitor stands for each status it can have.
 func TestMonitorLineWords(t *testing.T) {
 	spec := &MonitorSpec{Kind: "k"}
-	line := func(st State, ms *MonitorStatus) string { return monitorLine(&Job{State: st, Monitor: spec, MonitorStatus: ms}) }
+	line := func(st State, ms *MonitorStatus) string {
+		return monitorLine(&Job{State: st, Monitor: spec, MonitorStatus: ms})
+	}
 	assert.Equal(t, "monitor:k: starting", line(StateActive, nil))
 	assert.Equal(t, "monitor:k: no check has run yet", line(StateRunning, nil))
 	assert.Equal(t, "monitor:k: failed", line(StateFailed, nil))
