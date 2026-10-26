@@ -1,3 +1,5 @@
+// setFlag is a string flag that remembers being given, so an empty value still counts as a request.
+
 package main
 
 import (

@@ -1,3 +1,5 @@
+// The directory layout under a server directory:.
+
 package jobserver
 
 import (

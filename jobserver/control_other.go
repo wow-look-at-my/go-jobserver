@@ -1,5 +1,7 @@
 //go:build !unix
 
+// The process controls a host outside the Unix family does not offer through this binary's syscall layer.
+
 package jobserver
 
 import "errors"

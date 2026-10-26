@@ -1,3 +1,5 @@
+// printJob writes one job's fields.
+
 package main
 
 import (

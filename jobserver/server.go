@@ -1,3 +1,5 @@
+// Config is how a server is built.
+
 package jobserver
 
 import (

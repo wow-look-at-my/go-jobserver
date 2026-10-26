@@ -1,5 +1,7 @@
 //go:build !cosmo && !linux
 
+// The CPU mask calls a host outside the Linux family does not offer.
+
 package jobserver
 
 // The CPU mask calls a host outside the Linux family does not offer.

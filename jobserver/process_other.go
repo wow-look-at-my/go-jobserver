@@ -1,5 +1,7 @@
 //go:build !unix
 
+// prepareProcess leaves cancellation at its default: killing the command itself.
+
 package jobserver
 
 import "os/exec"

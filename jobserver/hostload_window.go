@@ -1,3 +1,5 @@
+// hostLoadWindow is how many samples the host-load gate reads.
+
 package jobserver
 
 import "slices"

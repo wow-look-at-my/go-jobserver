@@ -1,3 +1,5 @@
+// The wire API is one request shape and one response shape, carried by every transport.
+
 package jobserver
 
 import (

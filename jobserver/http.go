@@ -1,3 +1,5 @@
+// pages is parsed once; a parse failure is a build-time mistake, so it panics at first use rather than serving a broken page.
+
 package jobserver
 
 import (

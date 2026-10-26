@@ -1,3 +1,5 @@
+// ErrNoDaemon is returned when no daemon answers for the given directory.
+
 package jobserver
 
 import (

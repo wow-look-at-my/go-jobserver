@@ -1,3 +1,5 @@
+// The scheduler is pure: every function here reads a snapshot of the job table and returns what should happen next.
+
 package jobserver
 
 import (

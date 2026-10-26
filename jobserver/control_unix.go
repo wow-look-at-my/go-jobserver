@@ -1,5 +1,7 @@
 //go:build unix
 
+// The which and value arguments the priority call takes.
+
 package jobserver
 
 import "syscall"

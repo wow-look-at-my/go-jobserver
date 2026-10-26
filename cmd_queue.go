@@ -1,3 +1,5 @@
+// queue enqueues one job and prints its id, then waits for it when asked.
+
 package main
 
 import (
