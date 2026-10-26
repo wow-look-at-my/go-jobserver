@@ -470,6 +470,10 @@ func (s *Store) Start(id string) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
+	// An interrupt can cancel the job between the loop's read of the ready list and this start.
+	if j.State != StateActive {
+		return fmt.Errorf("%w: %s is %s, not active", ErrBadState, id, j.State)
+	}
 	j.State = StateRunning
 	j.Started = time.Now()
 	j.Attempts++

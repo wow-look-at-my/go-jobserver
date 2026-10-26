@@ -104,3 +104,17 @@ func TestSyncLogToleratesAFileThatClosedUnderIt(t *testing.T) {
 
 	assert.NoError(t, st.SyncLog("j-1"))
 }
+
+// An interrupt can cancel a job after the loop read it as ready. Its start must then refuse, or the cancelled job runs.
+func TestStartRefusesAJobThatIsNoLongerActive(t *testing.T) {
+	st, err := OpenStore(t.TempDir())
+	require.NoError(t, err)
+	defer st.Close()
+	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	require.NoError(t, err)
+	require.NoError(t, st.Finish("j-1", StateCancelled, -1, "interrupted", nil, 0))
+	require.ErrorIs(t, st.Start("j-1"), ErrBadState)
+	j, ok := st.Job("j-1")
+	require.True(t, ok)
+	assert.Equal(t, StateCancelled, j.State, "the refused start leaves the job cancelled")
+}
