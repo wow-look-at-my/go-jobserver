@@ -86,6 +86,10 @@ type Job struct {
 	Policy JobPolicy `json:"policy"`
 	// CPUSeconds is how much CPU the job's process tree used across its last run, measured by the daemon.
 	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+	// Monitor makes the job a monitor: it watches this condition instead of running a command, and completes when it holds.
+	Monitor *MonitorSpec `json:"monitor,omitempty"`
+	// MonitorStatus is what a running monitor's checks found so far. The server fills it; it is not journaled.
+	MonitorStatus *MonitorStatus `json:"monitor_status,omitempty"`
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.
@@ -130,6 +134,8 @@ type Spec struct {
 	Force bool `json:"force"`
 	// Policy declares the job's CPU cost and the controls the daemon may apply to its processes while it runs.
 	Policy JobPolicy `json:"policy"`
+	// Monitor makes the job a monitor. A monitor has no command.
+	Monitor *MonitorSpec `json:"monitor,omitempty"`
 }
 
 var (

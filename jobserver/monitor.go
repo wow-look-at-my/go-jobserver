@@ -28,6 +28,39 @@ type MonitorSpec struct {
 	Deadline time.Time `json:"deadline,omitzero"`
 }
 
+func (m MonitorSpec) clone() MonitorSpec {
+	out := m
+	if m.Args != nil {
+		out.Args = make(map[string]string, len(m.Args))
+		for k, v := range m.Args {
+			out.Args[k] = v
+		}
+	}
+	return out
+}
+
+// argList is the args as sorted "name=value" entries, the journal's form.
+func (m MonitorSpec) argList() []string {
+	out := make([]string, 0, len(m.Args))
+	for k, v := range m.Args {
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func argMap(list []string) map[string]string {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(list))
+	for _, kv := range list {
+		k, v, _ := strings.Cut(kv, "=")
+		out[k] = v
+	}
+	return out
+}
+
 // Key is the monitor's dedup key: the kind and its args in a fixed order.
 func (m MonitorSpec) Key() string {
 	names := make([]string, 0, len(m.Args))

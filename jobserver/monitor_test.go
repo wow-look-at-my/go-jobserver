@@ -73,14 +73,13 @@ func TestPollArgvExitRule(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "flag")
 	env := testEnv(t, goodDefs)
-	n := 0
+	var details []string
 	err := env.Watch(context.Background(), MonitorSpec{Kind: "file-exists", Args: map[string]string{"path": path}}, &bytes.Buffer{}, func(int) {}, func(s MonitorStatus) {
-		n++
-		assert.Equal(t, "exit 1", s.LastDetail, "exit 1 means not yet")
+		details = append(details, s.LastDetail)
 		require.NoError(t, os.WriteFile(path, nil, 0o644))
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, n, "the report after the holding check is the last one")
+	assert.Equal(t, []string{"exit 1", "exit 0"}, details, "exit 1 means not yet, exit 0 holds, and each check reports")
 }
 
 func TestPollArgvOtherExitIsAnError(t *testing.T) {

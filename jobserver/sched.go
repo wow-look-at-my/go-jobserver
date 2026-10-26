@@ -52,6 +52,10 @@ type SchedulerConfig struct {
 	RetryInterval time.Duration
 	// ErrorLogf receives the lines that name a configuration error the operator has to fix. Nil sends them to Logf.
 	ErrorLogf func(format string, args ...any)
+	// MonitorPolicy is the policy every monitor lease runs under from its first sample.
+	MonitorPolicy JobPolicy
+	// MonitorBudget is how many CPUs every monitor together may use before the governor freezes the heaviest in turn.
+	MonitorBudget float64
 }
 
 // The defaults for the governor's SchedulerConfig fields.
@@ -337,6 +341,10 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 	rank, err := s.priority.rank(req.Priority)
 	if err != nil {
 		return nil, err
+	}
+	if req.Monitor {
+		// A monitor runs under the monitor policy and costs nothing against the budget, whatever it asked for.
+		req.Policy, req.Group, req.Limits = s.monitorPolicy(), "", Limits{}
 	}
 	s.seq++
 	l := newLease(s, req, s.seq, s.now().UTC(), onQueue)

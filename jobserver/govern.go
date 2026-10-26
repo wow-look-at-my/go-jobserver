@@ -150,8 +150,10 @@ func (g *governor) tick() {
 	g.mu.Lock()
 	live := g.recordSampleLocked(targets, rates, reading, now)
 	errLine, okLine := g.watchHostLoadLocked(reading, now)
-	plan, limited, revoke := g.planLimitsLocked(live, now)
-	plan = append(plan, g.planBudgetLocked(live, reading, budget, now)...)
+	jobs, mons := splitMonitors(live)
+	plan, limited, revoke := g.planLimitsLocked(jobs, now)
+	plan = append(plan, g.planBudgetLocked(jobs, reading, budget, now)...)
+	plan = append(plan, g.planMonitorsLocked(mons, reading, now)...)
 	g.mu.Unlock()
 
 	if errLine != "" {

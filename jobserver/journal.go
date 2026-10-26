@@ -29,6 +29,7 @@ const (
 	recDeps     byte = 7
 	recPolicy   byte = 8
 	recCPU      byte = 9
+	recMonitor  byte = 10
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -76,6 +77,11 @@ type record struct {
 
 	// recCPU
 	cpuSeconds float64
+
+	// recMonitor
+	monitorKind string
+	monitorArgs []string
+	deadline    int64
 }
 
 // Encode returns the payload bytes of the record without its frame.
@@ -137,6 +143,11 @@ func (r record) encode() []byte {
 	case recCPU:
 		e.str(r.id)
 		e.f64(r.cpuSeconds)
+	case recMonitor:
+		e.str(r.id)
+		e.str(r.monitorKind)
+		e.list(r.monitorArgs)
+		e.i64(r.deadline)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
 	}
@@ -209,6 +220,11 @@ func decodeRecord(payload []byte) (record, error) {
 	case recCPU:
 		r.id = d.str()
 		r.cpuSeconds = d.f64()
+	case recMonitor:
+		r.id = d.str()
+		r.monitorKind = d.str()
+		r.monitorArgs = d.list()
+		r.deadline = d.i64()
 	default:
 		return record{kind: r.kind}, fmt.Errorf("%w %d", errUnknownRecord, r.kind)
 	}

@@ -138,6 +138,14 @@ func (s *Store) apply(r record) {
 		if j, ok := s.jobs[r.id]; ok {
 			j.CPUSeconds = r.cpuSeconds
 		}
+	case recMonitor:
+		if j, ok := s.jobs[r.id]; ok {
+			m := MonitorSpec{Kind: r.monitorKind, Args: argMap(r.monitorArgs)}
+			if r.deadline != 0 {
+				m.Deadline = time.Unix(0, r.deadline)
+			}
+			j.Monitor = &m
+		}
 	}
 }
 
@@ -242,7 +250,15 @@ func (s *Store) SetPaused(paused bool) error {
 func (s *Store) Create(spec *Spec) (*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(spec.Command) == 0 {
+	switch {
+	case spec.Monitor != nil && len(spec.Command) > 0:
+		return nil, fmt.Errorf("%w: a monitor job watches its monitor and runs no command", ErrBadMonitorArgs)
+	case spec.Monitor != nil:
+		spec.Key = spec.Monitor.Key()
+		if spec.Name == "" {
+			spec.Name = spec.Key
+		}
+	case len(spec.Command) == 0:
 		return nil, ErrNoCommand
 	}
 	id := CanonicalID(spec.ID)
@@ -293,6 +309,17 @@ func (s *Store) Create(spec *Spec) (*Job, error) {
 		if err := s.commit(record{kind: recPolicy, id: j.ID, policy: j.Policy}); err != nil {
 			return nil, err
 		}
+	}
+	if spec.Monitor != nil {
+		m := spec.Monitor.clone()
+		var deadline int64
+		if !m.Deadline.IsZero() {
+			deadline = m.Deadline.UnixNano()
+		}
+		if err := s.commit(record{kind: recMonitor, id: j.ID, monitorKind: m.Kind, monitorArgs: m.argList(), deadline: deadline}); err != nil {
+			return nil, err
+		}
+		j.Monitor = &m
 	}
 	s.jobs[j.ID] = j
 	s.order = append(s.order, j.ID)
@@ -626,6 +653,14 @@ func (j *Job) clone() *Job {
 	c.Env = append([]string(nil), j.Env...)
 	c.Artifacts = append([]Artifact(nil), j.Artifacts...)
 	c.Policy = j.Policy.clone()
+	if j.Monitor != nil {
+		m := j.Monitor.clone()
+		c.Monitor = &m
+	}
+	if j.MonitorStatus != nil {
+		ms := *j.MonitorStatus
+		c.MonitorStatus = &ms
+	}
 	return &c
 }
 

@@ -47,6 +47,8 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
+	// Monitors runs the monitor jobs. Nil means the server knows no monitor kind, and a monitor job is refused.
+	Monitors *MonitorEnv
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -90,6 +92,8 @@ type Server struct {
 	mu      sync.Mutex
 	running map[string]*runHandle
 	closed  bool
+	// watching holds each running monitor's last status, by job ID.
+	watching map[string]MonitorStatus
 
 	wake   chan struct{}
 	quit   chan struct{}
@@ -140,7 +144,8 @@ func New(cfg Config) (*Server, error) {
 		cfg:     cfg,
 		store:   st,
 		runner:  cfg.Runner,
-		running: make(map[string]*runHandle),
+		running:  make(map[string]*runHandle),
+		watching: make(map[string]MonitorStatus),
 		wake:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		start:   time.Now(),
@@ -350,7 +355,8 @@ func (s *Server) tick() {
 			if err := s.store.SetIdentity(id, identity, ""); err != nil {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
-			if !j.Force {
+			// A monitor never answers from the cache: its condition can turn false again.
+			if !j.Force && j.Monitor == nil {
 				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" && s.reuse(j, src, identity) {
 					continue
 				}
@@ -373,6 +379,9 @@ func (s *Server) tick() {
 func (s *Server) leaseFor(j *Job) LeaseRequest {
 	policy := j.Policy.clone()
 	policy.Cost = j.ExpectedCost(0)
+	if j.Monitor != nil {
+		return LeaseRequest{ID: j.ID, Class: j.Name, Monitor: true}
+	}
 	return LeaseRequest{ID: j.ID, Class: j.Name, Policy: policy}
 }
 
@@ -488,7 +497,7 @@ func (s *Server) runOnce(ctx context.Context, j *Job, h *runHandle, started func
 		s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
-	code, runErr := s.runner.Run(ctx, j, w, started)
+	code, runErr := s.run(ctx, j, w, started)
 	if err := w.Sync(); err != nil {
 		s.cfg.Logf("go-jobserver: sync log %s: %v", j.ID, err)
 	}
@@ -527,6 +536,9 @@ func (s *Server) finish(id string, st State, code int, msg string, artifacts []A
 // Enqueue adds a job. When the spec carries a key that an unfinished job
 // already holds, that job is returned instead and nothing is added.
 func (s *Server) Enqueue(spec Spec) (*Job, bool, error) {
+	if err := s.checkMonitor(&spec); err != nil {
+		return nil, false, err
+	}
 	if spec.Key != "" && !spec.Force {
 		for _, j := range s.store.Jobs() {
 			if j.Key == spec.Key && !j.State.Terminal() {
@@ -629,10 +641,16 @@ func (s *Server) InterruptAll() int {
 }
 
 // List returns every job in creation order.
-func (s *Server) List() []*Job { return s.store.Jobs() }
+func (s *Server) List() []*Job { return s.withStatus(s.store.Jobs()) }
 
 // Get returns one job.
-func (s *Server) Get(id string) (*Job, error) { return mustJob(s.store, id) }
+func (s *Server) Get(id string) (*Job, error) {
+	j, err := mustJob(s.store, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.withStatus([]*Job{j})[0], nil
+}
 
 // Logs returns up to max bytes of a job's output starting at offset.
 func (s *Server) Logs(id string, offset int64, max int) ([]byte, error) {
@@ -640,51 +658,6 @@ func (s *Server) Logs(id string, offset int64, max int) ([]byte, error) {
 		return nil, err
 	}
 	return s.store.ReadLog(id, offset, max)
-}
-
-// Stats summarizes the job table.
-type Stats struct {
-	Dir      string         `json:"dir"`
-	Paused   bool           `json:"paused"`
-	Uptime   string         `json:"uptime"`
-	Running  int            `json:"running"`
-	Total    int            `json:"total"`
-	ByState  map[string]int `json:"by_state"`
-	PID      int            `json:"pid"`
-	Started  time.Time      `json:"started"`
-	Revision string         `json:"version"`
-	// CPU is what the daemon last measured, and what it did about it.
-	CPU CPUReport `json:"cpu"`
-	// Controls lists the process controls in effect right now.
-	Controls []Control `json:"controls,omitempty"`
-}
-
-// Stats reports the server's current shape.
-func (s *Server) Stats() Stats {
-	jobs := s.store.Jobs()
-	st := Stats{
-		Dir:      s.cfg.Dir,
-		Paused:   s.store.Paused(),
-		Uptime:   time.Since(s.start).Round(time.Second).String(),
-		Total:    len(jobs),
-		ByState:  map[string]int{},
-		PID:      os.Getpid(),
-		Started:  s.start,
-		Revision: Revision,
-	}
-	for _, j := range jobs {
-		st.ByState[string(j.State)]++
-	}
-	s.mu.Lock()
-	st.Running = len(s.running)
-	s.mu.Unlock()
-	if s.cfg.DisableCPU {
-		st.CPU = CPUReport{Budget: s.sched.Budget(), CPUs: s.cfg.cpuCount(), Note: "cpu sampling is off"}
-		return st
-	}
-	st.CPU = s.gov.report()
-	st.Controls = s.gov.controls()
-	return st
 }
 
 // SchedulerStatus reports what holds a slot, what waits and why.

@@ -84,6 +84,18 @@ func (s *Store) recoverLogs() error {
 		default:
 			return err
 		}
+		if j.State == StateRunning && j.Monitor != nil {
+			// A check has no side effects, so a monitor watches again instead of failing its dependents.
+			j.State = StateActive
+			j.Error = "resumed after a daemon restart"
+			if err := s.append(record{kind: recState, id: id, state: StateActive, errMsg: j.Error}); err != nil {
+				return err
+			}
+			if err := s.sync(); err != nil {
+				return err
+			}
+			continue
+		}
 		if j.State == StateRunning {
 			j.State = StateFailed
 			j.Error = "interrupted by daemon restart"

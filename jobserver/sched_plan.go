@@ -81,6 +81,9 @@ type planState struct {
 func (s *Scheduler) planStateLocked() *planState {
 	p := &planState{budget: s.budgetLocked(), inGroup: map[string]int{}}
 	for _, h := range s.holding {
+		if h.req.Monitor {
+			continue
+		}
 		if h.req.Group != "" {
 			p.inGroup[h.req.Group]++
 		}
@@ -98,6 +101,10 @@ func (s *Scheduler) planStateLocked() *planState {
 // fitLocked says whether a lease for req at cost starts against p, and where
 // it waits when it does not. It is the place the admission gates live.
 func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (QueueState, bool) {
+	// A monitor always starts. The governor throttles it instead.
+	if req.Monitor {
+		return QueueState{}, true
+	}
 	if g := req.Group; g != "" {
 		if limit := s.groups[g]; p.inGroup[g] >= limit {
 			return QueueState{Kind: WaitGroup, Key: g,
@@ -129,6 +136,9 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 
 // take counts a granted lease in p.
 func (p *planState) take(req LeaseRequest, cost float64) {
+	if req.Monitor {
+		return
+	}
 	if !req.GroupOnly {
 		p.running++
 		p.reserved += cost
@@ -183,7 +193,7 @@ func (s *Scheduler) sampled(cpus, runnable int) {
 func (s *Scheduler) holderIDsLocked(st QueueState) []string {
 	var out []string
 	for _, h := range s.holding {
-		if h.req.ID == "" {
+		if h.req.ID == "" || h.req.Monitor {
 			continue
 		}
 		if st.Kind == WaitGroup {

@@ -46,6 +46,8 @@ type SchedulerStatus struct {
 	Reserved float64     `json:"reserved"`
 	Holding  []LeaseInfo `json:"holding"`
 	Waiting  []LeaseInfo `json:"waiting"`
+	// Monitors are the monitor leases. They hold no slot, so Holding and Running leave them out.
+	Monitors []LeaseInfo `json:"monitors"`
 	Groups   []GroupInfo `json:"groups"`
 	// PriorityKeys is the admission order, compared top to bottom.
 	PriorityKeys []PriorityKey `json:"priority_keys"`
@@ -57,12 +59,16 @@ func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := SchedulerStatus{MaxConcurrent: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, PriorityKeys: s.PriorityKeys()}
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, PriorityKeys: s.PriorityKeys()}
 	groups := map[string]*GroupInfo{}
 	for name, limit := range s.groups {
 		groups[name] = &GroupInfo{Name: name, Limit: limit}
 	}
 	for _, l := range s.holding {
+		if l.req.Monitor {
+			st.Monitors = append(st.Monitors, l.info(nil))
+			continue
+		}
 		st.Holding = append(st.Holding, l.info(nil))
 		if !l.req.GroupOnly {
 			st.Running++
