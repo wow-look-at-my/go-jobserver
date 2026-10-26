@@ -30,13 +30,10 @@ func startDaemon(t *testing.T, dir string) *jobserver.Server {
 	t.Helper()
 	cfg := jobserver.DefaultConfig(dir)
 	cfg.HTTPAddr = ""
-	cfg.SpoolDir = filepath.Join(dir, "spool")
-	cfg.SpoolInterval = 10 * time.Millisecond
-	srv, err := jobserver.New(cfg)
+	d, err := openDaemon(cfg, filepath.Join(dir, "spool"), 10*time.Millisecond)
 	require.NoError(t, err)
-	require.NoError(t, srv.Start())
-	t.Cleanup(func() { srv.Close() })
-	return srv
+	t.Cleanup(func() { d.Close() })
+	return d.srv
 }
 
 // capture runs the CLI and returns what it wrote to stdout.
@@ -270,12 +267,9 @@ func TestCLIQueueOverIPC(t *testing.T) {
 	cfg.HTTPAddr = ""
 	// No socket: the client has to reach the daemon over its ipc service.
 	cfg.UnixSocket = ""
-	cfg.SpoolDir = filepath.Join(dir, "spool")
-	cfg.SpoolInterval = 10 * time.Millisecond
-	srv, err := jobserver.New(cfg)
+	d, err := openDaemon(cfg, filepath.Join(dir, "spool"), 10*time.Millisecond)
 	require.NoError(t, err)
-	require.NoError(t, srv.Start())
-	t.Cleanup(func() { srv.Close() })
+	t.Cleanup(func() { d.Close() })
 
 	out, errText, err := captureBoth(t, func() error {
 		return run([]string{"--dir", dir, "queue", "--wait", "--", "sh", "-c", "echo over-ipc"})
@@ -488,4 +482,24 @@ func TestCLIStatsPrintsTheCPUReport(t *testing.T) {
 	assert.Contains(t, out, "budget")
 	assert.Contains(t, out, "measured")
 	assert.Contains(t, out, "host")
+}
+
+func TestSpoolDirFollowsTheFlags(t *testing.T) {
+	g := &globals{dir: "/srv/goj"}
+	assert.Equal(t, filepath.Join("/srv/goj", "spool"), g.spoolDir(g.config()))
+	g.spool = "/elsewhere"
+	assert.Equal(t, "/elsewhere", g.spoolDir(g.config()))
+	g.noSpool = true
+	assert.Empty(t, g.spoolDir(g.config()))
+}
+
+func TestDaemonWithNoSpoolOpensNone(t *testing.T) {
+	dir := shortDir(t)
+	cfg := jobserver.DefaultConfig(dir)
+	cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
+	d, err := openDaemon(cfg, "", time.Second)
+	require.NoError(t, err)
+	assert.Nil(t, d.spool)
+	require.NoError(t, d.Close())
+	assert.NoDirExists(t, filepath.Join(dir, "spool"))
 }

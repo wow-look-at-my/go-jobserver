@@ -3,6 +3,7 @@
 package jobserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -190,6 +191,34 @@ type CommandResult struct {
 	LogBytes  int64      `json:"log_bytes"`
 	// CacheOf names the task whose outputs this reused.
 	CacheOf string `json:"cache_of,omitempty"`
+}
+
+// UnmarshalJSON reads a spec object, an argv array, or a string that holds a command line.
+func (c *CommandSpec) UnmarshalJSON(b []byte) error {
+	text := bytes.TrimSpace(b)
+	if len(text) > 0 && text[0] == '[' {
+		var argv []string
+		if err := json.Unmarshal(text, &argv); err != nil {
+			return err
+		}
+		*c = CommandSpec{Command: argv}
+		return nil
+	}
+	if len(text) > 0 && text[0] == '"' {
+		var line string
+		if err := json.Unmarshal(text, &line); err != nil {
+			return err
+		}
+		return c.UnmarshalText([]byte(line))
+	}
+	type plain CommandSpec
+	return json.Unmarshal(b, (*plain)(c))
+}
+
+// UnmarshalText reads a command line. Whitespace separates the words.
+func (c *CommandSpec) UnmarshalText(text []byte) error {
+	*c = CommandSpec{Command: splitCommand(string(text))}
+	return nil
 }
 
 // toSpec is the job spec of a command task.

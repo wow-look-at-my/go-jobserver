@@ -329,7 +329,7 @@ func TestJournalReplaysInboxTasksAfterARestart(t *testing.T) {
 	dir := t.TempDir()
 	open := func() *Server {
 		cfg := DefaultConfig(dir)
-		cfg.HTTPAddr, cfg.UnixSocket, cfg.SpoolDir, cfg.IPC = "", "", "", false
+		cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
 		srv, err := New(cfg)
 		require.NoError(t, err)
 		require.NoError(t, srv.Start())
@@ -381,7 +381,7 @@ func TestJournalReplaysInboxTasksAfterARestart(t *testing.T) {
 func TestRunInboxResumesAfterARestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig(dir)
-	cfg.HTTPAddr, cfg.UnixSocket, cfg.SpoolDir, cfg.IPC = "", "", "", false
+	cfg.HTTPAddr, cfg.UnixSocket, cfg.IPC = "", "", false
 	srv, err := New(cfg)
 	require.NoError(t, err)
 	queued, err := srv.addNamed("run", []byte(`{"title":"later","n":4}`), nil, "", "")

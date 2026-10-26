@@ -82,13 +82,17 @@ The CLI prefers the file socket and falls back to the go-ipc service, so any pro
 
 ### Spool files
 
-A file dropped into the spool directory becomes a job and is then moved to `spool/done/`. A file that cannot be read moves to `spool/failed/` with a `.error` sidecar. A file that cannot be moved stays in the spool. The daemon logs that once, and reads the file again only after it changes.
+The daemon opens a `spool.Spool` on its default inbox. A file dropped into the spool directory becomes a task. When the task succeeds, the file moves to `spool/done/`. When the task fails, or the inbox refuses the spec, the file moves to `spool/failed/` with a `.error` sidecar that holds the reason. A file that does not decode is renamed to `<name>.corrupt`, with the reason in `<name>.corrupt.error`. A file that cannot be moved stays in the spool.
 
-- `deploy.json` - a full spec: `{"name":"deploy","command":["make","deploy"],"outputs":["bin/app"]}`
+The daemon logs that once, and reads the file again only after it changes. At start, the files that wait are added oldest first. A task with no title gets the file name without its extension.
+
+- `deploy.json` - a full spec: `{"title":"deploy","command":["make","deploy"],"outputs":["bin/app"]}`
 - `list.json` - a bare argv array: `["ls","-l"]`
 - `backup.cmd` - one command line: `tar czf /backup.tgz /srv` The `command` field also accepts a single string, which is split on whitespace.
 
-Write spool files to a temporary name and rename them into place: a file is read as soon as it appears.
+Write spool files to a temporary name that starts with a dot, and rename them into place. A file is read as soon as it appears, and the spool skips dot files.
+
+The `spool` package works on any inbox. `spool.Open(dir, inbox)` finds the inbox's `AddTask` method through reflection and decodes each file as JSON into its spec type. A spec type with an `UnmarshalText` method also reads a body that is not JSON. `Park(spec)` writes a spec into the spool atomically, and refuses with `spool.ErrFull` at a bound (`WithBounds`, `SetBounds`). A spec that an inbox refuses with `jobserver.ErrStopped` stays in the spool for the next start.
 
 ### HTTP API
 
@@ -412,6 +416,7 @@ go-toolchain
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |
-| `jobserver/spool.go` | the spool directory watcher |
+| `spool/` | the spool: a watched directory of spec files that become tasks of one inbox, and Park, which writes one |
+| `daemon.go` | the daemon: the server and the spool on its default inbox |
 | `jobserver/graph.go` | each job's dependency depth and its children, for the dashboard and `list` |
 | `jobserver/client.go` | the client the CLI and other programs use |

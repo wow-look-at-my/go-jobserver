@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -90,12 +91,6 @@ func (g *globals) config() jobserver.Config {
 	if g.noSocket {
 		cfg.UnixSocket = ""
 	}
-	if g.spool != "" {
-		cfg.SpoolDir = g.spool
-	}
-	if g.noSpool {
-		cfg.SpoolDir = ""
-	}
 	if g.jobs > 0 {
 		cfg.MaxConcurrent = g.jobs
 	}
@@ -112,6 +107,17 @@ func (g *globals) config() jobserver.Config {
 	cfg.StatsURL = g.statsURL
 	cfg.IPC = g.ipc
 	return cfg
+}
+
+// spoolDir is the spool directory for these flags. It is empty with --no-spool.
+func (g *globals) spoolDir(cfg jobserver.Config) string {
+	switch {
+	case g.noSpool:
+		return ""
+	case g.spool != "":
+		return g.spool
+	}
+	return filepath.Join(cfg.Dir, "spool")
 }
 
 // client dials the daemon for these flags.

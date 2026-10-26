@@ -8,8 +8,8 @@ import (
 )
 
 // The wire API is one request shape and one response shape, carried by every
-// transport. The go-ipc service, the file socket, the HTTP server and the
-// spool watcher all end up in Server.Handle.
+// transport. The go-ipc service, the file socket and the HTTP server all end
+// up in Server.Handle.
 const (
 	// Deprecated: use OpInboxAdd on the default inbox. OpEnqueue adds a job.
 	OpEnqueue      = "enqueue"

@@ -21,8 +21,6 @@ type Config struct {
 	Dir string
 	// MaxConcurrent bounds how many jobs run at once. Zero means one per CPU.
 	MaxConcurrent int
-	// SpoolDir is watched for job files. Empty disables the watch.
-	SpoolDir string
 	// HTTPAddr is the dashboard and JSON API address. Empty disables it.
 	HTTPAddr string
 	// UnixSocket is the file socket path. Empty disables it.
@@ -31,8 +29,6 @@ type Config struct {
 	IPCName string
 	// IPC enables the go-ipc service over the name derived from Dir.
 	IPC bool
-	// SpoolInterval is how often the spool directory is scanned.
-	SpoolInterval time.Duration
 	// SyncInterval is how often running job logs are flushed to disk.
 	SyncInterval time.Duration
 	// CPUBudget is how many CPUs the running jobs may use together. Zero means one per CPU.
@@ -65,11 +61,9 @@ func DefaultConfig(dir string) Config {
 	return Config{
 		Dir:            dir,
 		MaxConcurrent:  runtime.NumCPU(),
-		SpoolDir:       filepath.Join(dir, "spool"),
 		HTTPAddr:       "127.0.0.1:8059",
 		UnixSocket:     filepath.Join(dir, "go-jobserver.sock"),
 		IPC:            true,
-		SpoolInterval:  250 * time.Millisecond,
 		SyncInterval:   time.Second,
 		CPUBudget:      float64(runtime.NumCPU()),
 		DefaultCost:    1,
@@ -96,8 +90,6 @@ type Server struct {
 	wg     sync.WaitGroup
 	start  time.Time
 	closes []io.Closer
-	// spoolStuck maps each unmovable spool file to its modification time. Only the spool watcher uses it.
-	spoolStuck map[string]int64
 	// inboxes are the named inboxes open in this process, under mu.
 	inboxes map[string]*inboxCore
 	def     *Inbox[*CommandSpec, CommandResult]
@@ -123,9 +115,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Runner == nil {
 		cfg.Runner = ExecRunner{}
 	}
-	if cfg.SpoolInterval <= 0 {
-		cfg.SpoolInterval = 250 * time.Millisecond
-	}
 	if cfg.SyncInterval <= 0 {
 		cfg.SyncInterval = time.Second
 	}
@@ -150,10 +139,8 @@ func New(cfg Config) (*Server, error) {
 		wake:    make(chan struct{}, 1),
 		quit:    make(chan struct{}),
 		start:   time.Now(),
-
-		spoolStuck: make(map[string]int64),
-		inboxes:    make(map[string]*inboxCore),
-		errs:       make(map[string]error),
+		inboxes: make(map[string]*inboxCore),
+		errs:    make(map[string]error),
 	}
 	s.sched = NewScheduler(SchedulerConfig{
 		MaxConcurrent:  cfg.MaxConcurrent,
@@ -195,10 +182,6 @@ func (s *Server) Start() error {
 	s.wg.Add(1)
 	go s.syncLoop()
 	s.sched.Start()
-	if s.cfg.SpoolDir != "" {
-		s.wg.Add(1)
-		go s.watchSpool()
-	}
 	if err := s.startUnix(); err != nil {
 		s.Close()
 		return err
