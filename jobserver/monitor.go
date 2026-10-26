@@ -1,4 +1,4 @@
-// Monitors: a job kind that checks a declared condition until it holds. A monitor triggers nothing. A job that must wait for the condition depends on the monitor.
+// Monitors: a task kind that checks a declared condition until it holds. A task that must wait for the condition triggers on the monitor task.
 
 package jobserver
 
@@ -35,28 +35,6 @@ func (m MonitorSpec) clone() MonitorSpec {
 		for k, v := range m.Args {
 			out.Args[k] = v
 		}
-	}
-	return out
-}
-
-// argList is the args as sorted "name=value" entries, the journal's form.
-func (m MonitorSpec) argList() []string {
-	out := make([]string, 0, len(m.Args))
-	for k, v := range m.Args {
-		out = append(out, k+"="+v)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func argMap(list []string) map[string]string {
-	if len(list) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(list))
-	for _, kv := range list {
-		k, v, _ := strings.Cut(kv, "=")
-		out[k] = v
 	}
 	return out
 }
@@ -294,7 +272,7 @@ func (e *MonitorEnv) request(ctx context.Context, r *monitorRequest, data map[st
 		return nil, fmt.Errorf("read the response: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return nil, fmt.Errorf("%s %s answered %d: %s", r.method, req.URL.Redacted(), res.StatusCode, clip(string(raw), 200))
+		return nil, fmt.Errorf("%s %s answered %d: %s", r.method, req.URL.Redacted(), res.StatusCode, clipN(string(raw), 200))
 	}
 	var parsed any = string(raw)
 	var v any
@@ -343,7 +321,7 @@ func (e *MonitorEnv) argvCheck(ctx context.Context, k *MonitorKind, data map[str
 		r.holds = code == 0
 		return r
 	}
-	return checkResult{err: fmt.Errorf("%s exited %d, which is neither 0 (holds) nor 1 (not yet): %s", argv[0], code, clip(strings.TrimSpace(stderr.String()), 200))}
+	return checkResult{err: fmt.Errorf("%s exited %d, which is neither 0 (holds) nor 1 (not yet): %s", argv[0], code, clipN(strings.TrimSpace(stderr.String()), 200))}
 }
 
 // stream runs one <stream> process and tests each stdout line. It returns when a line holds, the process exits,
@@ -376,7 +354,7 @@ func (e *MonitorEnv) stream(ctx context.Context, k *MonitorKind, data map[string
 	for sc.Scan() {
 		line := sc.Text()
 		st.Checks++
-		r := e.judge(k, withResult(data, map[string]any{"line": line}), clip(line, 200))
+		r := e.judge(k, withResult(data, map[string]any{"line": line}), clipN(line, 200))
 		if r.err != nil || r.holds {
 			cancel()
 			_ = cmd.Wait()
@@ -394,7 +372,7 @@ func (e *MonitorEnv) stream(ctx context.Context, k *MonitorKind, data map[string
 	if scanErr := sc.Err(); scanErr != nil {
 		return checkResult{err: fmt.Errorf("read %s: %w", argv[0], scanErr)}
 	}
-	return checkResult{err: fmt.Errorf("%s exited (%v) before a line held; it restarts in %s: %s", argv[0], err, k.Every, clip(strings.TrimSpace(stderr.String()), 200))}
+	return checkResult{err: fmt.Errorf("%s exited (%v) before a line held; it restarts in %s: %s", argv[0], err, k.Every, clipN(strings.TrimSpace(stderr.String()), 200))}
 }
 
 // judge evaluates <until> and <describe> against a check's data.
@@ -443,7 +421,8 @@ func withResult(base, extra map[string]any) map[string]any {
 	return out
 }
 
-func clip(s string, n int) string {
+// clipN cuts s to n bytes and marks the cut.
+func clipN(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}

@@ -1,17 +1,19 @@
-// The views that answer "what runs, what watches, and why does this wait": the job graph, the monitors, the waits.
+// The views that answer "what runs, what watches, and why does this wait": the task graph, the monitors, the waits.
 
 package jobserver
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 )
 
-// GraphNode is one job in the graph view.
+// GraphNode is one task in the graph view.
 type GraphNode struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	// Kind is "monitor", "job", or a host task's kind.
+	// Kind is "monitor" for a monitor task, "job" for a task of the default inbox, and the inbox name otherwise.
 	Kind  string `json:"kind"`
 	State State  `json:"state"`
 	// Waiting says what the job waits on, one line per wait. It is empty for a job that runs or has ended.
@@ -38,14 +40,15 @@ type JobGraph struct {
 func (s *Server) Graph() JobGraph {
 	jobs := SortedJobs(s.List())
 	waits := s.Explain()
+	byID := Index(jobs)
 	g := JobGraph{Summary: Summary(jobs, waits), Nodes: []GraphNode{}, Edges: []GraphEdge{}}
 	for _, j := range jobs {
 		n := GraphNode{ID: j.ID, Label: jobLabel(j), Kind: "job", State: j.State}
 		switch {
 		case j.Monitor != nil:
 			n.Kind, n.Label, n.Status = "monitor", j.Monitor.Key(), monitorLine(j)
-		case j.Task != nil:
-			n.Kind = j.Task.Kind
+		case j.Inbox != "":
+			n.Kind = j.Inbox
 		}
 		for _, w := range waits[j.ID] {
 			n.Waiting = append(n.Waiting, w.Detail)
@@ -53,8 +56,11 @@ func (s *Server) Graph() JobGraph {
 		g.Nodes = append(g.Nodes, n)
 		for _, d := range j.Deps {
 			label := "before"
-			if dep, ok := Index(jobs)[d]; ok && dep.Monitor != nil {
+			switch dep, ok := byID[d]; {
+			case ok && dep.Monitor != nil:
 				label = "gates"
+			case j.Trigger != "":
+				label = "on " + j.Trigger
 			}
 			g.Edges = append(g.Edges, GraphEdge{From: d, To: j.ID, Label: label})
 		}
@@ -97,10 +103,6 @@ func (s *Server) MonitorViews() []MonitorView {
 
 // viewRoutes adds the view routes to the HTTP API.
 func (s *Server) viewRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /dashboard.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		http.ServeFileFS(w, r, dashboardFiles, "dashboard.js")
-	})
 	mux.HandleFunc("GET /api/graph", func(w http.ResponseWriter, r *http.Request) {
 		g := s.Graph()
 		writeJSON(w, Response{OK: true, Graph: &g, Summary: g.Summary})
@@ -124,7 +126,20 @@ func (s *Server) viewRoutes(mux *http.ServeMux) {
 	})
 }
 
-// handleView answers the view ops. It reports false for any other op.
+// watchResponse runs Watch for a remote caller.
+func (s *Server) watchResponse(spec MonitorSpec, title string) Response {
+	t, existing, err := s.Watch(spec, title)
+	if err != nil {
+		return Failure(err)
+	}
+	j, err := s.Get(t.ID)
+	if err != nil {
+		return Failure(err)
+	}
+	return Response{OK: true, Job: j, Existing: existing}
+}
+
+// handleView answers the view ops and the watch ops. It reports false for any other op.
 func (s *Server) handleView(req Request) (Response, bool) {
 	switch req.Op {
 	case OpMonitors:
@@ -144,6 +159,23 @@ func (s *Server) handleView(req Request) (Response, bool) {
 	case OpScheduler:
 		st := s.SchedulerStatus()
 		return Response{OK: true, Scheduler: &st}, true
+	case OpWatch:
+		if req.Monitor == nil {
+			return Failure(fmt.Errorf("%w: watch needs a monitor", ErrBadState)), true
+		}
+		return s.watchResponse(*req.Monitor, req.Title), true
+	case OpInboxAdd:
+		if req.Inbox != MonitorInboxName {
+			return Response{}, false
+		}
+		var m monitorTask
+		if err := json.Unmarshal(req.Task, &m); err != nil {
+			return Failure(fmt.Errorf("%w: monitor task: %v", ErrBadState, err)), true
+		}
+		if req.On != "" {
+			return Failure(fmt.Errorf("%w: a monitor task takes no trigger", ErrBadState)), true
+		}
+		return s.watchResponse(m.Monitor, m.Title), true
 	}
 	return Response{}, false
 }

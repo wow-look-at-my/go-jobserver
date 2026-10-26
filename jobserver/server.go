@@ -43,6 +43,11 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
+	// Monitors runs the tasks of the monitor inbox. Nil means the server knows no monitor kind and opens no monitor inbox.
+	Monitors *MonitorEnv
+	// MonitorPolicy and MonitorBudget go to the scheduler's fields of the same names.
+	MonitorPolicy JobPolicy
+	MonitorBudget float64
 	// Retention is how long the server keeps an ended task, its result and its log. Zero means DefaultRetention.
 	Retention time.Duration
 	// RetainCount is how many ended tasks the server keeps per inbox. Zero means DefaultRetainCount.
@@ -108,6 +113,10 @@ type Server struct {
 	stopped bool
 	// errs holds the error each failed task ended with in this process.
 	errs map[string]error
+	// watching holds the last status of each running monitor, by task ID, under mu.
+	watching map[string]MonitorStatus
+	// watchMu makes the dedup check and the add of Watch one step.
+	watchMu sync.Mutex
 }
 
 // New opens the server's directory and replays its journal.
@@ -162,6 +171,8 @@ func New(cfg Config) (*Server, error) {
 		start:   time.Now(),
 		inboxes: make(map[string]*inboxCore),
 		errs:    make(map[string]error),
+
+		watching: make(map[string]MonitorStatus),
 	}
 	s.sched = NewScheduler(SchedulerConfig{
 		MaxConcurrent:  cfg.MaxConcurrent,
@@ -172,11 +183,16 @@ func New(cfg Config) (*Server, error) {
 		StatsURL:       cfg.StatsURL,
 		HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
 		Logf:           cfg.Logf,
+		MonitorPolicy:  cfg.MonitorPolicy,
+		MonitorBudget:  cfg.MonitorBudget,
 	})
 	s.gov = s.sched.gov
 	s.defCore = newInboxCore(s, DefaultInboxName, defaultKeys, 0, nil)
 	s.defCore.isDefault = true
 	s.def = &Inbox[*CommandSpec, CommandResult]{b: localDefault{s}, name: DefaultInboxName, keys: defaultKeys}
+	if err := s.openMonitorInbox(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -674,10 +690,16 @@ func (s *Server) InterruptAll() int {
 }
 
 // List returns every job in creation order.
-func (s *Server) List() []*Job { return s.store.Jobs() }
+func (s *Server) List() []*Job { return s.withStatus(s.store.Jobs()) }
 
 // Get returns one job.
-func (s *Server) Get(id string) (*Job, error) { return mustJob(s.store, id) }
+func (s *Server) Get(id string) (*Job, error) {
+	j, err := mustJob(s.store, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.withStatus([]*Job{j})[0], nil
+}
 
 // Logs returns up to max bytes of a job's output starting at offset.
 func (s *Server) Logs(id string, offset int64, max int) ([]byte, error) {

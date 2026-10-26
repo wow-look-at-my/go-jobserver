@@ -112,6 +112,10 @@ type Job struct {
 	WaitsDropped int `json:"waits_dropped,omitempty"`
 	// Outcome is a short label the consumer sets, so a reader can tell the kind of result without the result.
 	Outcome string `json:"outcome,omitempty"`
+	// Monitor is the condition a task of the monitor inbox watches. The server fills it from Spec.
+	Monitor *MonitorSpec `json:"monitor,omitempty"`
+	// MonitorStatus is what a running monitor's checks found so far. The server fills it. The journal does not keep it.
+	MonitorStatus *MonitorStatus `json:"monitor_status,omitempty"`
 	// Seq is the store change count at the last change of the job. Only this process counts it.
 	Seq uint64 `json:"seq"`
 	// openWaits is how many waits in Waits are open. Each change to Waits keeps it.

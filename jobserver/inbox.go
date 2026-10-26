@@ -23,6 +23,20 @@ type InboxPrioritizer interface {
 	InboxPriority() int
 }
 
+// InboxLeaser is the LeaseFor method an inbox type may have. With it, each task asks for admission with the request
+// LeaseFor returns. The scheduler reads its Class, Fallback, Group, Batch, GroupOnly, Policy and Limits. The ID is always
+// the task ID, and the inbox's keys still order its tasks. An empty Class or a nil Fallback takes the default.
+type InboxLeaser[T iSpec] interface {
+	LeaseFor(spec T) LeaseRequest
+}
+
+// InboxQueueObserver is the OnQueue method an inbox type may have. It hears where each task waits for admission. When
+// the task is admitted, it hears a zero QueueState. It runs under the scheduler's lock: it must not block or call the
+// scheduler.
+type InboxQueueObserver interface {
+	OnQueue(taskID string, q QueueState)
+}
+
 // inboxBackend is what an Inbox calls: the local server or a client.
 type inboxBackend interface {
 	taskBackend
@@ -70,6 +84,35 @@ func inboxMethods[T iSpec, R any](self any) (TaskRunner[T, R], int, error) {
 	return run, rank, nil
 }
 
+// inboxHooksOf reads the LeaseFor and OnQueue methods of an inbox type. A method with the right name and the wrong signature is an error.
+func inboxHooksOf[T iSpec](self any) (inboxHooks, error) {
+	t := reflect.TypeOf(self)
+	var h inboxHooks
+	if _, has := t.MethodByName("LeaseFor"); has {
+		l, ok := self.(InboxLeaser[T])
+		if !ok {
+			return h, fmt.Errorf("%w: %v: LeaseFor must be func(%v) LeaseRequest", ErrBadInbox, t, reflect.TypeFor[T]())
+		}
+		h.leaseFor = func(j *Job) (LeaseRequest, error) {
+			spec, err := newSpec[T](j.Spec)
+			if err != nil {
+				return LeaseRequest{}, err
+			}
+			r := l.LeaseFor(spec)
+			return LeaseRequest{Class: r.Class, Fallback: r.Fallback, Group: r.Group, Batch: r.Batch,
+				GroupOnly: r.GroupOnly, Policy: r.Policy, Limits: r.Limits}, nil
+		}
+	}
+	if _, has := t.MethodByName("OnQueue"); has {
+		o, ok := self.(InboxQueueObserver)
+		if !ok {
+			return h, fmt.Errorf("%w: %v: OnQueue must be func(string, QueueState)", ErrBadInbox, t)
+		}
+		h.onQueue = o.OnQueue
+	}
+	return h, nil
+}
+
 // newSpec decodes a spec into a new value of T. T must be a pointer type.
 func newSpec[T iSpec](raw json.RawMessage) (T, error) {
 	var zero T
@@ -94,6 +137,10 @@ func (ib *Inbox[T, R]) setup(s *Server, name string, self any) error {
 	if err != nil {
 		return err
 	}
+	hooks, err := inboxHooksOf[T](self)
+	if err != nil {
+		return err
+	}
 	if reflect.TypeFor[T]().Kind() != reflect.Pointer {
 		return fmt.Errorf("%w: spec type %v is not a pointer", ErrBadInbox, reflect.TypeFor[T]())
 	}
@@ -112,7 +159,7 @@ func (ib *Inbox[T, R]) setup(s *Server, name string, self any) error {
 		}
 	}
 	check := func(raw json.RawMessage) error { _, err := newSpec[T](raw); return err }
-	c, err := s.openInbox(name, keys, rank, run, check)
+	c, err := s.openInbox(name, keys, rank, run, check, hooks)
 	if err != nil {
 		return err
 	}
