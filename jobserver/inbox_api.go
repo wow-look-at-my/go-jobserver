@@ -21,6 +21,14 @@ const (
 	OpInboxDone    = "inbox.done"
 	OpInboxStarted = "inbox.started"
 	OpInboxDrain   = "inbox.drain"
+	// OpInboxDetail changes the details of a checked-out task.
+	OpInboxDetail = "inbox.detail"
+	// OpInboxTask reads one task, OpInboxTasks the tasks that changed and OpInboxCounts the counts.
+	OpInboxTask   = "inbox.task"
+	OpInboxTasks  = "inbox.tasks"
+	OpInboxCounts = "inbox.counts"
+	// OpInboxWait blocks for a bounded time until a task ends.
+	OpInboxWait = "inbox.wait"
 )
 
 // The error codes of the inbox ops.
@@ -31,6 +39,10 @@ const (
 	CodeNotRunning ErrorCode = "not_running"
 	// CodeStopped means the server refuses new tasks.
 	CodeStopped ErrorCode = "stopped"
+	// CodeNoStep means the task holds no such open step or wait.
+	CodeNoStep ErrorCode = "no_step"
+	// CodeTooMany means the task holds the most steps or waits it may.
+	CodeTooMany ErrorCode = "too_many"
 )
 
 // TaskRequest is the part of a Request the inbox ops read.
@@ -49,6 +61,8 @@ type TaskRequest struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 	TaskError string          `json:"task_error,omitempty"`
 	PID       int             `json:"pid,omitempty"`
+	Detail    *DetailOp       `json:"detail,omitempty"`
+	Since     uint64          `json:"since,omitempty"`
 }
 
 // TaskResponse is the part of a Response the inbox ops fill.
@@ -56,6 +70,11 @@ type TaskResponse struct {
 	Consumer string          `json:"consumer,omitempty"`
 	Taken    bool            `json:"taken,omitempty"`
 	TaskSpec json.RawMessage `json:"task_spec,omitempty"`
+	// Ref is the ID of the step or wait a detail op opened.
+	Ref     int          `json:"ref,omitempty"`
+	Details *TaskDetails `json:"details,omitempty"`
+	Page    *TaskPage    `json:"page,omitempty"`
+	Counts  *TaskCounts  `json:"counts,omitempty"`
 }
 
 // remoteInbox opens a consumer inbox for a remote caller, with the keys the caller declares.
@@ -99,7 +118,19 @@ func (s *Server) backendFor(req Request) (inboxBackend, error) {
 // handleInbox runs an inbox op. ok is false for an op that is not one.
 func (s *Server) handleInbox(req Request) (Response, bool) {
 	switch req.Op {
-	case OpInboxAdd, OpInboxBind, OpInboxUnbind, OpInboxTake, OpInboxDone, OpInboxStarted, OpInboxDrain:
+	case OpInboxAdd, OpInboxBind, OpInboxUnbind, OpInboxTake, OpInboxDone, OpInboxStarted, OpInboxDrain,
+		OpInboxDetail, OpInboxTask, OpInboxTasks, OpInboxCounts:
+	case OpInboxWait:
+		ctx, cancel := context.WithTimeout(context.Background(), remoteTakeCap)
+		defer cancel()
+		j, err := s.waitJob(ctx, req.ID)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return Response{OK: true}, true
+		}
+		if err != nil {
+			return Failure(err), true
+		}
+		return Response{OK: true, Job: j}, true
 	default:
 		return Response{}, false
 	}
@@ -131,6 +162,33 @@ func (s *Server) handleInbox(req Request) (Response, bool) {
 		err = b.drain()
 	case OpInboxStarted:
 		err = b.started(who, req.ID, req.PID)
+	case OpInboxDetail:
+		if req.Detail == nil {
+			return Failure(fmt.Errorf("%w: inbox.detail needs a detail", ErrBadState)), true
+		}
+		ref, err := b.detail(who, req.ID, *req.Detail)
+		if err != nil {
+			return Failure(err), true
+		}
+		return Response{OK: true, TaskResponse: TaskResponse{Ref: ref}}, true
+	case OpInboxTask:
+		d, err := b.details(req.ID)
+		if err != nil {
+			return Failure(err), true
+		}
+		return Response{OK: true, TaskResponse: TaskResponse{Details: d}}, true
+	case OpInboxTasks:
+		page, err := b.tasks(req.Since)
+		if err != nil {
+			return Failure(err), true
+		}
+		return Response{OK: true, TaskResponse: TaskResponse{Page: &page}}, true
+	case OpInboxCounts:
+		c, err := b.counts()
+		if err != nil {
+			return Failure(err), true
+		}
+		return Response{OK: true, TaskResponse: TaskResponse{Counts: &c}}, true
 	case OpInboxDone:
 		var taskErr error
 		if req.TaskError != "" {
@@ -169,6 +227,10 @@ func remoteErr(resp Response) error {
 		return fmt.Errorf("%w: %s", ErrStopped, resp.Error)
 	case CodeNotFound:
 		return fmt.Errorf("%w: %s", ErrNotFound, resp.Error)
+	case CodeNoStep:
+		return fmt.Errorf("%w: %s", ErrNoStep, resp.Error)
+	case CodeTooMany:
+		return fmt.Errorf("%w: %s", ErrTooMany, resp.Error)
 	}
 	return errors.New(resp.Error)
 }
@@ -274,8 +336,63 @@ func (b clientInbox) job(id string) (*Job, error) {
 	return resp.Job, nil
 }
 
+// waitJob waits in rounds of at most remoteTakeCap. The server holds the task while a round waits on it.
 func (b clientInbox) waitJob(ctx context.Context, id string) (*Job, error) {
-	return b.c.Wait(ctx, id, 0)
+	for {
+		resp, err := b.c.Do(ctx, Request{Op: OpInboxWait, ID: id, TaskRequest: TaskRequest{Inbox: b.name, Keys: b.keys}})
+		if err != nil {
+			return nil, err
+		}
+		if !resp.OK {
+			return nil, remoteErr(resp)
+		}
+		if resp.Job != nil {
+			return resp.Job, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (b clientInbox) detail(who Consumer, id string, op DetailOp) (int, error) {
+	resp, err := b.call(Request{Op: OpInboxDetail, ID: id, TaskRequest: TaskRequest{Consumer: string(who), Detail: &op}})
+	return resp.Ref, err
+}
+
+func (b clientInbox) details(id string) (*TaskDetails, error) {
+	resp, err := b.call(Request{Op: OpInboxTask, ID: id})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Details, nil
+}
+
+func (b clientInbox) tasks(since uint64) (TaskPage, error) {
+	resp, err := b.call(Request{Op: OpInboxTasks, TaskRequest: TaskRequest{Since: since}})
+	if err != nil || resp.Page == nil {
+		return TaskPage{}, err
+	}
+	return *resp.Page, nil
+}
+
+func (b clientInbox) counts() (TaskCounts, error) {
+	resp, err := b.call(Request{Op: OpInboxCounts})
+	if err != nil || resp.Counts == nil {
+		return TaskCounts{}, err
+	}
+	return *resp.Counts, nil
+}
+
+func (b clientInbox) readLog(id string, offset int64, max int) ([]byte, error) {
+	resp, err := b.c.Logs(context.Background(), id, offset, max)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.OK {
+		return nil, remoteErr(resp)
+	}
+	return []byte(resp.Output), nil
 }
 
 func (b clientInbox) cancel(id string) error {

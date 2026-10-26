@@ -43,6 +43,12 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
+	// Retention is how long the server keeps an ended task, its result and its log. Zero means DefaultRetention.
+	Retention time.Duration
+	// RetainCount is how many ended tasks the server keeps per inbox. Zero means DefaultRetainCount.
+	RetainCount int
+	// PruneInterval is how often the server drops ended tasks. Zero means DefaultPruneInterval.
+	PruneInterval time.Duration
 	// Logf receives the server's own status lines. Nil discards them.
 	Logf func(format string, args ...any)
 }
@@ -127,6 +133,18 @@ func New(cfg Config) (*Server, error) {
 	if cfg.DefaultCost < 0 {
 		cfg.DefaultCost = 0
 	}
+	if cfg.Retention < 0 || cfg.RetainCount < 0 || cfg.PruneInterval < 0 {
+		return nil, fmt.Errorf("jobserver: Retention, RetainCount and PruneInterval must not be negative")
+	}
+	if cfg.Retention == 0 {
+		cfg.Retention = DefaultRetention
+	}
+	if cfg.RetainCount == 0 {
+		cfg.RetainCount = DefaultRetainCount
+	}
+	if cfg.PruneInterval == 0 {
+		cfg.PruneInterval = DefaultPruneInterval
+	}
 	st, err := OpenStore(cfg.Dir)
 	if err != nil {
 		return nil, err
@@ -181,6 +199,8 @@ func (s *Server) Start() error {
 	go s.loop()
 	s.wg.Add(1)
 	go s.syncLoop()
+	s.wg.Add(1)
+	go s.pruneLoop()
 	s.sched.Start()
 	if err := s.startUnix(); err != nil {
 		s.Close()
@@ -540,8 +560,8 @@ func (s *Server) enqueue(spec Spec, meta *taskMeta) (*Job, bool, error) {
 		return nil, false, ErrStopped
 	}
 	if spec.Key != "" && !spec.Force {
-		for _, j := range s.store.Jobs() {
-			if j.Key == spec.Key && !j.State.Terminal() {
+		for _, j := range s.store.liveIn(DefaultInboxName) {
+			if j.Key == spec.Key {
 				return j, true, nil
 			}
 		}

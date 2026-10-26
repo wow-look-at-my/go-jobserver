@@ -29,20 +29,15 @@ func (c *inboxCore) before(a, b candidate) bool {
 }
 
 // queued lists the inbox's tasks whose trigger fired and that have not started. It reads the store, so call it without c.mu.
+// It reads only the tasks of this inbox.
 func (c *inboxCore) queued() []candidate {
-	jobs := c.s.store.Jobs()
-	byID := Index(jobs)
 	var out []candidate
-	for _, id := range Ready(jobs) {
-		j := byID[id]
-		if j.Inbox != c.name {
-			continue
-		}
-		prio, err := c.keys.FromValues(j.Priority)
+	for _, r := range c.s.store.readyIn(c.name) {
+		prio, err := c.keys.FromValues(r.priority)
 		if err != nil {
 			continue
 		}
-		out = append(out, candidate{id: id, prio: prio, created: j.Created})
+		out = append(out, candidate{id: r.id, prio: prio, created: r.created})
 	}
 	return out
 }

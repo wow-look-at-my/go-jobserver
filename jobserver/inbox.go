@@ -33,6 +33,11 @@ type inboxBackend interface {
 	take(ctx context.Context, c Consumer, wait time.Duration) (string, json.RawMessage, bool, error)
 	started(c Consumer, id string, pid int) error
 	done(c Consumer, id string, result json.RawMessage, err error) error
+	detail(c Consumer, id string, op DetailOp) (int, error)
+	details(id string) (*TaskDetails, error)
+	tasks(since uint64) (TaskPage, error)
+	counts() (TaskCounts, error)
+	readLog(id string, offset int64, max int) ([]byte, error)
 }
 
 // Inbox holds tasks of spec type T with results of type R. An inbox type embeds it. Only DefaultInbox uses it bare.

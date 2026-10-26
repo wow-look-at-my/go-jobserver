@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,19 @@ type Store struct {
 	closed bool
 	// watch is closed and replaced on every commit.
 	watch chan struct{}
+	// idx holds the tasks of each inbox.
+	idx inboxIndex
+	// waiters counts the callers that block on each task, so a prune keeps it.
+	waiters map[string]int
+	// seq counts the changes since the store opened. epoch names this open.
+	seq   uint64
+	epoch string
+	// prunes counts the prunes that dropped a task.
+	prunes uint64
+	// visits counts the tasks an index read looked at.
+	visits atomic.Int64
+	// compactHook lets a test stop a compaction at a stage. Nil in production.
+	compactHook func(stage string) error
 }
 
 // OpenStore opens (or creates) the server directory and replays its journal.
@@ -46,10 +60,17 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		dir:   dir,
-		jobs:  make(map[string]*Job),
-		logs:  make(map[string]*LogWriter),
-		watch: make(chan struct{}),
+		dir:     dir,
+		jobs:    make(map[string]*Job),
+		logs:    make(map[string]*LogWriter),
+		watch:   make(chan struct{}),
+		idx:     newInboxIndex(),
+		waiters: map[string]int{},
+		epoch:   NewID(func(string) bool { return false }),
+	}
+	// A compaction that did not reach its rename leaves this file. The journal still holds everything.
+	if err := os.Remove(s.compactPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	if err := s.replay(); err != nil {
 		return nil, err
@@ -146,6 +167,8 @@ func (s *Store) recoverLogs() error {
 			j.State = StateFailed
 			j.Error = "interrupted by daemon restart"
 			j.Finished = time.Now()
+			closeOpen(j, j.Finished)
+			s.touch(j)
 			if err := s.append(record{kind: recFinish, id: id, state: StateFailed, exitCode: -1, finished: j.Finished.UnixNano(), errMsg: j.Error, logBytes: j.LogBytes}); err != nil {
 				return err
 			}
@@ -223,7 +246,22 @@ func (s *Store) apply(r record) {
 		}
 	case recTask, recResult:
 		s.applyTask(r)
+	case recDetail:
+		s.applyDetail(r)
 	}
+	if j, ok := s.jobs[r.id]; ok {
+		if r.kind == recFinish {
+			closeOpen(j, j.Finished)
+		}
+		s.touch(j)
+	}
+}
+
+// touch counts a change of the job and puts it in the index of its inbox. Caller holds s.mu.
+func (s *Store) touch(j *Job) {
+	s.seq++
+	j.Seq = s.seq
+	s.idx.put(j)
 }
 
 // append writes one record and returns after the bytes are in the file.
@@ -248,8 +286,23 @@ func (s *Store) commit(r record) error {
 	if err := s.append(r); err != nil {
 		return err
 	}
+	if j, ok := s.jobs[r.id]; ok {
+		s.touch(j)
+	}
 	s.bump()
 	return s.sync()
+}
+
+// note appends a record with no sync. A crash can lose the last notes, and the next commit syncs them.
+func (s *Store) note(r record) error {
+	if err := s.append(r); err != nil {
+		return err
+	}
+	if j, ok := s.jobs[r.id]; ok {
+		s.touch(j)
+	}
+	s.bump()
+	return nil
 }
 
 // Close stops the store and closes every open log file.
@@ -389,6 +442,7 @@ func (s *Store) create(spec *Spec, meta *taskMeta) (*Job, error) {
 	}
 	s.jobs[j.ID] = j
 	s.order = append(s.order, j.ID)
+	s.touch(j)
 	return j.clone(), nil
 }
 
@@ -586,6 +640,7 @@ func (s *Store) Finish(id string, st State, exitCode int, msg string, artifacts 
 	j.Error = msg
 	j.Artifacts = artifacts
 	j.LogBytes = logBytes
+	closeOpen(j, j.Finished)
 	err := s.commit(record{
 		kind: recFinish, id: j.ID, state: st, exitCode: exitCode,
 		finished: j.Finished.UnixNano(), errMsg: msg, logBytes: logBytes, artifacts: artifacts,
@@ -663,6 +718,8 @@ func (j *Job) clone() *Job {
 	c.Spec = append(json.RawMessage(nil), j.Spec...)
 	c.Result = append(json.RawMessage(nil), j.Result...)
 	c.Priority = maps.Clone(j.Priority)
+	c.Steps = append([]TaskStep(nil), j.Steps...)
+	c.Waits = append([]TaskWait(nil), j.Waits...)
 	return &c
 }
 
