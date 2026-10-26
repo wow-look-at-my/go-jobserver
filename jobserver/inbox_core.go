@@ -1,0 +1,439 @@
+// inboxCore holds the live state of one named inbox: its leases, its consumer and its checked-out tasks.
+
+package jobserver
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/wow-look-at-my/go-jobserver/priority"
+)
+
+// runFunc runs one task spec and returns its result, as JSON.
+type runFunc func(ctx context.Context, spec json.RawMessage) (json.RawMessage, error)
+
+// inboxCore holds the live state of one named inbox. The store holds its tasks.
+type inboxCore struct {
+	s    *Server
+	name string
+	keys *priority.Keys
+	rank int
+	// run is nil for an inbox whose consumer takes its tasks.
+	run runFunc
+
+	mu       sync.Mutex
+	consumer Consumer
+	// leasing holds the tasks that wait for admission, admitted the ones a consumer has not taken, and out the checked-out ones.
+	leasing  map[string]context.CancelFunc
+	admitted map[string]*grant
+	out      map[string]*grant
+	// avail is closed and replaced when admitted grows or the consumer changes.
+	avail chan struct{}
+	runs  sync.WaitGroup
+	// closing stops a Run call that ends from recording its end, so the next open resumes the task.
+	closing bool
+}
+
+// grant is one admitted task.
+type grant struct {
+	id       string
+	lease    *Lease
+	prio     priority.MultiPriority
+	created  time.Time
+	spec     json.RawMessage
+	timeout  time.Duration
+	consumer Consumer
+	cancel   context.CancelFunc
+	timer    *time.Timer
+}
+
+func newInboxCore(s *Server, name string, keys *priority.Keys, rank int, run runFunc) *inboxCore {
+	return &inboxCore{s: s, name: name, keys: keys, rank: rank, run: run,
+		leasing: map[string]context.CancelFunc{}, admitted: map[string]*grant{}, out: map[string]*grant{},
+		avail: make(chan struct{})}
+}
+
+// signal wakes every Take that waits. Caller holds c.mu.
+func (c *inboxCore) signal() {
+	close(c.avail)
+	c.avail = make(chan struct{})
+}
+
+// offer asks for admission of a task whose trigger fired. A consumer inbox asks only while a consumer is bound.
+func (c *inboxCore) offer(j *Job) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing || (c.run == nil && c.consumer == "") {
+		return
+	}
+	if _, ok := c.leasing[j.ID]; ok {
+		return
+	}
+	if c.admitted[j.ID] != nil || c.out[j.ID] != nil {
+		return
+	}
+	prio, err := c.keys.FromValues(j.Priority)
+	if err != nil {
+		c.s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.leasing[j.ID] = cancel
+	g := &grant{id: j.ID, prio: prio, created: j.Created, spec: j.Spec, timeout: j.Timeout}
+	req := LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
+	go c.acquire(ctx, g, req)
+}
+
+// acquire waits for admission and hands the task to its runner or its consumer.
+func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
+	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
+	l, err := c.s.sched.acquire(ctx, req, order, nil)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cancel, live := c.leasing[g.id]
+	if !live || ctx.Err() != nil {
+		if l != nil {
+			l.Release()
+		}
+		return
+	}
+	delete(c.leasing, g.id)
+	if err != nil {
+		cancel()
+		if !errors.Is(err, ErrSchedulerClosed) {
+			c.s.cfg.Logf("go-jobserver: inbox %s: admit %s: %v", c.name, g.id, err)
+		}
+		return
+	}
+	g.lease = l
+	if j, ok := c.s.store.Job(g.id); !ok || j.State != StateActive {
+		cancel()
+		l.Release()
+		return
+	}
+	if c.run == nil {
+		cancel()
+		c.admitted[g.id] = g
+		c.signal()
+		return
+	}
+	if err := c.s.store.Start(g.id); err != nil {
+		cancel()
+		l.Release()
+		return
+	}
+	g.cancel = cancel
+	c.out[g.id] = g
+	c.runs.Add(1)
+	go c.runTask(ctx, g)
+}
+
+// runTask runs one task through the inbox's Run and records the outcome.
+func (c *inboxCore) runTask(ctx context.Context, g *grant) {
+	defer c.runs.Done()
+	defer c.s.Wake()
+	if g.timeout > 0 {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(ctx, g.timeout)
+		defer stop()
+	}
+	go func() {
+		select {
+		case <-g.lease.Revoked():
+			g.cancel()
+		case <-ctx.Done():
+		}
+	}()
+	result, err := c.run(ctx, g.spec)
+	revoked := g.lease.RevokeReason()
+	c.mu.Lock()
+	_, still := c.out[g.id]
+	delete(c.out, g.id)
+	closing := c.closing
+	c.mu.Unlock()
+	c.s.settle(g.id, g.lease)
+	defer g.cancel()
+	if !still || (closing && ctx.Err() != nil) {
+		return
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		c.s.finish(g.id, StateFailed, -1, msgTimedOut, nil, 0)
+	case ctx.Err() != nil && revoked != "":
+		c.s.finish(g.id, StateFailed, -1, "revoked by the scheduler: "+revoked, nil, 0)
+	case ctx.Err() != nil:
+		c.s.finish(g.id, StateCancelled, -1, msgCancelled, nil, 0)
+	default:
+		c.s.settleTask(g.id, result, err)
+	}
+}
+
+// best is the admitted task that sorts first: lower priority, then arrival. Caller holds c.mu.
+func (c *inboxCore) best() *grant {
+	var b *grant
+	for _, g := range c.admitted {
+		if b == nil {
+			b = g
+			continue
+		}
+		cmp := c.keys.Compare(g.prio, b.prio)
+		if cmp < 0 || (cmp == 0 && (g.created.Before(b.created) || (g.created.Equal(b.created) && g.id < b.id))) {
+			b = g
+		}
+	}
+	return b
+}
+
+// take checks out the next admitted task.
+func (c *inboxCore) take(ctx context.Context, who Consumer, wait time.Duration) (string, json.RawMessage, bool, error) {
+	var deadline <-chan time.Time
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		deadline = t.C
+	}
+	for {
+		c.mu.Lock()
+		if who == "" || c.consumer != who {
+			c.mu.Unlock()
+			return "", nil, false, ErrNotConsumer
+		}
+		if g := c.best(); g != nil {
+			delete(c.admitted, g.id)
+			if err := c.s.store.Start(g.id); err != nil {
+				c.mu.Unlock()
+				g.lease.Release()
+				continue
+			}
+			g.consumer = who
+			c.out[g.id] = g
+			if g.timeout > 0 {
+				g.timer = time.AfterFunc(g.timeout, func() { c.expire(g.id) })
+			}
+			c.s.store.setConsumer(g.id, string(who))
+			c.mu.Unlock()
+			return g.id, g.spec, true, nil
+		}
+		ch := c.avail
+		c.mu.Unlock()
+		if wait == 0 {
+			return "", nil, false, nil
+		}
+		select {
+		case <-ch:
+		case <-deadline:
+			return "", nil, false, nil
+		case <-ctx.Done():
+			return "", nil, false, ctx.Err()
+		}
+	}
+}
+
+// checkedOut returns a task the consumer holds. Caller holds c.mu.
+func (c *inboxCore) checkedOut(who Consumer, id string) (*grant, error) {
+	if who == "" || c.consumer != who {
+		return nil, ErrNotConsumer
+	}
+	g := c.out[id]
+	if g == nil || g.consumer != who {
+		return nil, fmt.Errorf("%w: %s", ErrNotRunning, id)
+	}
+	return g, nil
+}
+
+// started names the process a consumer runs a task in, so the governor can measure and control it.
+func (c *inboxCore) started(who Consumer, id string, pid int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	g, err := c.checkedOut(who, id)
+	if err != nil {
+		return err
+	}
+	g.lease.AttachProcess(pid)
+	return nil
+}
+
+// done settles a checked-out task.
+func (c *inboxCore) done(who Consumer, id string, result json.RawMessage, taskErr error) error {
+	c.mu.Lock()
+	g, err := c.checkedOut(who, id)
+	if err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	delete(c.out, id)
+	c.mu.Unlock()
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	c.s.settle(id, g.lease)
+	c.s.settleTask(id, result, taskErr)
+	c.s.Wake()
+	return nil
+}
+
+// expire fails a checked-out task whose timeout passed.
+func (c *inboxCore) expire(id string) {
+	c.mu.Lock()
+	g := c.out[id]
+	delete(c.out, id)
+	c.mu.Unlock()
+	if g == nil {
+		return
+	}
+	c.s.settle(id, g.lease)
+	c.s.finish(id, StateFailed, -1, msgTimedOut, nil, 0)
+	c.s.Wake()
+}
+
+// bind attaches a new consumer. The one loses every task it held.
+func (c *inboxCore) bind() Consumer {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	who := Consumer("c-" + hex.EncodeToString(b[:]))
+	c.mu.Lock()
+	lost := c.dropConsumerLocked()
+	c.consumer = who
+	c.signal()
+	c.mu.Unlock()
+	c.failLost(lost)
+	c.s.Wake()
+	return who
+}
+
+// unbind detaches a consumer. Its checked-out tasks fail. Its queued tasks stay for the next consumer.
+func (c *inboxCore) unbind(who Consumer) error {
+	c.mu.Lock()
+	if who == "" || c.consumer != who {
+		c.mu.Unlock()
+		return ErrNotConsumer
+	}
+	lost := c.dropConsumerLocked()
+	c.consumer = ""
+	c.signal()
+	c.mu.Unlock()
+	c.failLost(lost)
+	return nil
+}
+
+// dropConsumerLocked gives back every lease the consumer's tasks held, and returns the checked-out ones. Caller holds c.mu.
+func (c *inboxCore) dropConsumerLocked() []*grant {
+	if c.consumer == "" {
+		return nil
+	}
+	for id, cancel := range c.leasing {
+		cancel()
+		delete(c.leasing, id)
+	}
+	for id, g := range c.admitted {
+		g.lease.Release()
+		delete(c.admitted, id)
+	}
+	var lost []*grant
+	for id, g := range c.out {
+		if g.consumer == c.consumer {
+			lost = append(lost, g)
+			delete(c.out, id)
+		}
+	}
+	return lost
+}
+
+func (c *inboxCore) failLost(lost []*grant) {
+	for _, g := range lost {
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+		c.s.settle(g.id, g.lease)
+		c.s.finish(g.id, StateFailed, -1, msgConsumerGone, nil, 0)
+	}
+	if len(lost) > 0 {
+		c.s.Wake()
+	}
+}
+
+// forget drops a task from every live set, and reports whether a Run call still owns it. A Run call records its own end.
+func (c *inboxCore) forget(id string) (running bool) {
+	c.mu.Lock()
+	if cancel, ok := c.leasing[id]; ok {
+		cancel()
+		delete(c.leasing, id)
+	}
+	if g := c.admitted[id]; g != nil {
+		g.lease.Release()
+		delete(c.admitted, id)
+	}
+	g := c.out[id]
+	if g != nil && c.run != nil {
+		c.mu.Unlock()
+		g.cancel()
+		return true
+	}
+	delete(c.out, id)
+	c.mu.Unlock()
+	if g != nil {
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+		c.s.settle(id, g.lease)
+	}
+	return false
+}
+
+// close lets go of every lease and Run call, and records nothing. The next open of the inbox decides about the tasks.
+func (c *inboxCore) close() {
+	c.mu.Lock()
+	c.closing = true
+	for id, cancel := range c.leasing {
+		cancel()
+		delete(c.leasing, id)
+	}
+	for id, g := range c.admitted {
+		g.lease.Release()
+		delete(c.admitted, id)
+	}
+	out := make([]*grant, 0, len(c.out))
+	for _, g := range c.out {
+		out = append(out, g)
+	}
+	c.mu.Unlock()
+	for _, g := range out {
+		if c.run != nil {
+			g.cancel()
+			continue
+		}
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+		g.lease.Release()
+	}
+	c.runs.Wait()
+}
+
+// stopAll cancels every task the inbox holds and waits for its Run calls.
+func (c *inboxCore) stopAll() {
+	c.mu.Lock()
+	ids := make([]string, 0, len(c.leasing)+len(c.admitted)+len(c.out))
+	for id := range c.leasing {
+		ids = append(ids, id)
+	}
+	for id := range c.admitted {
+		ids = append(ids, id)
+	}
+	for id := range c.out {
+		ids = append(ids, id)
+	}
+	c.mu.Unlock()
+	for _, id := range ids {
+		if !c.forget(id) {
+			c.s.finishIfLive(id, StateCancelled, msgCancelled)
+		}
+	}
+	c.runs.Wait()
+}
