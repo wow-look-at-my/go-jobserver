@@ -96,7 +96,7 @@ type Scheduler struct {
 
 	classes  *classBook
 	gov      *governor
-	priority priorityTable
+	priority leaseKeys
 
 	quit      chan struct{}
 	wg        sync.WaitGroup
@@ -127,7 +127,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = DefaultRetryInterval
 	}
-	priority, err := newPriorityTable(cfg.PriorityKeys)
+	priority, err := newLeaseKeys(cfg.PriorityKeys)
 	if err != nil {
 		panic(err)
 	}
@@ -328,12 +328,14 @@ func (s *Scheduler) HasGroup(name string) (int, bool) {
 }
 
 // Acquire queues a lease and blocks until the scheduler grants it, ctx ends,
-// or the lease cannot be granted at all. onQueue follows the queue contract:
-// its first call means the lease has to wait, and later calls mean its place
-// or reason changed. Calls are serialized under the scheduler's lock, so keep
-// them fast and never call back into the scheduler.
+// or the lease cannot be granted at all.
 func (s *Scheduler) Acquire(ctx context.Context, req LeaseRequest, onQueue func(QueueState)) (*Lease, error) {
-	l, err := s.enqueue(req, onQueue)
+	return s.acquire(ctx, req, nil, onQueue)
+}
+
+// acquire is Acquire with the lease's place in the order. A nil order reads it from req.Priority.
+func (s *Scheduler) acquire(ctx context.Context, req LeaseRequest, order *leaseOrder, onQueue func(QueueState)) (*Lease, error) {
+	l, err := s.enqueue(req, order, onQueue)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +375,7 @@ func (s *Scheduler) Acquire(ctx context.Context, req LeaseRequest, onQueue func(
 // TryAcquire grants a lease only if the plan grants it now. It never waits, so
 // a lease that has to queue is withdrawn and ok is false.
 func (s *Scheduler) TryAcquire(req LeaseRequest) (l *Lease, ok bool, err error) {
-	l, err = s.enqueue(req, nil)
+	l, err = s.enqueue(req, nil, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -392,7 +394,7 @@ func (s *Scheduler) TryAcquire(req LeaseRequest) (l *Lease, ok bool, err error) 
 }
 
 // enqueue adds a lease to the queue and plans once.
-func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease, error) {
+func (s *Scheduler) enqueue(req LeaseRequest, order *leaseOrder, onQueue func(QueueState)) (*Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -415,13 +417,16 @@ func (s *Scheduler) enqueue(req LeaseRequest, onQueue func(QueueState)) (*Lease,
 			}
 		}
 	}
-	rank, err := s.priority.rank(req.Priority)
-	if err != nil {
-		return nil, err
+	if order == nil {
+		p, err := s.priority.priorityOf(req.Priority)
+		if err != nil {
+			return nil, err
+		}
+		order = &leaseOrder{keys: s.priority.keys, prio: p}
 	}
 	s.seq++
 	l := newLease(s, req, s.seq, s.now().UTC(), onQueue)
-	l.rank = rank
+	l.order = *order
 	l.cost = s.costOf(req)
 	s.waiting = append(s.waiting, l)
 	s.planLocked()

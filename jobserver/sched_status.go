@@ -141,6 +141,15 @@ func (s *Scheduler) Status() SchedulerStatus {
 	return st
 }
 
+// priorityValues names each value of a lease's priority by its key.
+func priorityValues(o leaseOrder) map[string]float64 {
+	out := map[string]float64{}
+	for name, v := range o.keys.Values(o.prio) {
+		out[name] = float64(v)
+	}
+	return out
+}
+
 // info renders a lease for the status surface. Caller holds the scheduler's lock.
 func (l *Lease) info(wait *QueueState) LeaseInfo {
 	l.mu.Lock()
@@ -150,7 +159,7 @@ func (l *Lease) info(wait *QueueState) LeaseInfo {
 		since = l.started
 	}
 	return LeaseInfo{
-		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: l.sched.priority.values(l.rank),
+		ID: l.req.ID, Class: l.req.Class, Group: l.req.Group, Priority: priorityValues(l.order),
 		Batch: l.req.Batch, GroupOnly: l.req.GroupOnly, Since: since, Cost: l.cost, CPUs: l.cpus,
 		CPUSeconds: l.cpuSeconds, Revoked: l.reason, Wait: wait,
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wow-look-at-my/go-containers/set"
+	"github.com/wow-look-at-my/go-jobserver/priority"
 )
 
 // BatchGrace is how long a batch stays open after its last member ends, so members that arrive later still go first.
@@ -201,42 +202,78 @@ func (s *Scheduler) holderIDsLocked(st QueueState) []string {
 	return out
 }
 
-// orderLocked returns the queued leases in admission order: the priority keys
-// compared top to bottom, lower first, then arrival. A pick that starts a new
-// batch pulls the rest of that batch in right behind it.
+// orderLocked returns the queued leases in admission order. Each key list
+// sorts its own leases by its Compare, then arrival. A pick that starts a new
+// batch pulls the rest of that batch in right behind it. The lists then merge:
+// the head with the lower rank goes first, then the earlier arrival.
 func (s *Scheduler) orderLocked(now time.Time) []*Lease {
-	type ranked struct {
-		lease *Lease
-		key   []float64
-	}
-	all := make([]ranked, 0, len(s.waiting))
+	byKeys := map[*priority.Keys][]*Lease{}
+	var lists []*priority.Keys
 	for _, l := range s.waiting {
-		l.rank[s.priority.batch] = 1
-		if s.batchOpen(l.req.Batch, now) {
-			l.rank[s.priority.batch] = 0
+		if k := l.order.keys.Lookup(KeyOpenBatch); k != nil {
+			v := 1
+			if s.batchOpen(l.req.Batch, now) {
+				v = 0
+			}
+			l.order.prio.Set(k, v)
 		}
-		all = append(all, ranked{lease: l, key: l.rank})
+		if _, seen := byKeys[l.order.keys]; !seen {
+			lists = append(lists, l.order.keys)
+		}
+		byKeys[l.order.keys] = append(byKeys[l.order.keys], l)
 	}
-	slices.SortStableFunc(all, func(a, b ranked) int {
-		if c := slices.Compare(a.key, b.key); c != 0 {
+	sorted := make([][]*Lease, 0, len(lists))
+	for _, keys := range lists {
+		sorted = append(sorted, orderOneList(keys, byKeys[keys]))
+	}
+	out := make([]*Lease, 0, len(s.waiting))
+	for {
+		best := -1
+		for i, ls := range sorted {
+			if len(ls) == 0 {
+				continue
+			}
+			if best < 0 || cmpHead(ls[0], sorted[best][0]) < 0 {
+				best = i
+			}
+		}
+		if best < 0 {
+			return out
+		}
+		out = append(out, sorted[best][0])
+		sorted[best] = sorted[best][1:]
+	}
+}
+
+// orderOneList sorts the leases of one key list by priority, then arrival, with each new batch kept together.
+func orderOneList(keys *priority.Keys, ls []*Lease) []*Lease {
+	slices.SortStableFunc(ls, func(a, b *Lease) int {
+		if c := keys.Compare(a.order.prio, b.order.prio); c != 0 {
 			return c
 		}
-		return cmpSeq(a.lease, b.lease)
+		return cmpSeq(a, b)
 	})
-	out := make([]*Lease, 0, len(all))
-	for start := 0; start < len(all); {
+	out := make([]*Lease, 0, len(ls))
+	for start := 0; start < len(ls); {
 		end := start + 1
-		for end < len(all) && slices.Equal(all[end].key, all[start].key) {
+		for end < len(ls) && keys.Compare(ls[end].order.prio, ls[start].order.prio) == 0 {
 			end++
 		}
-		level := make([]*Lease, 0, end-start)
-		for _, r := range all[start:end] {
-			level = append(level, r.lease)
-		}
-		out = append(out, groupBatches(level)...)
+		out = append(out, groupBatches(ls[start:end])...)
 		start = end
 	}
 	return out
+}
+
+// cmpHead orders the heads of key lists: lower rank first, then arrival.
+func cmpHead(a, b *Lease) int {
+	if a.order.rank != b.order.rank {
+		if a.order.rank < b.order.rank {
+			return -1
+		}
+		return 1
+	}
+	return cmpSeq(a, b)
 }
 
 func cmpSeq(a, b *Lease) int {
