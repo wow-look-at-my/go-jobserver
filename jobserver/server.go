@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wow-look-at-my/go-jobserver/spool"
@@ -105,6 +106,9 @@ type Server struct {
 	watching map[string]MonitorStatus
 	// ownSched is false when the host passed its own scheduler in.
 	ownSched bool
+
+	// draining stops the scheduling pass from starting a job. Drain sets it.
+	draining atomic.Bool
 
 	wake   chan struct{}
 	quit   chan struct{}
@@ -350,7 +354,7 @@ func (s *Server) syncLogs() {
 
 // tick is one scheduling decision.
 func (s *Server) tick() {
-	if s.store.Paused() {
+	if s.store.Paused() || s.draining.Load() {
 		return
 	}
 	jobs := s.store.Jobs()
