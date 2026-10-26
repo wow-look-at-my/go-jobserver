@@ -164,3 +164,33 @@ func TestCappedSaysWhatItDropped(t *testing.T) {
 	_, _ = c.Write([]byte("abcdef"))
 	assert.Equal(t, "abc\n[3 more bytes dropped]", c.String())
 }
+
+// Several named requests land at .req.<name>, and .now lets a condition stop waiting for a start that never came.
+func TestPollSeveralRequestsAndNow(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "two-requests.xml"))
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_, _ = w.Write([]byte(`{"state":"pending"}`))
+		case "/runs":
+			_, _ = w.Write([]byte(`{"runs":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	env := testEnv(t, string(raw))
+	env.Vars = map[string]any{"base": srv.URL}
+	env.Transports = map[string]http.RoundTripper{"api": http.DefaultTransport}
+	clock := time.Unix(1000, 0)
+	env.Now = func() time.Time { return clock }
+	var seen []MonitorStatus
+	err = env.Watch(context.Background(), MonitorSpec{Kind: "settled", Args: map[string]string{"after": "1001"}}, &bytes.Buffer{}, nil, func(s MonitorStatus) {
+		seen = append(seen, s)
+		clock = clock.Add(time.Second)
+	})
+	require.NoError(t, err)
+	require.Len(t, seen, 3, "pending with no run holds only once .now passes the after arg")
+	assert.Equal(t, "status pending, 0 run(s)", seen[2].LastDetail)
+}

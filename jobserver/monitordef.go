@@ -50,7 +50,7 @@ type MonitorKind struct {
 	// Source is "request" or "argv".
 	Source string `json:"source"`
 
-	request  *monitorRequest
+	requests []*monitorRequest
 	argv     []string
 	until    string
 	describe string
@@ -58,6 +58,7 @@ type MonitorKind struct {
 
 // monitorRequest is a compiled <request>. Every string is a template.
 type monitorRequest struct {
+	name      string
 	method    string
 	url       string
 	headers   [][2]string
@@ -250,7 +251,7 @@ func (k *MonitorKind) parseCheck(n *apidsl.Node) error {
 		c := it.Elem
 		switch c.Name() {
 		case "argv":
-			if k.request != nil {
+			if len(k.requests) > 0 {
 				return fmt.Errorf("<%s> has both <request> and <argv>: a check is one or the other", k.Shape)
 			}
 			tmpl, err := compileElem(c)
@@ -263,14 +264,14 @@ func (k *MonitorKind) parseCheck(n *apidsl.Node) error {
 			if k.Shape == "stream" {
 				return errors.New("<stream> holds only <argv>: a request has no output stream")
 			}
-			if k.request != nil || len(k.argv) > 0 {
-				return errors.New("<poll> holds one <request>, or <argv> elements, not both and not two requests")
+			if len(k.argv) > 0 {
+				return errors.New("<poll> holds <request> elements or <argv> elements, not both")
 			}
 			req, err := parseRequest(c)
 			if err != nil {
 				return err
 			}
-			k.request = req
+			k.requests = append(k.requests, req)
 			k.Source = "request"
 		default:
 			return fmt.Errorf("<%s>: unknown element <%s>", k.Shape, c.Name())
@@ -279,14 +280,26 @@ func (k *MonitorKind) parseCheck(n *apidsl.Node) error {
 	if k.Source == "" {
 		return fmt.Errorf("<%s> is empty: it needs a <request> or <argv> elements", k.Shape)
 	}
+	if len(k.requests) > 1 {
+		names := set.New[string]()
+		for _, r := range k.requests {
+			if r.name == "" {
+				return errors.New("<poll> with several <request> elements needs name= on each: the results are .req.<name>")
+			}
+			if names.Contains(r.name) {
+				return fmt.Errorf("<poll> has two <request> elements named %q", r.name)
+			}
+			names.Add(r.name)
+		}
+	}
 	return nil
 }
 
 func parseRequest(n *apidsl.Node) (*monitorRequest, error) {
-	if err := apidsl.CheckAttrs(n, "method", "transport"); err != nil {
+	if err := apidsl.CheckAttrs(n, "name", "method", "transport"); err != nil {
 		return nil, err
 	}
-	r := &monitorRequest{method: strings.ToUpper(n.Attr("method")), transport: n.Attr("transport")}
+	r := &monitorRequest{name: n.Attr("name"), method: strings.ToUpper(n.Attr("method")), transport: n.Attr("transport")}
 	if r.method == "" {
 		r.method = "GET"
 	}

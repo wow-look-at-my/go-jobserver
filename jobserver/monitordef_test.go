@@ -28,7 +28,7 @@ func TestParseMonitorDefs(t *testing.T) {
 	assert.Equal(t, "request", k.Source)
 	assert.Equal(t, 2*time.Second, k.Every)
 	assert.Equal(t, time.Second, k.Timeout)
-	assert.Equal(t, "GET", k.request.method)
+	assert.Equal(t, "GET", k.requests[0].method)
 
 	k, _ = defs.Kind("file-exists")
 	assert.Equal(t, "argv", k.Source)
@@ -50,7 +50,8 @@ func TestParseMonitorDefsRejects(t *testing.T) {
 		"two checks":          {`<monitors><monitor name="x"><poll><argv>a</argv></poll><stream><argv>b</argv></stream><until>x</until></monitor></monitors>`, "a monitor has one check"},
 		"shell string":        {`<monitors><monitor name="x"><poll>test -e /tmp/x</poll></monitor></monitors>`, "never a shell string"},
 		"request and argv":    {`<monitors><monitor name="x"><poll><request><url>u</url></request><argv>a</argv></poll><until>x</until></monitor></monitors>`, "one or the other"},
-		"two requests":        {`<monitors><monitor name="x"><poll><request><url>u</url></request><request><url>v</url></request></poll><until>x</until></monitor></monitors>`, "not two requests"},
+		"unnamed requests":    {`<monitors><monitor name="x"><poll><request><url>u</url></request><request><url>v</url></request></poll><until>x</until></monitor></monitors>`, "needs name= on each"},
+		"same request name":   {`<monitors><monitor name="x"><poll><request name="a"><url>u</url></request><request name="a"><url>v</url></request></poll><until>x</until></monitor></monitors>`, "two <request> elements named"},
 		"stream request":      {`<monitors><monitor name="x"><stream><request><url>u</url></request></stream><until>x</until></monitor></monitors>`, "holds only <argv>"},
 		"empty poll":          {`<monitors><monitor name="x"><poll/></monitor></monitors>`, "is empty"},
 		"request no until":    {`<monitors><monitor name="x"><poll><request><url>u</url></request></poll></monitor></monitors>`, "needs <until>"},

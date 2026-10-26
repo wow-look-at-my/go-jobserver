@@ -37,7 +37,7 @@ A monitor has one check.
 
 | Check | Source | Holds when | Cadence |
 |---|---|---|---|
-| `<poll>` | one `<request>` | `<until>` is truthy | `every=` (30s default, 1s floor), `timeout=` per check (20s default) |
+| `<poll>` | one or more `<request>` | `<until>` is truthy | `every=` (30s default, 1s floor), `timeout=` per check (20s default) |
 | `<poll>` | one or more `<argv>` | `<until>` is truthy; with no `<until>`, exit 0 | the same |
 | `<stream>` | one or more `<argv>` | `<until>` is truthy for one stdout line | `restart=` after the process exits |
 
@@ -47,6 +47,7 @@ The loader enforces the separation:
 - A check holds no text: there is no shell string. A command that needs a shell names `sh` and `-c` as `<argv>` elements, in the open.
 - `<stream>` takes only `<argv>`, because a request has no output stream.
 - A request or a stream needs `<until>`: nothing else says when the condition holds.
+- Several `<request>` elements in one poll each need a unique `name=`. They run in order, and one that fails is the check's error.
 
 ## Results
 
@@ -64,7 +65,9 @@ A check error is logged at error level and retried on the same cadence. It is ne
 |---|---|
 | `.arg` | the monitor's args |
 | `.var` | the document's vars, overridden by the host's |
-| `.status`, `.response`, `.body` | a request result. `.response` is the parsed JSON, or the text |
+| `.status`, `.response`, `.body` | the result of a poll's only request. `.response` is the parsed JSON, or the text |
+| `.req.<name>` | the same three fields for each named request |
+| `.now` | the time of the check, in Unix seconds |
 | `.exit`, `.stdout`, `.stderr` | a poll argv result |
 | `.line` | one stream line |
 

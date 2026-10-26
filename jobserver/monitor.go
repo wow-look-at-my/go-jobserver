@@ -170,6 +170,8 @@ func (e *MonitorEnv) Watch(ctx context.Context, spec MonitorSpec, out io.Writer,
 			fmt.Fprintf(out, "%s deadline %s passed after %d checks\n", stamp(e.now()), spec.Deadline.UTC().Format(time.RFC3339), st.Checks)
 			return fmt.Errorf("%w (%s)", ErrMonitorDeadline, spec.Deadline.UTC().Format(time.RFC3339))
 		}
+		// .now is the check's clock in Unix seconds, so a condition can compare against a time argument.
+		data["now"] = e.now().Unix()
 		var r checkResult
 		if k.Shape == "stream" {
 			r = e.stream(ctx, k, data, out, started, &st, report)
@@ -221,30 +223,56 @@ func stringMap(m map[string]string) map[string]any {
 func (e *MonitorEnv) poll(ctx context.Context, k *MonitorKind, data map[string]any, started func(pid int)) checkResult {
 	ctx, cancel := context.WithTimeout(ctx, k.Timeout)
 	defer cancel()
-	if k.request != nil {
-		return e.request(ctx, k, data)
+	if len(k.requests) > 0 {
+		return e.requests(ctx, k, data)
 	}
 	return e.argvCheck(ctx, k, data, started)
 }
 
-func (e *MonitorEnv) request(ctx context.Context, k *MonitorKind, data map[string]any) checkResult {
-	r := k.request
+// requests sends each request in order. One request puts its result at .status, .response and .body. A named one
+// also puts it at .req.<name>. Any failed request is the check's error.
+func (e *MonitorEnv) requests(ctx context.Context, k *MonitorKind, data map[string]any) checkResult {
+	named := map[string]any{}
+	var last map[string]any
+	for _, r := range k.requests {
+		res, err := e.request(ctx, r, data)
+		if err != nil {
+			if r.name != "" {
+				err = fmt.Errorf("request %q: %w", r.name, err)
+			}
+			return checkResult{err: err}
+		}
+		if r.name != "" {
+			named[r.name] = res
+		}
+		last = res
+	}
+	extra := map[string]any{"req": named}
+	if len(k.requests) == 1 {
+		for key, v := range last {
+			extra[key] = v
+		}
+	}
+	return e.judge(k, withResult(data, extra), fmt.Sprintf("HTTP %v", last["status"]))
+}
+
+func (e *MonitorEnv) request(ctx context.Context, r *monitorRequest, data map[string]any) (map[string]any, error) {
 	url, err := apidsl.RenderString(r.url, data)
 	if err != nil {
-		return checkResult{err: err}
+		return nil, err
 	}
 	body, err := apidsl.RenderString(r.body, data)
 	if err != nil {
-		return checkResult{err: err}
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, r.method, strings.TrimSpace(url), strings.NewReader(body))
 	if err != nil {
-		return checkResult{err: err}
+		return nil, err
 	}
 	for _, h := range r.headers {
 		v, err := apidsl.RenderString(h[1], data)
 		if err != nil {
-			return checkResult{err: err}
+			return nil, err
 		}
 		req.Header.Set(h[0], v)
 	}
@@ -252,29 +280,28 @@ func (e *MonitorEnv) request(ctx context.Context, k *MonitorKind, data map[strin
 	if r.transport != "" {
 		t, ok := e.Transports[r.transport]
 		if !ok {
-			return checkResult{err: fmt.Errorf("no transport named %q is registered", r.transport)}
+			return nil, fmt.Errorf("no transport named %q is registered", r.transport)
 		}
 		client.Transport = t
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return checkResult{err: err}
+		return nil, err
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, maxCheckBody))
 	if err != nil {
-		return checkResult{err: fmt.Errorf("read the response: %w", err)}
+		return nil, fmt.Errorf("read the response: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return checkResult{err: fmt.Errorf("%s %s answered %d: %s", r.method, req.URL.Redacted(), res.StatusCode, clip(string(raw), 200))}
+		return nil, fmt.Errorf("%s %s answered %d: %s", r.method, req.URL.Redacted(), res.StatusCode, clip(string(raw), 200))
 	}
 	var parsed any = string(raw)
 	var v any
 	if json.Unmarshal(raw, &v) == nil {
 		parsed = v
 	}
-	d := withResult(data, map[string]any{"status": res.StatusCode, "response": parsed, "body": string(raw)})
-	return e.judge(k, d, fmt.Sprintf("HTTP %d", res.StatusCode))
+	return map[string]any{"status": res.StatusCode, "response": parsed, "body": string(raw)}, nil
 }
 
 func (e *MonitorEnv) argvCheck(ctx context.Context, k *MonitorKind, data map[string]any, started func(pid int)) checkResult {
