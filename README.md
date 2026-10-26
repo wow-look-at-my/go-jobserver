@@ -64,6 +64,24 @@ A job that names its outputs has them hashed when it finishes. Those hashes, the
 
 Change an input file and the identity changes. The job runs again. Pass `--force` to run anyway, or give jobs the same `--key` to have an unfinished one absorbed instead of duplicated.
 
+## Monitors
+
+A monitor is a job that waits for a condition instead of running a command. It completes when the condition holds, and a job that must wait for it depends on it like any other job. A monitor triggers nothing itself.
+
+```sh
+go-jobserver run --monitors monitors.xml
+go-jobserver queue --monitor file-exists --arg path=/tmp/ready   # prints m's id
+go-jobserver queue --dep <m> -- make deploy
+go-jobserver why <deploy id>     # monitor <m>: monitor:file-exists path=/tmp/ready: not yet after 12 checks: exit 1
+```
+
+- A monitor always starts, even when the run cap, a group or the CPU budget is full. It takes no slot. The governor runs it at nice 19 on the host's last CPU from its first sample. While all monitors together use more than `MonitorBudget` CPUs, the heaviest one freezes for one sample, in turn. A monitor is never revoked.
+- The same kind with the same args is one monitor: enqueueing it again answers with the one that watches (`existing`). A finished monitor never answers from the cache, because a condition can turn false again.
+- A check error, such as a bad HTTP status or an exit other than 0 or 1, is logged at error. Level, shown in red, and retried on the same cadence. It never reads as "not yet". A monitor has no deadline unless it is given one. A start resumes it.
+- `go-jobserver monitors`, `why`, `kinds`, `list` and the dashboard each lead with one line: what runs, what watches, and what the waiting jobs wait on.
+
+[docs/monitors.md](docs/monitors.md) holds the definition format.
+
 ## Transports
 
 Any of these can enqueue a job. The daemon serves all of them at once.
@@ -104,8 +122,13 @@ Every route answers JSON, and `POST /api/<op>` takes the same request envelope t
 | `POST /api/interrupt` | cancel every running job |
 | `POST /api/interrupt/{id}` | cancel one job |
 | `GET /api/stats` | counters for the server |
+| `GET /api/graph` | every job and dependency, with what each waiting job waits on |
+| `GET /api/monitors` | every monitor, its last check, and the jobs that wait on it |
+| `GET /api/why/{id}` | what one job waits on |
+| `GET /api/kinds` | the monitor kinds the daemon loads |
+| `GET /api/scheduler` | the scheduler's holders, waiters, groups and monitor leases |
 
-Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy` and `stats`.
+Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy`, `stats`, `monitors`, `kinds`, `why`, `graph` and `scheduler`.
 
 A client has several seconds to send its request headers. The client also has a minute to send the whole request, and a couple of minutes of quiet between requests on one connection. A response has no time limit. A slow reader can fetch a large log. The TCP port and the file socket share these limits.
 
@@ -316,7 +339,7 @@ go-jobserver.sock    the file socket
 spool/               jobs dropped in as files
 ```
 
-A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept.
+A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept. A monitor goes back to `active` and watches again. A whole record of a kind this build does not know is skipped and logged at error level, so a downgrade never cuts the journal.
 
 The journal is flushed to disk after every record. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
 
@@ -327,8 +350,11 @@ go-jobserver [global flags] <command> [args]
 
 run                          run the daemon in the foreground
 queue [flags] cmd...         enqueue a job and print its id
-list                         list jobs
+list                         list jobs, with what each waiting job waits on
 status <id>                  show one job
+why <id>                     say what a job waits on
+monitors                     list monitors and the jobs that wait on them
+kinds                        list the monitor kinds the daemon loads
 logs [-f] <id>               print a job's output
 activate <id>                move a draft job to active
 depend <id> <dep>...         add dependencies
@@ -339,7 +365,7 @@ stats                        show server counters, CPU use and active controls
 version                      print the version
 ```
 
-`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. With no command arguments, `queue` reads one command line from standard input.
+`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`, and for a monitor `--monitor <kind>`, `--arg name=value` (repeatable) and `--deadline`. `run --monitors <file.xml>` loads the monitor kinds. With no command arguments, `queue` reads one command line from standard input.
 
 Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--stats-url`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
 
@@ -382,3 +408,8 @@ go-toolchain
 | `jobserver/spool.go` | the spool directory watcher |
 | `jobserver/graph.go` | each job's dependency depth and its children, for the dashboard and `list` |
 | `jobserver/client.go` | the client the CLI and other programs use |
+| `jobserver/monitordef.go` | the monitor definitions document, read with api-dsl |
+| `jobserver/monitor.go` | a monitor's poll and stream checks, and its watch loop |
+| `jobserver/server_monitor.go` | monitor jobs in the daemon: the enqueue check, the watch, the last status |
+| `jobserver/govern_monitor.go` | the monitor policy and the freeze rotation |
+| `jobserver/explain.go`, `jobserver/views.go` | what each job waits on, the summary line, the graph and the monitor views |
