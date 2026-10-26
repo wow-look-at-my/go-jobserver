@@ -1,3 +1,5 @@
+// BatchGrace is how long a batch stays open after its last member ends, so members that arrive later still go first.
+
 package jobserver
 
 import (

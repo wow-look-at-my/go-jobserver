@@ -1,3 +1,5 @@
+// CPUReport is what the daemon last measured, and what it did about it.
+
 package jobserver
 
 import (

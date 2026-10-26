@@ -1,3 +1,5 @@
+// The Scheduler decides what runs.
+
 package jobserver
 
 import (

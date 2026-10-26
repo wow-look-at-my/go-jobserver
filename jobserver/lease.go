@@ -1,3 +1,5 @@
+// LeaseRequest describes work the scheduler admits.
+
 package jobserver
 
 import (

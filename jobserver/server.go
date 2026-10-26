@@ -141,14 +141,14 @@ func New(cfg Config) (*Server, error) {
 		cfg.Logf("go-jobserver: ERROR: %s", line)
 	}
 	s := &Server{
-		cfg:     cfg,
-		store:   st,
-		runner:  cfg.Runner,
+		cfg:      cfg,
+		store:    st,
+		runner:   cfg.Runner,
 		running:  make(map[string]*runHandle),
 		watching: make(map[string]MonitorStatus),
-		wake:    make(chan struct{}, 1),
-		quit:    make(chan struct{}),
-		start:   time.Now(),
+		wake:     make(chan struct{}, 1),
+		quit:     make(chan struct{}),
+		start:    time.Now(),
 
 		spoolStuck: make(map[string]int64),
 	}

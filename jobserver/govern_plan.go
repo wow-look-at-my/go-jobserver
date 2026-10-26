@@ -1,3 +1,5 @@
+// A limited target is above its MaxCPUs at this sample.
+
 package jobserver
 
 import (

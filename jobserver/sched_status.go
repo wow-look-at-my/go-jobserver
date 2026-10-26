@@ -1,3 +1,5 @@
+// LeaseInfo is one lease as the status surface shows it.
+
 package jobserver
 
 import (
