@@ -276,7 +276,14 @@ func cmpHead(a, b *Lease) int {
 	return cmpSeq(a, b)
 }
 
+// cmpSeq orders leases by arrival: the task's when both carry one, else the lease's.
 func cmpSeq(a, b *Lease) int {
+	if a.order.arrival != 0 && b.order.arrival != 0 && a.order.arrival != b.order.arrival {
+		if a.order.arrival < b.order.arrival {
+			return -1
+		}
+		return 1
+	}
 	switch {
 	case a.seq < b.seq:
 		return -1

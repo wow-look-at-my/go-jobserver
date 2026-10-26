@@ -286,7 +286,7 @@ case <-done:
 
 **Admission.** A lease is granted when its group has a free slot and, unless it is `GroupOnly`, when the count cap has room. Its cost fits the CPU budget plus two CPUs (see "Before a job starts"). Priority keys sort queued leases. `SchedulerConfig.PriorityKeys` lists them, each with a hyphenated name, a description and a default. A lease sets values by name in `LeaseRequest.Priority`.
 
-A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value that is not finite, are refused.
+A key it leaves out takes the key's default. The scheduler compares the keys from the top of the list down, lower first. The first key that differs decides, and arrival order breaks a full tie. A name the list does not hold, and a value or a default that is not a whole number, are refused.
 
 `open-batch` (`KeyOpenBatch`) is the scheduler's own key: 0 while a member of the lease's batch holds a slot or did within `BatchGrace`, 1 otherwise. A list that leaves it out gets it last. `Status` reports the key list, and each lease's value for every key.
 
@@ -305,6 +305,31 @@ Every queued lease is told what it waits on (`cap`, `group` or `cpu`), its posit
 When a lease is released, the scheduler reverts its controls and records what it used in the history of its class. Its CPU time over the time it was measured. The next lease of that class costs that much.
 
 An `Actuator` measures and controls work the governor cannot see as a process tree: `Usage` reports CPUs used. `Apply`, `Revert` and `Cap` carry out a mechanism. `Status`, `Readings`, `Controls`, `Events` and `Classes` report the live state.
+
+## Inboxes
+
+An inbox is how a task is submitted. The `default` inbox runs commands through the `Runner`. A named inbox holds tasks of its own spec type. Its `Run` method runs them on the server's workers, or a bound consumer takes them with `Take` and settles them with `Done`.
+
+```go
+type FetchInbox struct {
+	jobserver.Inbox[*FetchSpec, int64]
+	Urgent priority.MultiPriorityKey `priority:"urgent,default=0"`
+}
+
+inbox, err := jobserver.NewInbox[FetchInbox](server, "fetch")
+p := inbox.NewPriority()
+p.Set(&inbox.Urgent, -1)
+fetch, err := inbox.AddTask(&FetchSpec{TaskSpec: jobserver.TaskSpec{Title: "fetch"}, URL: url}, p)
+build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.CommandSpec{Command: []string{"make"}})
+```
+
+- **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other.
+- **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
+- **Consumers.** `Bind` attaches one consumer. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns only admitted tasks. The task holds its slot until `Done`.
+- **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
+- **Over the wire.** The ops `inbox.add`, `inbox.bind`, `inbox.unbind`, `inbox.take`, `inbox.started`, `inbox.done` and `inbox.drain` name their inbox. `ClientInbox` gives the same `*Inbox` methods over a `Client`.
+
+`Spec`, `Server.Enqueue` and the `enqueue` op are deprecated. Each adds the task to the default inbox.
 
 ## Durability
 
@@ -378,6 +403,12 @@ go-toolchain
 | `jobserver/govern_hostload.go` | the error for a host whose load is unknown |
 | `jobserver/govern_ctl.go` | the control calls, made outside the governor's lock, and their retries |
 | `jobserver/server.go` | the daemon: the job loop and lifecycle control, admitted through the Scheduler |
+| `priority/` | the priority keys of an inbox and the values a task sets for them |
+| `jobserver/task.go` | TaskSpec, Task, TaskState, TaskError, CommandSpec and CommandResult |
+| `jobserver/inbox.go` | the typed Inbox, NewInbox and the triggers |
+| `jobserver/inbox_core.go` | a named inbox's leases, consumer and checked-out tasks |
+| `jobserver/inbox_server.go` | opening inboxes, the default inbox, Stop and the local backends |
+| `jobserver/inbox_api.go` | the inbox ops and ClientInbox |
 | `jobserver/api.go` | the request and response shapes every transport shares |
 | `jobserver/ipc.go` | the go-ipc service |
 | `jobserver/http.go` | the routes, the dashboard and the file socket |

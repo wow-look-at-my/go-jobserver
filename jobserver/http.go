@@ -366,6 +366,8 @@ func statusFor(resp Response) int {
 		return http.StatusNotFound
 	case CodeBadRequest:
 		return http.StatusBadRequest
+	case CodeNotConsumer, CodeNotRunning, CodeStopped:
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }

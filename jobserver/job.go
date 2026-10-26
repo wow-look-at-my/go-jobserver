@@ -4,6 +4,7 @@ package jobserver
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wow-look-at-my/go-containers/set"
@@ -86,6 +87,20 @@ type Job struct {
 	Policy JobPolicy `json:"policy"`
 	// CPUSeconds is how much CPU the job's process tree used across its last run, measured by the daemon.
 	CPUSeconds float64 `json:"cpu_seconds,omitempty"`
+	// Inbox names the inbox the task is in. Empty is the default inbox.
+	Inbox string `json:"inbox,omitempty"`
+	// Trigger is what the task waits for on its one dependency: success, fail or ended. Empty is a plain dependency.
+	Trigger     string        `json:"trigger,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Timeout     time.Duration `json:"timeout,omitempty"`
+	// Priority is the task's value per priority key of its inbox.
+	Priority map[string]int `json:"priority,omitempty"`
+	// Spec is the task's spec as JSON, for a task in a named inbox.
+	Spec json.RawMessage `json:"spec,omitempty"`
+	// Result is the task's result as JSON, for a task in a named inbox.
+	Result json.RawMessage `json:"result,omitempty"`
+	// Consumer is the consumer that holds the task now.
+	Consumer string `json:"consumer,omitempty"`
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.
@@ -113,7 +128,7 @@ func (j *Job) ExpectedCost(fallback float64) float64 {
 	return fallback
 }
 
-// Spec is the caller-supplied half of a job.
+// Deprecated: use CommandSpec with DefaultInbox().AddTask. Spec is the job spec.
 type Spec struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`

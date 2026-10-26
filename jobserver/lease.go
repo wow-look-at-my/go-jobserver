@@ -13,7 +13,9 @@ import (
 type leaseOrder struct {
 	keys *priority.Keys
 	prio priority.MultiPriority
-	rank int
+	// arrival is when the task behind the lease arrived. Zero means the lease itself is the arrival.
+	arrival int64
+	rank    int
 }
 
 // LeaseRequest describes work the scheduler admits. The daemon's own jobs are
