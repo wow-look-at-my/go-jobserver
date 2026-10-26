@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/wow-look-at-my/go-containers/set"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -64,6 +65,8 @@ var (
 type detailRec struct {
 	Title   *string `json:"title,omitempty"`
 	Outcome *string `json:"outcome,omitempty"`
+	// Priority replaces the task's priority values. An empty map sets every key to its default.
+	Priority *map[string]int `json:"priority,omitempty"`
 	// ConsumerName is the Bind name of the consumer that took the task.
 	ConsumerName *string    `json:"consumer_name,omitempty"`
 	Steps        []TaskStep `json:"steps,omitempty"`
@@ -104,6 +107,9 @@ func (d detailRec) merge(j *Job) {
 	}
 	if d.ConsumerName != nil {
 		j.ConsumerName = *d.ConsumerName
+	}
+	if d.Priority != nil {
+		j.Priority = maps.Clone(*d.Priority)
 	}
 	if d.StepsDropped != nil {
 		j.StepsDropped = *d.StepsDropped

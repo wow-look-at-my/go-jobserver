@@ -38,6 +38,7 @@ type inboxBackend interface {
 	taskBackend
 	add(spec json.RawMessage, values map[string]int, trigger, on string) (string, error)
 	drain() error
+	setPriority(id string, values map[string]int) error
 	bind(name string) (Consumer, error)
 	unbind(c Consumer) error
 	take(ctx context.Context, c Consumer, wait time.Duration) (string, json.RawMessage, bool, error)
