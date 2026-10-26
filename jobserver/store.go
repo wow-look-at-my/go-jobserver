@@ -73,7 +73,7 @@ func OpenStore(dir string) (*Store, error) {
 		cache:   map[string]cacheEntry{},
 		stepCap: maxTaskSteps,
 		waitCap: maxTaskWaits,
-		epoch:  NewID(func(string) bool { return false }),
+		epoch:   NewID(func(string) bool { return false }),
 	}
 	// A compaction that did not reach its rename leaves this file. The journal still holds everything.
 	if err := os.Remove(s.compactPath()); err != nil && !errors.Is(err, os.ErrNotExist) {

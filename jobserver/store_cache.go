@@ -24,7 +24,7 @@ func (s *Store) remember(j *Job) {
 	if old, ok := s.cache[j.Identity]; ok && old.ID != j.ID && old.At.After(endedAt(j)) {
 		return
 	}
-	s.cache[j.Identity] =cacheEntry{Identity: j.Identity, ID: j.ID, Artifacts: append([]Artifact(nil), j.Artifacts...), At: endedAt(j)}
+	s.cache[j.Identity] = cacheEntry{Identity: j.Identity, ID: j.ID, Artifacts: append([]Artifact(nil), j.Artifacts...), At: endedAt(j)}
 }
 
 // applyCache folds a cache record into the cache. A blob that does not decode is left out.
