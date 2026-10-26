@@ -1,5 +1,7 @@
 //go:build cosmo
 
+// hostOS names the operating system this binary is running on.
+
 package jobserver
 
 import (

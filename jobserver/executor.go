@@ -1,3 +1,5 @@
+// waitDelay bounds how long a child may hold the output pipe open after the job ends.
+
 package jobserver
 
 import (

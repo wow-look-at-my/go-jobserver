@@ -1,3 +1,5 @@
+// printCPU reports the daemon's CPU measurement.
+
 package main
 
 import (

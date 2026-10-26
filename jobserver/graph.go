@@ -1,3 +1,5 @@
+// maxDepth caps Depths.
+
 package jobserver
 
 // maxDepth caps Depths. A job that deep, or one that depends on a cycle, reports it.

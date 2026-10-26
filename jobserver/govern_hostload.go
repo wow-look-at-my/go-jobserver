@@ -1,3 +1,5 @@
+// hostLoadErrorEvery is how often the error about an unreadable host load repeats.
+
 package jobserver
 
 import (

@@ -1,3 +1,5 @@
+// The spool is a directory the daemon watches.
+
 package jobserver
 
 import (

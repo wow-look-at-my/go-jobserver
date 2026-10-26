@@ -1,3 +1,5 @@
+// A Selector names processes by executable name or by process id.
+
 package jobserver
 
 import (

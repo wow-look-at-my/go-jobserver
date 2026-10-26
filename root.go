@@ -1,3 +1,5 @@
+// commands holds one constructor per subcommand.
+
 package main
 
 import (
