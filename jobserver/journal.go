@@ -31,6 +31,7 @@ const (
 	recCPU      byte = 9
 	recTask     byte = 10
 	recResult   byte = 11
+	recDetail   byte = 12
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -76,7 +77,7 @@ type record struct {
 	// recCPU
 	cpuSeconds float64
 
-	// recTask, recResult: JSON
+	// recTask, recResult, recDetail: JSON
 	blob string
 }
 
@@ -139,7 +140,7 @@ func (r record) encode() []byte {
 	case recCPU:
 		e.str(r.id)
 		e.f64(r.cpuSeconds)
-	case recTask, recResult:
+	case recTask, recResult, recDetail:
 		e.str(r.id)
 		e.str(r.blob)
 	default:
@@ -211,7 +212,7 @@ func decodeRecord(payload []byte) (record, error) {
 	case recCPU:
 		r.id = d.str()
 		r.cpuSeconds = d.f64()
-	case recTask, recResult:
+	case recTask, recResult, recDetail:
 		r.id = d.str()
 		r.blob = d.str()
 	default:

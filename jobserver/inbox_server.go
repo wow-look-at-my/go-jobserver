@@ -61,10 +61,7 @@ func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFu
 	c := newInboxCore(s, name, keys, rank, run)
 	s.inboxes[name] = c
 	s.mu.Unlock()
-	for _, j := range s.store.Jobs() {
-		if j.Inbox != name || j.State.Terminal() {
-			continue
-		}
+	for _, j := range s.store.liveIn(name) {
 		if check != nil {
 			if err := check(j.Spec); err != nil {
 				s.finish(j.ID, StateFailed, -1, "the spec does not decode: "+err.Error(), nil, 0)
@@ -163,16 +160,12 @@ func (s *Server) cancel(id string) error {
 
 // drain cancels every queued task of an inbox. Running tasks go on.
 func (s *Server) drain(name string) {
-	inbox := name
-	if name == DefaultInboxName {
-		inbox = ""
-	}
 	c := s.inbox(name)
 	if name == DefaultInboxName {
 		c = s.defCore
 	}
-	for _, j := range s.store.Jobs() {
-		if j.Inbox != inbox || j.State.Terminal() || j.State == StateRunning {
+	for _, j := range s.store.liveIn(name) {
+		if j.State == StateRunning {
 			continue
 		}
 		if c != nil && c.forget(j.ID) {
@@ -218,6 +211,10 @@ func (s *Server) job(id string) (*Job, error) { return mustJob(s.store, id) }
 
 // waitJob blocks until a task's job ends.
 func (s *Server) waitJob(ctx context.Context, id string) (*Job, error) {
+	if err := s.store.hold(id); err != nil {
+		return nil, err
+	}
+	defer s.store.release(id)
 	for {
 		ch := s.store.Changed()
 		j, err := mustJob(s.store, id)

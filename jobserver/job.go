@@ -101,6 +101,12 @@ type Job struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	// Consumer is the consumer that holds the task now.
 	Consumer string `json:"consumer,omitempty"`
+	// Steps are the named pieces of work the task reported.
+	Steps []TaskStep `json:"steps,omitempty"`
+	// Waits are the spans where the task reported that it waited.
+	Waits []TaskWait `json:"waits,omitempty"`
+	// Seq is the store change count at the last change of the job. Only this process counts it.
+	Seq uint64 `json:"seq"`
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.
