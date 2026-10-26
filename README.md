@@ -413,3 +413,14 @@ go-toolchain
 | `jobserver/server_monitor.go` | monitor jobs in the daemon: the enqueue check, the watch, the last status |
 | `jobserver/govern_monitor.go` | the monitor policy and the freeze rotation |
 | `jobserver/explain.go`, `jobserver/views.go` | what each job waits on, the summary line, the graph and the monitor views |
+| `spool/` | a directory of entries taken in age order: bounds, `done/`, `failed/` with the reason, a stuck-entry skip |
+
+## Candidates to move in from webhook-runner
+
+webhook-runner has these generic features, and go-jobserver does not have them yet:
+
+- a delayed queue, keyed so that a new item replaces an older one with the same key.
+- backlogs: a bounded wait list for each group, in front of admission.
+- an interval scheduler that starts work on a fixed cadence.
+- retention sweeps that delete old logs and run records.
+- its run tracker and run store, which form a second job model beside this.
