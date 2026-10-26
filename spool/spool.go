@@ -32,6 +32,7 @@ const (
 const (
 	corruptSuffix = ".corrupt"
 	errorSuffix   = ".error"
+	taskSuffix    = ".task"
 )
 
 // The bounds and the scan interval that Open uses when no option sets them.
@@ -76,8 +77,10 @@ func WithBounds(maxEntries int, maxBytes int64) Option {
 
 // Spool watches a directory and adds each spec file in it to one inbox as a task.
 type Spool struct {
-	dir      string
-	add      reflect.Value
+	dir string
+	add reflect.Value
+	// lookup is the inbox's Lookup method. It is not valid for an inbox that has none.
+	lookup   reflect.Value
 	specType reflect.Type
 	interval time.Duration
 	logf     func(format string, args ...any)
@@ -99,7 +102,8 @@ type Spool struct {
 
 var (
 	taskType  = reflect.TypeFor[*jobserver.Task]()
-	errorType = reflect.TypeFor[error]()
+	errorType  = reflect.TypeFor[error]()
+	lookupType = reflect.TypeFor[func(string) (*jobserver.Task, error)]()
 )
 
 // Open finds the AddTask method of inbox, adds each file that waits in dir in age order, and then watches dir.
@@ -121,10 +125,15 @@ func Open(dir string, inbox any, opts ...Option) (*Spool, error) {
 		(base.Kind() != reflect.Pointer && base.Kind() != reflect.Struct) {
 		return nil, fmt.Errorf("%w: %T.AddTask takes %v, not a struct", ErrBadInbox, inbox, spec)
 	}
+	lookup := reflect.ValueOf(inbox).MethodByName("Lookup")
+	if lookup.IsValid() && lookup.Type() != lookupType {
+		return nil, fmt.Errorf("%w: %T.Lookup is %v, not %v", ErrBadInbox, inbox, lookup.Type(), lookupType)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Spool{
 		dir:        dir,
 		add:        add,
+		lookup:     lookup,
 		specType:   spec,
 		interval:   DefaultInterval,
 		logf:       log.Printf,
@@ -206,7 +215,8 @@ func (s *Spool) entries() ([]entry, error) {
 	var out []entry
 	for _, de := range list {
 		name := de.Name()
-		if de.IsDir() || strings.HasPrefix(name, ".") || strings.HasSuffix(name, corruptSuffix) || strings.HasSuffix(name, errorSuffix) {
+		if de.IsDir() || strings.HasPrefix(name, ".") || strings.HasSuffix(name, corruptSuffix) ||
+			strings.HasSuffix(name, errorSuffix) || strings.HasSuffix(name, taskSuffix) {
 			continue
 		}
 		info, err := de.Info()
@@ -267,6 +277,16 @@ func (s *Spool) scan() {
 
 // take decodes one file and adds it to the inbox. A wait then moves the file when its task ends.
 func (s *Spool) take(e entry) {
+	task, known, err := s.resume(e)
+	if err != nil {
+		s.markStuck(e, fmt.Sprintf("spool: %s: %v; the file stays and is skipped until it changes", e.name, err))
+		return
+	}
+	if known {
+		s.logf("spool: %s is task %s, which the server still holds", e.name, task.ID)
+		s.track(e, task)
+		return
+	}
 	body, err := os.ReadFile(filepath.Join(s.dir, e.name))
 	if err != nil {
 		s.logf("spool: %s: %v", e.name, err)
@@ -277,7 +297,7 @@ func (s *Spool) take(e entry) {
 		s.quarantine(e, err)
 		return
 	}
-	task, err := s.call(spec)
+	task, err = s.call(spec)
 	if errors.Is(err, jobserver.ErrStopped) {
 		s.markStuck(e, fmt.Sprintf("spool: %s: %v; the file stays for the next start", e.name, err))
 		return
@@ -287,6 +307,14 @@ func (s *Spool) take(e entry) {
 		return
 	}
 	s.logf("spool: %s is task %s", e.name, task.ID)
+	if err := s.record(e, task); err != nil {
+		s.logf("spool: %s: the task ID cannot be recorded: %v; a crash before the task ends adds the file again", e.name, err)
+	}
+	s.track(e, task)
+}
+
+// track marks the file active and waits on its task.
+func (s *Spool) track(e entry, task *jobserver.Task) {
 	s.mu.Lock()
 	s.active[e.name] = true
 	s.mu.Unlock()
@@ -425,6 +453,9 @@ func (s *Spool) rename(name, dir string, cause error) error {
 			os.Remove(reason)
 		}
 		return err
+	}
+	if err := os.Remove(s.sidecar(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.logf("spool: %s: %v", name, err)
 	}
 	return nil
 }

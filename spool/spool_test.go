@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -214,25 +213,18 @@ func TestOpenReplaysInAgeOrder(t *testing.T) {
 	write(t, filepath.Join(dir, "c.json"), `{"hook":"second"}`, base.Add(time.Second))
 	open(t, dir, in)
 
-	// Open adds the waiting files before it returns, so the task list holds all of them.
-	jobs := srv.List()
-	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].Created.Before(jobs[j].Created) })
-	var titles []string
-	for _, j := range jobs {
-		titles = append(titles, j.Name)
-	}
-	assert.Equal(t, []string{"b", "c", "a"}, titles, "the oldest file is added first")
-
 	c := in.Bind()
-	hooks := map[string]string{}
+	var order, titles []string
 	for range 3 {
 		task, spec, ok, err := in.Take(context.Background(), c, 5*time.Second)
 		require.NoError(t, err)
 		require.True(t, ok)
-		hooks[spec.Title] = spec.Hook
+		order = append(order, spec.Hook)
+		titles = append(titles, spec.Title)
 		require.NoError(t, in.Done(c, task, "ok", nil))
 	}
-	assert.Equal(t, map[string]string{"b": "first", "c": "second", "a": "third"}, hooks)
+	assert.Equal(t, []string{"first", "second", "third"}, order, "the oldest file is added first")
+	assert.Equal(t, []string{"b", "c", "a"}, titles)
 	eventuallyExists(t, filepath.Join(dir, DoneDir, "a.json"), filepath.Join(dir, DoneDir, "b.json"), filepath.Join(dir, DoneDir, "c.json"))
 }
 
