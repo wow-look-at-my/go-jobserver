@@ -73,6 +73,22 @@ func TestSetPriorityMovesATaskInLine(t *testing.T) {
 	assert.Equal(t, []int{0, 2, 1}, in.order(), "the task moved up runs before the one added ahead of it")
 }
 
+// A task whose lease names a group the scheduler does not declare fails at once, and its error says why.
+func TestAnAdmissionTheSchedulerRefusesFailsTheTask(t *testing.T) {
+	srv := newTestServer(t, nil)
+	in, err := NewInbox[rankedInbox](srv, "ranked")
+	require.NoError(t, err)
+	in.hold = make(chan struct{})
+	close(in.hold)
+	task, err := in.AddTask(work(1))
+	require.NoError(t, err)
+	terr := waitTask(t, task)
+	require.NotNil(t, terr)
+	assert.Equal(t, Failed, terr.State)
+	assert.Contains(t, terr.Message, "admission: ")
+	assert.Contains(t, terr.Message, `"g"`)
+}
+
 // The new priority is in the journal, so a restart keeps it.
 func TestSetPriorityIsJournaled(t *testing.T) {
 	dir := shortDir(t)

@@ -167,8 +167,14 @@ func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	delete(c.leasing, g.id)
 	if err != nil {
 		cancel()
-		if !errors.Is(err, ErrSchedulerClosed) {
-			c.s.cfg.Logf("go-jobserver: inbox %s: admit %s: %v", c.name, g.id, err)
+		switch {
+		case errors.Is(err, ErrDuplicateLease):
+			// An earlier offer of the task still leaves the queue. The next tick offers it again.
+			c.s.Wake()
+		case !errors.Is(err, ErrSchedulerClosed):
+			// The scheduler refuses this request every time, such as one naming an undeclared group.
+			c.s.cfg.Logf("go-jobserver: ERROR: inbox %s: admit %s: %v", c.name, g.id, err)
+			c.s.finish(g.id, StateFailed, -1, "admission: "+err.Error(), nil, 0)
 		}
 		return
 	}
