@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-
 func (s *Store) compactPath() string { return filepath.Join(s.dir, journalName+".compact") }
 
 // hold marks a caller that blocks on a task, so no prune drops it. It fails for a task the store does not hold.
