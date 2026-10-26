@@ -94,6 +94,8 @@ Write spool files to a temporary name that starts with a dot, and rename them in
 
 The `spool` package works on any inbox. `spool.Open(dir, inbox)` finds the inbox's `AddTask` method through reflection and decodes each file as JSON into its spec type. A spec type with an `UnmarshalText` method also reads a body that is not JSON. `Park(spec)` writes a spec into the spool atomically, and refuses with `spool.ErrFull` at a bound (`WithBounds`, `SetBounds`). A spec that an inbox refuses with `jobserver.ErrStopped` stays in the spool for the next start.
 
+After the spool adds a file, it writes `<name>.task` with the task ID before it waits. A file whose `.task` names a task the inbox's `Lookup` still finds is not added again: the spool waits on that task. This happens when the spool opens again after a crash. A `.task` that names an unknown task, or another version of the file, is removed. The file is added.
+
 ### HTTP API
 
 Every route answers JSON, and `POST /api/<op>` takes the same request envelope the other transports use (`{"op":"enqueue","spec":{...}}`).
@@ -329,7 +331,7 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 
 - **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
 - **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
-- **Consumers.** `Bind` attaches one consumer. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns only admitted tasks. The task holds its slot until `Done`.
+- **Consumers.** `Bind` attaches one consumer. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns the queued task that sorts first by `Compare`, then by arrival, and waits for the admission of that task. An admitted task that sorts after it gives back its slot until it is taken. The task holds its slot until `Done`. `Lookup(id)` returns a task of the inbox, or `ErrNotFound`.
 - **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
 - **Over the wire.** The ops `inbox.add`, `inbox.bind`, `inbox.unbind`, `inbox.take`, `inbox.started`, `inbox.done` and `inbox.drain` name their inbox. `ClientInbox` gives the same `*Inbox` methods over a `Client`.
 
