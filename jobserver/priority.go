@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 )
 
 // PriorityKey is one row of the admission order.
@@ -89,6 +90,21 @@ func (t priorityTable) values(rank []float64) map[string]float64 {
 	}
 	return out
 }
+
+// PriorityTable is a validated key list, for a queue of the caller's own that orders the way the scheduler does.
+type PriorityTable struct{ t priorityTable }
+
+// NewPriorityTable checks a key list the way NewScheduler does, and adds KeyOpenBatch when it is missing.
+func NewPriorityTable(keys []PriorityKey) (PriorityTable, error) {
+	t, err := newPriorityTable(keys)
+	return PriorityTable{t}, err
+}
+
+// Rank resolves values into one value per key, in key order, with defaults filled in.
+func (p PriorityTable) Rank(values map[string]float64) ([]float64, error) { return p.t.rank(values) }
+
+// CompareRanks orders ranks the way the scheduler does: the first key that differs decides, lower first.
+func CompareRanks(a, b []float64) int { return slices.Compare(a, b) }
 
 // PriorityKeys returns the scheduler's key list, in comparison order.
 func (s *Scheduler) PriorityKeys() []PriorityKey {

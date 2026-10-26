@@ -85,6 +85,8 @@ type Scheduler struct {
 	holding []*Lease
 	groups  map[string]int
 	maxRuns int
+	// limits holds the declared cap and groups and the overrides; maxRuns and groups are what they make.
+	limits limitLayer
 	budget  float64
 	batches map[string]*batchState
 	now     func() time.Time
@@ -133,6 +135,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		cfg:      cfg,
 		groups:   map[string]int{},
 		maxRuns:  cfg.MaxConcurrent,
+		limits:   limitLayer{capDeclared: cfg.MaxConcurrent},
 		budget:   cfg.CPUBudget,
 		batches:  map[string]*batchState{},
 		now:      time.Now,
@@ -205,30 +208,35 @@ func (s *Scheduler) MaxConcurrent() int {
 	return s.maxRuns
 }
 
-// SetMaxConcurrent moves the count cap. Zero means no cap.
+// SetMaxConcurrent moves the declared count cap. Zero means no cap. An override, while set, still wins.
 func (s *Scheduler) SetMaxConcurrent(n int) {
 	if n < 0 {
 		n = 0
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.maxRuns = n
-	s.planLocked()
+	s.limits.capDeclared = n
+	s.applyCapLocked()
 }
 
-// SetGroups replaces the named groups and their limits. A limit below one is
-// one. A queued lease whose group is gone fails with ErrGroupRemoved. A holder
-// of a removed group keeps its slot, and counts again if the group returns.
+// SetGroups replaces the declared groups and their limits. A limit below one
+// is one. A queued lease whose group is gone fails with ErrGroupRemoved. A
+// holder of a removed group keeps its slot, and counts again if the group
+// returns.
 func (s *Scheduler) SetGroups(limits map[string]int) {
 	next := make(map[string]int, len(limits))
 	for name, limit := range limits {
-		if limit < 1 {
-			limit = 1
-		}
-		next[name] = limit
+		next[name] = max(limit, 1)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.limits.groupDeclared = next
+	s.applyGroupsLocked()
+}
+
+// applyGroupsLocked sets the effective groups from the declared ones and the overrides. Caller holds s.mu.
+func (s *Scheduler) applyGroupsLocked() {
+	next := s.limits.effectiveGroups()
 	s.groups = next
 	kept := s.waiting[:0]
 	for _, l := range s.waiting {

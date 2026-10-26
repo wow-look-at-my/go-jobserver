@@ -30,10 +30,25 @@ type LeaseInfo struct {
 	Wait *QueueState `json:"wait,omitempty"`
 }
 
+// BatchInfo is one batch: its members, and whether the open-batch key moves them forward.
+type BatchInfo struct {
+	Key string `json:"key"`
+	// Open is true while a member holds a slot, or for BatchGrace after the last one ended.
+	Open    bool      `json:"open"`
+	Running int       `json:"running"`
+	LastEnd time.Time `json:"last_end,omitzero"`
+	// Holding and Waiting are the members' lease IDs.
+	Holding []string `json:"holding"`
+	Waiting []string `json:"waiting"`
+}
+
 // GroupInfo is one named group's use.
 type GroupInfo struct {
-	Name    string `json:"name"`
-	Limit   int    `json:"limit"`
+	Name  string `json:"name"`
+	Limit int    `json:"limit"`
+	// Declared is the limit the host declared. Limit differs from it while Overridden.
+	Declared   int  `json:"declared"`
+	Overridden bool `json:"overridden,omitempty"`
 	Active  int    `json:"active"`
 	Waiting int    `json:"waiting"`
 }
@@ -50,6 +65,10 @@ type SchedulerStatus struct {
 	Waiting  []LeaseInfo `json:"waiting"`
 	// Monitors are the monitor leases. They hold no slot, so Holding and Running leave them out.
 	Monitors []LeaseInfo `json:"monitors"`
+	// Batches are the batches the scheduler keeps open or has members of, by key.
+	Batches []BatchInfo `json:"batches"`
+	// Cap is the count cap's declared and override layers. MaxConcurrent is its effective value.
+	Cap LimitInfo `json:"cap"`
 	Groups   []GroupInfo `json:"groups"`
 	// PriorityKeys is the admission order, compared top to bottom.
 	PriorityKeys []PriorityKey `json:"priority_keys"`
@@ -61,11 +80,13 @@ func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := SchedulerStatus{MaxConcurrent: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, PriorityKeys: s.PriorityKeys()}
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, Batches: []BatchInfo{}, PriorityKeys: s.PriorityKeys()}
 	groups := map[string]*GroupInfo{}
 	for name, limit := range s.groups {
-		groups[name] = &GroupInfo{Name: name, Limit: limit}
+		_, over := s.limits.groupOverride[name]
+		groups[name] = &GroupInfo{Name: name, Limit: limit, Declared: s.limits.groupDeclared[name], Overridden: over}
 	}
+	st.Cap = s.capInfoLocked()
 	for _, l := range s.holding {
 		if l.req.Monitor {
 			st.Monitors = append(st.Monitors, l.info(nil))
@@ -90,8 +111,47 @@ func (s *Scheduler) Status() SchedulerStatus {
 	for _, g := range groups {
 		st.Groups = append(st.Groups, *g)
 	}
+	st.Batches = s.batchInfoLocked()
 	sort.Slice(st.Groups, func(i, k int) bool { return st.Groups[i].Name < st.Groups[k].Name })
 	return st
+}
+
+// batchInfoLocked lists every batch the scheduler tracks or a live lease names, sorted by key. Caller holds s.mu.
+func (s *Scheduler) batchInfoLocked() []BatchInfo {
+	now := s.now()
+	byKey := map[string]*BatchInfo{}
+	get := func(key string) *BatchInfo {
+		b := byKey[key]
+		if b == nil {
+			b = &BatchInfo{Key: key, Open: s.batchOpen(key, now), Holding: []string{}, Waiting: []string{}}
+			if st := s.batches[key]; st != nil {
+				b.Running, b.LastEnd = st.running, st.lastEnd
+			}
+			byKey[key] = b
+		}
+		return b
+	}
+	for key := range s.batches {
+		get(key)
+	}
+	for _, l := range s.holding {
+		if l.req.Batch != "" {
+			b := get(l.req.Batch)
+			b.Holding = append(b.Holding, l.req.ID)
+		}
+	}
+	for _, l := range s.waiting {
+		if l.req.Batch != "" {
+			b := get(l.req.Batch)
+			b.Waiting = append(b.Waiting, l.req.ID)
+		}
+	}
+	out := make([]BatchInfo, 0, len(byKey))
+	for _, b := range byKey {
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].Key < out[k].Key })
+	return out
 }
 
 // info renders a lease for the status surface. Caller holds the scheduler's lock.
