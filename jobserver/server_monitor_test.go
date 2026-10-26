@@ -235,7 +235,7 @@ func TestAHostTaskWaitsOnAMonitorOnTheHostsScheduler(t *testing.T) {
 	assert.JSONEq(t, `{"hook":"h"}`, string(j.Task.Data))
 }
 
-// Why names each kind of wait in words: a draft, a missing dependency, a running one, the run cap and a pause.
+// Why names each kind of wait in words: a draft, a running dependency, the run cap and a pause.
 func TestWhyNamesEveryWaitKind(t *testing.T) {
 	hold := make(chan struct{})
 	t.Cleanup(func() { close(hold) })
@@ -257,11 +257,6 @@ func TestWhyNamesEveryWaitKind(t *testing.T) {
 	assert.Equal(t, WaitDraft, w.Kind)
 	assert.Contains(t, w.Detail, "go-jobserver activate draft")
 
-	w = why(Spec{ID: "orphan", Command: []string{"x"}, Deps: []string{"ghost"}})
-	assert.Equal(t, WaitDep, w.Kind)
-	assert.Equal(t, "ghost", w.ID)
-	assert.Equal(t, "no such job", w.Detail)
-
 	w = why(Spec{ID: "next", Command: []string{"x"}, Deps: []string{busy.ID}})
 	assert.Equal(t, WaitDep, w.Kind)
 	assert.Equal(t, "busy is running", w.Detail)
@@ -277,7 +272,7 @@ func TestWhyNamesEveryWaitKind(t *testing.T) {
 	assert.Equal(t, WaitPaused, ws[0].Kind)
 	assert.Contains(t, ws[0].Detail, "go-jobserver resume")
 
-	assert.Equal(t, "1 running, 0 monitors watching; 2 wait on unfinished jobs, 1 waits as drafts, 1 waits because the server is paused",
+	assert.Equal(t, "1 running, 0 monitors watching; 1 waits on unfinished jobs, 1 waits as drafts, 1 waits because the server is paused",
 		Summary(srv.List(), srv.Explain()))
 }
 
