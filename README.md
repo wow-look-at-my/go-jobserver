@@ -343,6 +343,10 @@ A journal record is a length and a CRC32C checksum around a compact binary paylo
 
 The journal is flushed to disk after every record. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
 
+`Config.Retention` (a week by default) forgets a finished job and its log once it is that old. A job an unfinished job depends on stays. Once enough jobs left, the journal is rewritten from the jobs that stay, and a rename replaces the old file.
+
+A host that embeds the server gets more seams. `Config.OnEnd` hears every job that ends, including one blocked or cancelled before it ran. `Drain` stops new starts and journals no pause. The host can let its running work finish as it shuts down. A job that waits stays for the next start.
+
 ## Command line
 
 ```
