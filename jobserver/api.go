@@ -24,6 +24,11 @@ const (
 	OpInterruptAll = "interrupt-all"
 	OpStats        = "stats"
 	OpPolicy       = "policy"
+	OpMonitors     = "monitors"
+	OpKinds        = "kinds"
+	OpWhy          = "why"
+	OpGraph        = "graph"
+	OpScheduler    = "scheduler"
 )
 
 // Request is one API call.
@@ -62,6 +67,13 @@ type Response struct {
 	Output   string    `json:"output,omitempty"`
 	Existing bool      `json:"existing,omitempty"`
 	Count    int       `json:"count,omitempty"`
+	// Summary is the line that says what runs, what watches and what the waiting jobs wait on.
+	Summary   string           `json:"summary,omitempty"`
+	Waits     []Wait           `json:"waits,omitempty"`
+	Monitors  []MonitorView    `json:"monitors,omitempty"`
+	Kinds     []*MonitorKind   `json:"kinds,omitempty"`
+	Graph     *JobGraph        `json:"graph,omitempty"`
+	Scheduler *SchedulerStatus `json:"scheduler,omitempty"`
 }
 
 // Failure returns a response carrying an error.
@@ -77,7 +89,8 @@ func codeFor(err error) ErrorCode {
 	case errors.Is(err, ErrNotFound):
 		return CodeNotFound
 	case errors.Is(err, ErrDuplicate), errors.Is(err, ErrCycle), errors.Is(err, ErrMissingDep),
-		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand):
+		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand),
+		errors.Is(err, ErrUnknownMonitorKind), errors.Is(err, ErrBadMonitorArgs):
 		return CodeBadRequest
 	default:
 		return CodeInternal
@@ -86,6 +99,9 @@ func codeFor(err error) ErrorCode {
 
 // Handle runs one API call against the server.
 func (s *Server) Handle(req Request) Response {
+	if resp, ok := s.handleView(req); ok {
+		return resp
+	}
 	switch req.Op {
 	case OpEnqueue:
 		if req.Spec == nil {
@@ -119,7 +135,8 @@ func (s *Server) Handle(req Request) Response {
 		return Response{OK: true, Job: j}
 
 	case OpList:
-		return Response{OK: true, Jobs: s.List()}
+		jobs := s.List()
+		return Response{OK: true, Jobs: jobs, Summary: Summary(jobs, s.Explain())}
 
 	case OpGet:
 		j, err := s.Get(req.ID)

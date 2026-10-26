@@ -44,6 +44,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("GET /api/jobs/{id}", s.apiGet)
 	mux.HandleFunc("GET /api/jobs/{id}/logs", s.apiLogs)
 	mux.HandleFunc("GET /api/stats", s.apiStats)
+	s.viewRoutes(mux)
 	return mux
 }
 
@@ -214,6 +215,9 @@ type pageData struct {
 	Graph      []GraphRow
 	Now        time.Time
 	Mechanisms string
+	// Waits lists what each waiting job waits on, and Summary is the line above the table.
+	Waits   map[string][]Wait
+	Summary string
 }
 
 // enabledMechanisms names the controls a job turns on.
@@ -252,7 +256,8 @@ func (s *Server) pageData(*http.Request) pageData {
 	for _, j := range jobs {
 		rows = append(rows, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
 	}
-	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now()}
+	waits := s.Explain()
+	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(), Waits: waits, Summary: Summary(jobs, waits)}
 }
 
 // apiList answers GET /api/jobs.
@@ -339,7 +344,7 @@ func decodeSpec(body []byte) (*Spec, error) {
 		return nil, fmt.Errorf("go-jobserver: empty job body")
 	}
 	var spec Spec
-	if err := json.Unmarshal(body, &spec); err == nil && len(spec.Command) > 0 {
+	if err := json.Unmarshal(body, &spec); err == nil && (len(spec.Command) > 0 || spec.Monitor != nil) {
 		return &spec, nil
 	}
 	var argv []string

@@ -165,5 +165,5 @@ func TestSummaryWords(t *testing.T) {
 		"d": {{Kind: WaitMonitor, ID: "m"}, {Kind: WaitDep, ID: "a"}},
 		"e": {{Kind: WaitDraft}},
 	}
-	assert.Equal(t, "1 running, 1 monitor watching; 2 wait for the run cap, 1 waits as drafts, 1 waits on unfinished jobs, 1 waits on 1 monitor", Summary(jobs, waits))
+	assert.Equal(t, "1 running, 1 monitor watching; 2 wait for the run cap, 1 waits on unfinished jobs, 1 waits as drafts, 1 waits on 1 monitor", Summary(jobs, waits))
 }
