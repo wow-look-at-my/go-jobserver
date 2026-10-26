@@ -96,7 +96,7 @@ func (s *Server) remoteInbox(name string, keys []PriorityKey) (*inboxCore, error
 	if err != nil {
 		return nil, err
 	}
-	c, err := s.openInbox(name, pk, 0, nil, nil)
+	c, err := s.openInbox(name, pk, 0, nil, nil, inboxHooks{})
 	if errors.Is(err, ErrInboxExists) {
 		if c := s.inbox(name); c != nil {
 			return c, nil

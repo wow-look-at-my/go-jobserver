@@ -44,6 +44,15 @@ type inboxCore struct {
 	closing bool
 	// isDefault marks the default inbox. The server's executor runs each task it admits.
 	isDefault bool
+	hooks     inboxHooks
+}
+
+// inboxHooks are the optional parts of an inbox that shape its leases.
+type inboxHooks struct {
+	// leaseFor builds the lease request of a task. Nil uses the task's name and policy. The core sets the ID.
+	leaseFor func(j *Job) (LeaseRequest, error)
+	// onQueue hears where a task waits for admission, and a zero QueueState once it is admitted.
+	onQueue func(id string, q QueueState)
 }
 
 // pending reports whether a task waits for admission or holds a slot in the inbox.
@@ -107,13 +116,28 @@ func (c *inboxCore) offer(j *Job) {
 		c.s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
+	req := LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
+	switch {
+	case c.isDefault:
+		req = c.s.leaseFor(j)
+	case c.hooks.leaseFor != nil:
+		shaped, err := c.hooks.leaseFor(j)
+		if err != nil {
+			c.s.finish(j.ID, StateFailed, -1, "the lease request: "+err.Error(), nil, 0)
+			return
+		}
+		shaped.ID = j.ID
+		if shaped.Class == "" {
+			shaped.Class = req.Class
+		}
+		if shaped.Fallback == nil {
+			shaped.Fallback = req.Fallback
+		}
+		req = shaped
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.leasing[j.ID] = cancel
 	g := &grant{id: j.ID, prio: prio, created: j.Created, spec: j.Spec, timeout: j.Timeout}
-	req := LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
-	if c.isDefault {
-		req = c.s.leaseFor(j)
-	}
 	if c.run == nil && !c.isDefault {
 		c.signal()
 	}
@@ -123,7 +147,14 @@ func (c *inboxCore) offer(j *Job) {
 // acquire waits for admission and hands the task to its runner or its consumer.
 func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
-	l, err := c.s.sched.acquire(ctx, req, order, nil)
+	var notify func(QueueState)
+	if c.hooks.onQueue != nil {
+		notify = func(q QueueState) { c.hooks.onQueue(g.id, q) }
+	}
+	l, err := c.s.sched.acquire(ctx, req, order, notify)
+	if err == nil && notify != nil {
+		notify(QueueState{})
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cancel, live := c.leasing[g.id]
@@ -168,6 +199,7 @@ func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	g.cancel = cancel
 	c.out[g.id] = g
 	c.runs.Add(1)
+	ctx = context.WithValue(ctx, leaseCtxKey{}, l)
 	go c.runTask(context.WithValue(ctx, taskCtxKey{}, &Task{ID: g.id, b: localNamed{Server: c.s, c: c}}), g)
 }
 
@@ -415,4 +447,13 @@ func (c *inboxCore) stopAll() {
 		}
 	}
 	c.runs.Wait()
+}
+
+// leaseCtxKey carries the lease a Run call runs under.
+type leaseCtxKey struct{}
+
+// leaseFrom returns the lease a Run call runs under, or nil.
+func leaseFrom(ctx context.Context) *Lease {
+	l, _ := ctx.Value(leaseCtxKey{}).(*Lease)
+	return l
 }

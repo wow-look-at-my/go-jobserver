@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed dashboard.html dashboard.js
+//go:embed dashboard.html
 var dashboardFiles embed.FS
 
 // pages is parsed once; a parse failure is a build-time mistake, so it panics
@@ -215,7 +215,7 @@ type pageData struct {
 	Graph      []GraphRow
 	Now        time.Time
 	Mechanisms string
-	// Waits lists what each waiting job waits on, and Summary is the line above the table.
+	// Waits lists what each waiting task waits on, and Summary is the line above the table.
 	Waits    map[string][]Wait
 	Summary  string
 	Monitors []MonitorView
@@ -258,7 +258,8 @@ func (s *Server) pageData(*http.Request) pageData {
 		rows = append(rows, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
 	}
 	waits := s.Explain()
-	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(), Waits: waits, Summary: Summary(jobs, waits), Monitors: s.MonitorViews()}
+	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(),
+		Waits: waits, Summary: Summary(jobs, waits), Monitors: s.MonitorViews()}
 }
 
 // apiList answers GET /api/jobs.
@@ -345,7 +346,7 @@ func decodeSpec(body []byte) (*Spec, error) {
 		return nil, fmt.Errorf("go-jobserver: empty job body")
 	}
 	var spec Spec
-	if err := json.Unmarshal(body, &spec); err == nil && (len(spec.Command) > 0 || spec.Monitor != nil) {
+	if err := json.Unmarshal(body, &spec); err == nil && len(spec.Command) > 0 {
 		return &spec, nil
 	}
 	var argv []string

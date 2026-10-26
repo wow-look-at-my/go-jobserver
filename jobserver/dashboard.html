@@ -38,9 +38,6 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
 .s-blocked { background: #bb800933; color: #e3b341; }
 .alert { background: #da363326; border: 1px solid #da3633; border-radius: 6px; color: #ffa198; padding: .6rem .9rem; margin-bottom: 1rem; }
 .empty { color: #8b949e; padding: 2rem 0; }
-.summary { font-size: 1rem; margin: 0 0 1rem; }
-.wait { color: #d29922; }
-.graph { display: block; height: 320px; border: 1px solid #21262d; border-radius: 6px; margin-bottom: 1rem; }
 .log { background: #010409; border: 1px solid #21262d; border-radius: 6px; padding: .75rem;
   white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
 </style>
@@ -63,43 +60,38 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
 {{- if .Stats.CPU.HostError}}
 <div class="alert" role="alert"><strong>Configuration error:</strong> the host's CPU load is unknown ({{.Stats.CPU.HostError}}). go-jobserver cannot see work outside its own jobs, and it cannot see how many tasks want a CPU. Under load it keeps starting work, and it can destabilize the system.</div>
 {{- end}}
-<p class="summary" id="summary">{{.Summary}}</p>
+<p class="meta">{{.Summary}}</p>
 {{- if .Monitors}}
 <h2 class="meta">monitors</h2>
 <table>
-  <thead><tr><th>id</th><th>state</th><th>watches</th><th>checks</th><th>last result</th><th>waiting jobs</th></tr></thead>
+  <thead><tr><th>id</th><th>state</th><th>status</th><th>waiting tasks</th></tr></thead>
   <tbody>
   {{- range .Monitors}}
     <tr>
       <td><a href="/job/{{.ID}}">{{.ID}}</a></td>
       <td><span class="chip s-{{.State}}">{{.State}}</span></td>
-      <td class="cmd">{{.Monitor.Key}}</td>
-      <td class="deps">{{if .MonitorStatus}}{{.MonitorStatus.Checks}}{{else}}-{{end}}</td>
-      <td>{{if and .MonitorStatus .MonitorStatus.LastError}}<span class="err">ERROR: {{.MonitorStatus.LastError}}</span>{{else}}<span class="deps">{{.Line}}</span>{{end}}</td>
-      <td class="deps">{{range .Waiting}}<a href="/job/{{.}}">{{.}}</a> {{else}}-{{end}}</td>
+      <td class="deps">{{.Line}}</td>
+      <td class="deps">{{args .Waiting " "}}</td>
     </tr>
   {{- end}}
   </tbody>
 </table>
 {{- end}}
 {{- if .Jobs}}
-<h2 class="meta">graph</h2>
-<dag-view id="graph" orientation="LR" class="graph"></dag-view>
-<h2 class="meta">jobs</h2>
 <table>
-  <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>started</th><th>took</th><th>exit</th><th>waiting on</th><th></th></tr></thead>
+  <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>waiting on</th><th>started</th><th>took</th><th>exit</th><th></th></tr></thead>
   <tbody>
   {{- range .Graph}}
     <tr>
       <td><a href="/job/{{.Job.ID}}">{{.Job.ID}}</a></td>
       <td><span class="chip s-{{.Job.State}}">{{.Job.State}}</span></td>
       <td class="deps">{{.Depth}}</td>
-      <td class="cmd">{{if .Job.Monitor}}[{{.Job.Monitor.Key}}]{{else}}{{args .Job.Command " "}}{{end}}</td>
+      <td class="cmd">{{args .Job.Command " "}}</td>
       <td class="deps">{{args .Job.Deps " "}}</td>
+      <td class="deps">{{range index $.Waits .Job.ID}}{{.Detail}}<br>{{end}}</td>
       <td class="deps">{{short .Job.Started}}</td>
       <td class="deps">{{elapsed .Job}}</td>
       <td>{{if .Job.ExitCode}}<span class="err">{{.Job.ExitCode}}</span>{{end}}</td>
-      <td class="wait">{{range index $.Waits .Job.ID}}<div>{{.Detail}}</div>{{end}}</td>
       <td>{{if .Job.Error}}<span class="err">{{.Job.Error}}</span>{{end}}</td>
     </tr>
   {{- end}}
@@ -134,7 +126,6 @@ function act(op) {
   fetch('/api/' + op, {method: 'POST'}).then(function () { location.reload(); });
 }
 </script>
-<script type="module" src="/dashboard.js"></script>
 </body>
 </html>
 {{- else -}}

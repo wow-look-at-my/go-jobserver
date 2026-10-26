@@ -66,24 +66,6 @@ A job that names its outputs has them hashed when it finishes. Those hashes, the
 
 Change an input file and the identity changes. The job runs again. Pass `--force` to run anyway, or give jobs the same `--key` to have an unfinished one absorbed instead of duplicated.
 
-## Monitors
-
-A monitor is a job that waits for a condition instead of running a command. It completes when the condition holds, and a job that must wait for it depends on it like any other job. A monitor triggers nothing itself.
-
-```sh
-go-jobserver run --monitors monitors.xml
-go-jobserver queue --monitor file-exists --arg path=/tmp/ready   # prints m's id
-go-jobserver queue --dep <m> -- make deploy
-go-jobserver why <deploy id>     # monitor <m>: monitor:file-exists path=/tmp/ready: not yet after 12 checks: exit 1
-```
-
-- A monitor always starts, even when the run cap, a group or the CPU budget is full. It takes no slot. The governor runs it at nice 19 on the host's last CPU from its first sample. While all monitors together use more than `MonitorBudget` CPUs, the heaviest one freezes for one sample, in turn. A monitor is never revoked.
-- The same kind with the same args is one monitor: enqueueing it again answers with the one that watches (`existing`). A finished monitor never answers from the cache, because a condition can turn false again.
-- A check error, such as a bad HTTP status or an exit other than 0 or 1, is logged at error. Level, shown in red, and retried on the same cadence. It never reads as "not yet". A monitor has no deadline unless it is given one. A start resumes it.
-- `go-jobserver monitors`, `why`, `kinds`, `list` and the dashboard each lead with one line: what runs, what watches, and what the waiting jobs wait on.
-
-[docs/monitors.md](docs/monitors.md) holds the definition format.
-
 ## Transports
 
 Any of these can enqueue a job. The daemon serves all of them at once.
@@ -130,13 +112,8 @@ Every route answers JSON, and `POST /api/<op>` takes the same request envelope t
 | `POST /api/interrupt` | cancel every running job |
 | `POST /api/interrupt/{id}` | cancel one job |
 | `GET /api/stats` | counters for the server |
-| `GET /api/graph` | every job and dependency, with what each waiting job waits on |
-| `GET /api/monitors` | every monitor, its last check, and the jobs that wait on it |
-| `GET /api/why/{id}` | what one job waits on |
-| `GET /api/kinds` | the monitor kinds the daemon loads |
-| `GET /api/scheduler` | the scheduler's holders, waiters, groups and monitor leases |
 
-Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy`, `stats`, `monitors`, `kinds`, `why`, `graph` and `scheduler`.
+Operations are `enqueue`, `activate`, `depend`, `deps`, `list`, `get`, `logs`, `pause`, `resume`, `interrupt`, `interrupt-all`, `policy` and `stats`.
 
 A client has several seconds to send its request headers. The client also has a minute to send the whole request, and a couple of minutes of quiet between requests on one connection. A response has no time limit. A slow reader can fetch a large log. The TCP port and the file socket share these limits.
 
@@ -354,6 +331,9 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 
 - **Priority.** The `priority.MultiPriorityKey` fields of the inbox type are its keys, in field order. Lower goes first, the first value that differs decides, and arrival breaks a tie. `InboxPriority` orders inboxes against each other. The default inbox's key is `DefaultPriorityKey`, and its tasks go through the same admission.
 - **Triggers.** `OnSuccess`, `OnFail` and `OnEnded` add a task that waits on another, in any inbox. A trigger that can no longer fire cancels its task.
+- **Lease shaping.** An optional `LeaseFor(spec) LeaseRequest` method sets the `Class`, `Fallback`, `Group`, `Batch`, `GroupOnly`, `Policy` and `Limits` each task asks admission with. The lease ID stays the task ID, and the inbox's keys still order its tasks. An optional `OnQueue(taskID, QueueState)` method hears where each task waits for admission, then a zero `QueueState` when the task is admitted. It runs under the scheduler's lock. It must not block.
+- **Monitors.** With `Config.Monitors` set, the server opens the `monitor` inbox. `Server.Watch(spec, title)` adds a task that watches a condition, and a dependent task triggers on it. See [docs/monitors.md](docs/monitors.md).
+- **Why.** `Server.Why(id)` says what a task waits on. This covers a trigger or dependency, a monitor's last check, the run cap, a group, CPU, a consumer, a draft or a pause. `Explain`, `Summary`, `Graph` and `MonitorViews` give the same for every task. HTTP serves them at `/api/why/{id}`, `/api/graph`, `/api/monitors`, `/api/kinds` and `/api/scheduler`.
 - **Consumers.** `Bind` attaches one consumer. `Bind(name)` gives it a name. Each task it takes keeps that name in `ConsumerName`, through a restart and a compaction, after the consumer is gone. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns the queued task that sorts first by `Compare`, then by arrival, and waits for the admission of that task. An admitted task that sorts after it gives back its slot until it is taken. The task holds its slot until `Done`. `Lookup(id)` returns a task of the inbox, or `ErrNotFound`.
 - **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
 - **Task details.** A consumer reports on a task it holds through the inbox. `SetTitle(c, t, title)`, `Step(c, t, parent, title)`, `EndStep(c, t, step, status, msg)` and `RenameStep(c, t, step, title)` for named steps that nest, `OpenWait(c, t, reason)` and `CloseWait(c, t, wait)` for spans where the task waits, and `Log(c, t, line)` for its log. `SetOutcome(c, t, label)` sets a short label for the result, such as `skipped`, so a reader of `Tasks` tells the kind of result without the result. A `Run` method gets its task from `TaskFromContext(ctx)` and passes the empty `Consumer`. `EndStep` takes `succeeded`, `failed`, `skipped` or `abandoned`. A step that ends first ends each sub-step still open under it as `abandoned`, with the message "its parent step ended first". A step still open when the task ends becomes `abandoned`. Past its bound, a task drops its oldest closed step or wait, and `StepsDropped` and `WaitsDropped` count the drops. An open one never goes. A task whose held steps or waits are all open gets `ErrAllOpen`.
@@ -375,13 +355,9 @@ go-jobserver.sock    the file socket
 spool/               jobs dropped in as files
 ```
 
-A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept. A monitor goes back to `active` and watches again. A whole record of a kind this build does not know is skipped and logged at error level, so a downgrade never cuts the journal.
+A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept.
 
 The journal is flushed to disk after every record, except the details a task reports, which the next record flushes. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
-
-`Config.Retention` (a week by default) forgets a finished job and its log once it is that old. A job an unfinished job depends on stays. Once enough jobs left, the journal is rewritten from the jobs that stay, and a rename replaces the old file.
-
-A host that embeds the server gets more seams. `Config.OnEnd` hears every job that ends, including one blocked or cancelled before it ran. `Drain` stops new starts and journals no pause. The host can let its running work finish as it shuts down. A job that waits stays for the next start.
 
 ## Command line
 
@@ -390,11 +366,11 @@ go-jobserver [global flags] <command> [args]
 
 run                          run the daemon in the foreground
 queue [flags] cmd...         enqueue a job and print its id
-list                         list jobs, with what each waiting job waits on
-status <id>                  show one job
-why <id>                     say what a job waits on
-monitors                     list monitors and the jobs that wait on them
+list                         list jobs, with what each one waits on
+why <id>                     say what a task waits on
+monitors                     list the monitors and the tasks that wait on each
 kinds                        list the monitor kinds the daemon loads
+status <id>                  show one job
 logs [-f] <id>               print a job's output
 activate <id>                move a draft job to active
 depend <id> <dep>...         add dependencies
@@ -405,7 +381,7 @@ stats                        show server counters, CPU use and active controls
 version                      print the version
 ```
 
-`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`, and for a monitor `--monitor <kind>`, `--arg name=value` (repeatable) and `--deadline`. `run --monitors <file.xml>` loads the monitor kinds. With no command arguments, `queue` reads one command line from standard input.
+`queue` flags: `--name`, `--dep`/`--depends` (repeatable), `--input`, `--output`, `--env`, `--workdir`, `--key`, `--draft`, `--force`, `--wait`, `--shell`. `queue --monitor <kind> --arg name=value [--deadline d]` adds a monitor task instead of a command. `run --monitors <file.xml>` loads the monitor kinds. With no command arguments, `queue` reads one command line from standard input.
 
 Global flags: `--dir`, `--http`, `--socket`, `--spool`, `--ipc`, `-j`/`--jobs`, `--budget`, `--cost`, `--sample`, `--no-cpu`, `--stats-url`, `--no-http`, `--no-socket`, `--no-spool`. A global flag goes before or after the command. `go-jobserver <command> --help` prints the full flag list for that command.
 
@@ -455,19 +431,3 @@ go-toolchain
 | `daemon.go` | the daemon: the server and the spool on its default inbox |
 | `jobserver/graph.go` | each job's dependency depth and its children, for the dashboard and `list` |
 | `jobserver/client.go` | the client the CLI and other programs use |
-| `jobserver/monitordef.go` | the monitor definitions document, read with api-dsl |
-| `jobserver/monitor.go` | a monitor's poll and stream checks, and its watch loop |
-| `jobserver/server_monitor.go` | monitor jobs in the daemon: the enqueue check, the watch, the last status |
-| `jobserver/govern_monitor.go` | the monitor policy and the freeze rotation |
-| `jobserver/explain.go`, `jobserver/views.go` | what each job waits on, the summary line, the graph and the monitor views |
-| `spool/` | a directory of entries taken in age order: bounds, `done/`, `failed/` with the reason, a stuck-entry skip |
-
-## Candidates to move in from webhook-runner
-
-webhook-runner has these generic features, and go-jobserver does not have them yet:
-
-- a delayed queue, keyed so that a new item replaces an older one with the same key.
-- backlogs: a bounded wait list for each group, in front of admission.
-- an interval scheduler that starts work on a fixed cadence.
-- retention sweeps that delete old logs and run records.
-- its run tracker and run store, which form a second job model beside this.

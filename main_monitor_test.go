@@ -42,7 +42,7 @@ func TestCLIMonitors(t *testing.T) {
 	mon, _ := enqueue()
 	again, stderr := enqueue()
 	assert.Equal(t, mon, again, "the same condition answers with the same monitor")
-	assert.Contains(t, stderr, "already watches or runs this")
+	assert.Contains(t, stderr, "already watches this")
 
 	out, err = capture(t, func() error { return run([]string{"--dir", dir, "queue", "--dep", mon, "--", "true"}) })
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestCLIMonitors(t *testing.T) {
 	_, _, err = captureBoth(t, func() error {
 		return run([]string{"--dir", dir, "queue", "--monitor", "file-exists", "--", "true"})
 	})
-	assert.ErrorContains(t, err, "a monitor job runs no command")
+	assert.ErrorContains(t, err, "a monitor task runs no command")
 	_, _, err = captureBoth(t, func() error {
 		return run([]string{"--dir", dir, "queue", "--monitor", "file-exists", "--arg", "nonsense"})
 	})

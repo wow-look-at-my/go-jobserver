@@ -37,9 +37,6 @@ const (
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// errUnknownRecord marks a whole, checksummed frame of a kind this build does not know. A newer build wrote it.
-var errUnknownRecord = errors.New("jobserver: unknown record kind")
-
 // record is one journal entry. Which fields matter depends on kind.
 type record struct {
 	kind byte
@@ -159,9 +156,6 @@ func (r record) encode() []byte {
 func decodeRecord(payload []byte) (record, error) {
 	d := decoder{b: payload}
 	r := record{kind: d.u8()}
-	if d.err != nil {
-		return record{}, d.err
-	}
 	switch r.kind {
 	case recCreate:
 		r.id = d.str()
@@ -227,7 +221,7 @@ func decodeRecord(payload []byte) (record, error) {
 	case recCache:
 		r.blob = d.str()
 	default:
-		return record{kind: r.kind}, fmt.Errorf("%w %d", errUnknownRecord, r.kind)
+		return record{}, fmt.Errorf("jobserver: unknown record kind %d", r.kind)
 	}
 	if d.err != nil {
 		return record{}, d.err

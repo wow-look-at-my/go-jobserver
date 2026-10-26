@@ -49,7 +49,7 @@ func (s *Server) DefaultInbox() *Inbox[*CommandSpec, CommandResult] { return s.d
 
 // openInbox opens a named inbox and takes back its tasks from the journal.
 // check says whether a spec still decodes. A task that does not fails.
-func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFunc, check func(json.RawMessage) error) (*inboxCore, error) {
+func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFunc, check func(json.RawMessage) error, hooks inboxHooks) (*inboxCore, error) {
 	if name == "" || name == DefaultInboxName {
 		return nil, fmt.Errorf("%w: %q", ErrInboxExists, name)
 	}
@@ -59,6 +59,7 @@ func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFu
 		return nil, fmt.Errorf("%w: %q", ErrInboxExists, name)
 	}
 	c := newInboxCore(s, name, keys, rank, run)
+	c.hooks = hooks
 	s.inboxes[name] = c
 	s.mu.Unlock()
 	for _, j := range s.store.liveIn(name) {

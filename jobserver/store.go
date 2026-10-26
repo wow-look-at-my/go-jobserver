@@ -56,9 +56,6 @@ type Store struct {
 	compactHook func(stage string) error
 }
 
-// Skipped names each journal record the last replay skipped because a newer build wrote it. The caller logs them at error level.
-func (s *Store) Skipped() []string { return append([]string(nil), s.skipped...) }
-
 // OpenStore opens (or creates) the server directory and replays its journal.
 // A journal whose last frame is half-written is cut back to the last good
 // frame. A crash during an append costs that one record and nothing else.

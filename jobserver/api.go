@@ -30,6 +30,8 @@ const (
 	OpWhy          = "why"
 	OpGraph        = "graph"
 	OpScheduler    = "scheduler"
+	// OpWatch adds a monitor task, or answers with the unfinished one that watches the same condition.
+	OpWatch = "watch"
 )
 
 // Request is one API call.
@@ -43,6 +45,9 @@ type Request struct {
 	Max    int      `json:"max,omitempty"`
 	// Policy carries a job's CPU cost and process-control settings.
 	Policy *JobPolicy `json:"policy,omitempty"`
+	// Monitor and Title are what OpWatch watches and the title of its task.
+	Monitor *MonitorSpec `json:"monitor,omitempty"`
+	Title   string       `json:"title,omitempty"`
 	// TaskRequest carries the fields of the inbox ops.
 	TaskRequest
 }
@@ -70,6 +75,14 @@ type Response struct {
 	Output   string    `json:"output,omitempty"`
 	Existing bool      `json:"existing,omitempty"`
 	Count    int       `json:"count,omitempty"`
+	// Summary is the line that says what runs, what watches and what the waiting tasks wait on.
+	Summary   string            `json:"summary,omitempty"`
+	Waits     []Wait            `json:"waits,omitempty"`
+	JobWaits  map[string][]Wait `json:"job_waits,omitempty"`
+	Monitors  []MonitorView     `json:"monitors,omitempty"`
+	Kinds     []*MonitorKind    `json:"kinds,omitempty"`
+	Graph     *JobGraph         `json:"graph,omitempty"`
+	Scheduler *SchedulerStatus  `json:"scheduler,omitempty"`
 	// TaskResponse carries the answers of the inbox ops.
 	TaskResponse
 }
@@ -97,7 +110,8 @@ func codeFor(err error) ErrorCode {
 	case errors.Is(err, ErrAllOpen):
 		return CodeAllOpen
 	case errors.Is(err, ErrDuplicate), errors.Is(err, ErrCycle), errors.Is(err, ErrMissingDep),
-		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand), errors.Is(err, ErrBadInbox), errors.Is(err, ErrInboxExists):
+		errors.Is(err, ErrBadState), errors.Is(err, ErrNoCommand), errors.Is(err, ErrBadInbox), errors.Is(err, ErrInboxExists),
+		errors.Is(err, ErrUnknownMonitorKind), errors.Is(err, ErrBadMonitorArgs):
 		return CodeBadRequest
 	default:
 		return CodeInternal

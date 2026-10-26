@@ -59,8 +59,11 @@ func printJobs(jobs []*jobserver.Job, waits map[string][]jobserver.Wait) error {
 			took = j.Finished.Sub(j.Started).Round(time.Millisecond).String()
 		}
 		what := strings.Join(j.Command, " ")
-		if j.Monitor != nil {
+		switch {
+		case j.Monitor != nil:
 			what = "[" + j.Monitor.Key() + "]"
+		case j.Inbox != "" && what == "":
+			what = "[" + j.Inbox + "] " + j.Name
 		}
 		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", j.ID, j.State, depths[j.ID],
 			what, strings.Join(j.Deps, ","), took, waitText(waits[j.ID]))
@@ -68,7 +71,7 @@ func printJobs(jobs []*jobserver.Job, waits map[string][]jobserver.Wait) error {
 	return w.Flush()
 }
 
-// waitText is a job's waits on one line, or a dash.
+// waitText is a task's waits on one line, or a dash.
 func waitText(ws []jobserver.Wait) string {
 	if len(ws) == 0 {
 		return "-"
