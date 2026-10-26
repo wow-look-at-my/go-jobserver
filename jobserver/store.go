@@ -48,6 +48,10 @@ type Store struct {
 	prunes uint64
 	// visits counts the tasks an index read looked at.
 	visits atomic.Int64
+	// cache maps each identity to the last task that succeeded with it. A prune of tasks leaves it alone.
+	cache map[string]cacheEntry
+	// stepCap and waitCap bound the steps and the waits of one task.
+	stepCap, waitCap int
 	// compactHook lets a test stop a compaction at a stage. Nil in production.
 	compactHook func(stage string) error
 }
@@ -66,7 +70,10 @@ func OpenStore(dir string) (*Store, error) {
 		watch:   make(chan struct{}),
 		idx:     newInboxIndex(),
 		waiters: map[string]int{},
-		epoch:   NewID(func(string) bool { return false }),
+		cache:   map[string]cacheEntry{},
+		stepCap: maxTaskSteps,
+		waitCap: maxTaskWaits,
+		epoch:  NewID(func(string) bool { return false }),
 	}
 	// A compaction that did not reach its rename leaves this file. The journal still holds everything.
 	if err := os.Remove(s.compactPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -248,6 +255,8 @@ func (s *Store) apply(r record) {
 		s.applyTask(r)
 	case recDetail:
 		s.applyDetail(r)
+	case recCache:
+		s.applyCache(r)
 	}
 	if j, ok := s.jobs[r.id]; ok {
 		if r.kind == recFinish {
@@ -262,6 +271,7 @@ func (s *Store) touch(j *Job) {
 	s.seq++
 	j.Seq = s.seq
 	s.idx.put(j)
+	s.remember(j)
 }
 
 // append writes one record and returns after the bytes are in the file.
@@ -694,13 +704,9 @@ type IdentityIndex map[string]string
 func (s *Store) IdentityIndex() IdentityIndex {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	idx := IdentityIndex{}
-	for _, id := range s.order {
-		j := s.jobs[id]
-		if j.Identity == "" || !j.State.succeeded() {
-			continue
-		}
-		idx[j.Identity] = j.ID
+	idx := make(IdentityIndex, len(s.cache))
+	for identity, e := range s.cache {
+		idx[identity] = e.ID
 	}
 	return idx
 }

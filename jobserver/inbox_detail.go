@@ -24,6 +24,9 @@ type TaskDetails struct {
 	Attempts    int        `json:"attempts"`
 	Steps       []TaskStep `json:"steps,omitempty"`
 	Waits       []TaskWait `json:"waits,omitempty"`
+	// StepsDropped and WaitsDropped count the closed steps and waits the bound removed.
+	StepsDropped int `json:"steps_dropped,omitempty"`
+	WaitsDropped int `json:"waits_dropped,omitempty"`
 	// Queue is what a queued task waits on in the scheduler. It is nil when the task asks for no slot.
 	Queue    *QueueState `json:"queue,omitempty"`
 	LogBytes int64       `json:"log_bytes"`
@@ -57,6 +60,7 @@ const (
 	DetailTitle   = "title"
 	DetailStep    = "step"
 	DetailEndStep = "end_step"
+	DetailRename  = "rename_step"
 	DetailWait    = "wait"
 	DetailEndWait = "end_wait"
 	DetailLog     = "log"
@@ -81,6 +85,8 @@ func (s *Server) applyDetail(id string, op DetailOp) (int, error) {
 		return s.store.OpenStep(id, op.Parent, op.Text)
 	case DetailEndStep:
 		return 0, s.store.EndStep(id, op.Ref, op.Status, op.Text)
+	case DetailRename:
+		return 0, s.store.RenameStep(id, op.Ref, op.Text)
 	case DetailWait:
 		return s.store.OpenWait(id, op.Text)
 	case DetailEndWait:
@@ -128,6 +134,7 @@ func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
 	return &TaskDetails{ID: j.ID, Inbox: inbox, Seq: j.Seq, Title: j.Name, Description: j.Description,
 		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, Created: j.Created, Started: j.Started,
 		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
+		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
 		LogBytes: s.store.LogBytes(j.ID)}
 }
 
@@ -182,6 +189,12 @@ func (ib *Inbox[T, R]) Step(c Consumer, t *Task, parent int, title string) (int,
 // EndStep ends an open step. A failed step needs a message that says what went wrong.
 func (ib *Inbox[T, R]) EndStep(c Consumer, t *Task, step int, status StepStatus, msg string) error {
 	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailEndStep, Ref: step, Status: status, Text: msg})
+	return err
+}
+
+// RenameStep replaces the title of a step the task holds, open or closed.
+func (ib *Inbox[T, R]) RenameStep(c Consumer, t *Task, step int, title string) error {
+	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailRename, Ref: step, Text: title})
 	return err
 }
 

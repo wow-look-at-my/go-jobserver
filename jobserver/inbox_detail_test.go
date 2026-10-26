@@ -105,6 +105,9 @@ func reportOn(t *testing.T, in *queueInbox) {
 	inner, err := in.Step(c, got, outer, "clone")
 	require.NoError(t, err)
 	require.NoError(t, in.EndStep(c, got, inner, StepSucceeded, ""))
+	require.NoError(t, in.RenameStep(c, got, inner, "clone"))
+	require.NoError(t, in.RenameStep(c, got, outer, "fetch the repo"))
+	require.ErrorIs(t, in.RenameStep(c, got, 99, "x"), ErrNoStep)
 	require.ErrorIs(t, in.EndStep(c, got, inner, StepSucceeded, ""), ErrNoStep)
 	require.ErrorContains(t, in.EndStep(c, got, outer, StepFailed, ""), "a failed step needs a message")
 	left, err := in.Step(c, got, 0, "left open")
@@ -122,6 +125,7 @@ func reportOn(t *testing.T, in *queueInbox) {
 	require.Len(t, d.Steps, 3)
 	assert.Equal(t, TaskStep{ID: inner, Parent: outer, Title: "clone", Start: d.Steps[1].Start, End: d.Steps[1].End, Status: StepSucceeded}, d.Steps[1])
 	assert.True(t, d.Steps[0].End.IsZero())
+	assert.Equal(t, "fetch the repo", d.Steps[0].Title, "a rename reaches the step")
 	require.Len(t, d.Waits, 1)
 	assert.Equal(t, "a lock", d.Waits[0].Reason)
 	assert.False(t, d.Waits[0].End.IsZero())
@@ -198,6 +202,72 @@ func TestRunReportsOnItsTaskThroughTheContext(t *testing.T) {
 	assert.Equal(t, "run titled", d.Title)
 	require.Len(t, d.Steps, 1)
 	assert.Equal(t, StepSucceeded, d.Steps[0].Status)
+}
+
+func TestABoundDropsTheOldestClosedStepsAndWaits(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenStore(dir)
+	require.NoError(t, err)
+	st.stepCap, st.waitCap = 3, 2
+	id := addQueued(t, st, "n")
+	require.NoError(t, st.Start(id))
+
+	open, err := st.OpenStep(id, 0, "stays open")
+	require.NoError(t, err)
+	var closed []int
+	for range 4 {
+		s, err := st.OpenStep(id, 0, "closed")
+		require.NoError(t, err)
+		require.NoError(t, st.EndStep(id, s, StepSucceeded, ""))
+		closed = append(closed, s)
+	}
+	w1, err := st.OpenWait(id, "open wait")
+	require.NoError(t, err)
+	for range 3 {
+		w, err := st.OpenWait(id, "closed wait")
+		require.NoError(t, err)
+		require.NoError(t, st.CloseWait(id, w))
+	}
+	_, err = st.OpenWait(id, "fills the bound")
+	require.NoError(t, err)
+	_, err = st.OpenWait(id, "every wait held is open")
+	require.ErrorIs(t, err, ErrAllOpen)
+
+	check := func(j *Job) {
+		t.Helper()
+		require.Len(t, j.Steps, 3)
+		assert.Equal(t, []int{open, closed[2], closed[3]}, []int{j.Steps[0].ID, j.Steps[1].ID, j.Steps[2].ID},
+			"the open step stays, and the oldest closed ones go")
+		assert.Equal(t, 2, j.StepsDropped)
+		require.Len(t, j.Waits, 2)
+		assert.Equal(t, w1, j.Waits[0].ID, "an open wait is never dropped")
+		assert.Equal(t, 3, j.WaitsDropped)
+	}
+	j, _ := st.Job(id)
+	check(j)
+	next, err := st.OpenStep(id, 0, "new")
+	require.NoError(t, err)
+	assert.Equal(t, closed[3]+1, next, "an ID is never given out twice")
+	require.NoError(t, st.Close())
+
+	st, err = OpenStore(dir)
+	require.NoError(t, err)
+	j, _ = st.Job(id)
+	assert.Equal(t, 3, j.StepsDropped, "the journal replays the drops")
+	st.mu.Lock()
+	err = st.compactLocked()
+	st.mu.Unlock()
+	require.NoError(t, err)
+	require.NoError(t, st.Close())
+
+	st, err = OpenStore(dir)
+	require.NoError(t, err)
+	defer st.Close()
+	j2, _ := st.Job(id)
+	assert.Equal(t, j.Steps, j2.Steps)
+	assert.Equal(t, j.Waits, j2.Waits)
+	assert.Equal(t, 3, j2.StepsDropped, "a compaction keeps the counts")
+	assert.Equal(t, 3, j2.WaitsDropped)
 }
 
 func TestNegativeRetentionIsRefused(t *testing.T) {

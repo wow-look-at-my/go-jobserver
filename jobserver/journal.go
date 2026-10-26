@@ -32,6 +32,7 @@ const (
 	recTask     byte = 10
 	recResult   byte = 11
 	recDetail   byte = 12
+	recCache    byte = 13
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -77,7 +78,7 @@ type record struct {
 	// recCPU
 	cpuSeconds float64
 
-	// recTask, recResult, recDetail: JSON
+	// recTask, recResult, recDetail, recCache: JSON
 	blob string
 }
 
@@ -142,6 +143,8 @@ func (r record) encode() []byte {
 		e.f64(r.cpuSeconds)
 	case recTask, recResult, recDetail:
 		e.str(r.id)
+		e.str(r.blob)
+	case recCache:
 		e.str(r.blob)
 	default:
 		panic(fmt.Sprintf("jobserver: unknown record kind %d", r.kind))
@@ -214,6 +217,8 @@ func decodeRecord(payload []byte) (record, error) {
 		r.cpuSeconds = d.f64()
 	case recTask, recResult, recDetail:
 		r.id = d.str()
+		r.blob = d.str()
+	case recCache:
 		r.blob = d.str()
 	default:
 		return record{}, fmt.Errorf("jobserver: unknown record kind %d", r.kind)

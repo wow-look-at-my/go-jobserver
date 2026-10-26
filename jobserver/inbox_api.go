@@ -41,8 +41,8 @@ const (
 	CodeStopped ErrorCode = "stopped"
 	// CodeNoStep means the task holds no such open step or wait.
 	CodeNoStep ErrorCode = "no_step"
-	// CodeTooMany means the task holds the most steps or waits it may.
-	CodeTooMany ErrorCode = "too_many"
+	// CodeAllOpen means the task is at its bound and every step or wait it holds is open.
+	CodeAllOpen ErrorCode = "all_open"
 )
 
 // TaskRequest is the part of a Request the inbox ops read.
@@ -229,8 +229,8 @@ func remoteErr(resp Response) error {
 		return fmt.Errorf("%w: %s", ErrNotFound, resp.Error)
 	case CodeNoStep:
 		return fmt.Errorf("%w: %s", ErrNoStep, resp.Error)
-	case CodeTooMany:
-		return fmt.Errorf("%w: %s", ErrTooMany, resp.Error)
+	case CodeAllOpen:
+		return fmt.Errorf("%w: %s", ErrAllOpen, resp.Error)
 	}
 	return errors.New(resp.Error)
 }

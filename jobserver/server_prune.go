@@ -29,7 +29,8 @@ func (s *Server) pruneLoop() {
 
 // prune drops ended tasks past the retention, and forgets what this process held for them.
 func (s *Server) prune() {
-	dropped, err := s.store.Prune(time.Now(), s.cfg.Retention, s.cfg.RetainCount)
+	dropped, err := s.store.Prune(time.Now(), Retention{Age: s.cfg.Retention, Count: s.cfg.RetainCount,
+		CacheAge: s.cfg.CacheRetention, CacheCount: s.cfg.CacheCount})
 	if err != nil {
 		s.cfg.Logf("go-jobserver: ERROR: prune: %v", err)
 	}
