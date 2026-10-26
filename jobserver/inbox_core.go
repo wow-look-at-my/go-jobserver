@@ -452,8 +452,8 @@ func (c *inboxCore) stopAll() {
 // leaseCtxKey carries the lease a Run call runs under.
 type leaseCtxKey struct{}
 
-// leaseFrom returns the lease a Run call runs under, or nil.
-func leaseFrom(ctx context.Context) *Lease {
+// LeaseFromContext returns the lease a Run method runs under, from the context it got. It is nil for another context.
+func LeaseFromContext(ctx context.Context) *Lease {
 	l, _ := ctx.Value(leaseCtxKey{}).(*Lease)
 	return l
 }

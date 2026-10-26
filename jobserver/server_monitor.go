@@ -94,7 +94,7 @@ func (s *Server) runMonitor(ctx context.Context, raw json.RawMessage) (json.RawM
 	if err != nil {
 		return nil, err
 	}
-	lease := leaseFrom(ctx)
+	lease := LeaseFromContext(ctx)
 	started := func(pid int) {
 		if lease != nil {
 			lease.AttachProcess(pid)

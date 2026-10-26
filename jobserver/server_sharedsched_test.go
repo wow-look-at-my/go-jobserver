@@ -42,3 +42,28 @@ func TestASharedSchedulerAdmitsTasksBesideTheHostsLeases(t *testing.T) {
 	require.True(t, ok, "the scheduler still admits after the server closed")
 	l.Release()
 }
+
+// leaseInbox answers the ID of the lease its Run sees.
+type leaseInbox struct {
+	Inbox[*workSpec, string]
+}
+
+func (i *leaseInbox) Run(ctx context.Context, s *workSpec) (string, error) {
+	if l := LeaseFromContext(ctx); l != nil {
+		return l.ID(), nil
+	}
+	return "", nil
+}
+
+// A Run method reaches the lease it runs under, and the lease ID is the task ID.
+func TestARunReachesItsLease(t *testing.T) {
+	srv := newTestServer(t, nil)
+	in, err := NewInbox[leaseInbox](srv, "leased")
+	require.NoError(t, err)
+	task, err := in.AddTask(work(1))
+	require.NoError(t, err)
+	id, terr := in.Wait(context.Background(), task)
+	require.Nil(t, terr)
+	assert.Equal(t, task.ID, id)
+	assert.Nil(t, LeaseFromContext(context.Background()))
+}
