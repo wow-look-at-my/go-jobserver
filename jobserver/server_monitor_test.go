@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,7 +62,8 @@ func TestAMonitorGatesAJobWithoutASlot(t *testing.T) {
 	require.Eventually(t, func() bool {
 		ws, err := srv.Why(after.ID)
 		require.NoError(t, err)
-		return len(ws) == 1 && ws[0].Kind == WaitMonitor && ws[0].ID == mon.ID && ws[0].Detail != "" &&
+		// The detail names the last check, so wait until the first one reported.
+		return len(ws) == 1 && ws[0].Kind == WaitMonitor && ws[0].ID == mon.ID && strings.Contains(ws[0].Detail, "exit 1") &&
 			assert.ObjectsAreEqual(StateRunning, ws[0].State)
 	}, 5*time.Second, 5*time.Millisecond)
 	ws, _ := srv.Why(after.ID)
