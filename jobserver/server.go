@@ -131,6 +131,9 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, line := range st.Skipped() {
+		cfg.Logf("go-jobserver: ERROR: %s", line)
+	}
 	s := &Server{
 		cfg:     cfg,
 		store:   st,

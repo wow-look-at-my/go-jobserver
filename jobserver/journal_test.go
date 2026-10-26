@@ -145,6 +145,39 @@ func TestOpenStoreCutsATornTail(t *testing.T) {
 	require.True(t, st3.Paused())
 }
 
+// A record kind from a newer build is skipped and named, and the records after it survive.
+func TestOpenStoreSkipsAnUnknownRecordKind(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenStore(dir)
+	require.NoError(t, err)
+	_, err = st.Create(&Spec{Command: []string{"true"}, ID: "j-1"})
+	require.NoError(t, err)
+	path := st.journalPath()
+	require.NoError(t, st.Close())
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	require.NoError(t, err)
+	_, err = f.Write(frame([]byte{200, 1, 2, 3}))
+	require.NoError(t, err)
+	_, err = f.Write(frame(record{kind: recState, id: "j-1", state: StateCancelled, errMsg: "after"}.encode()))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	st2, err := OpenStore(dir)
+	require.NoError(t, err)
+	defer st2.Close()
+	got, ok := st2.Job("j-1")
+	require.True(t, ok)
+	assert.Equal(t, StateCancelled, got.State, "the record after the unknown one still applies")
+	require.Len(t, st2.Skipped(), 1)
+	assert.Contains(t, st2.Skipped()[0], "kind 200")
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, before.Size(), after.Size(), "nothing was cut")
+}
+
 func TestOpenStoreKeepsJobs(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)

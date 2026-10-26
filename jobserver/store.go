@@ -30,7 +30,12 @@ type Store struct {
 	paused bool
 	logs   map[string]*LogWriter
 	closed bool
+	// skipped names each journal record the replay could not read and kept.
+	skipped []string
 }
+
+// Skipped names each journal record the last replay skipped because a newer build wrote it. The caller logs them at error level.
+func (s *Store) Skipped() []string { return append([]string(nil), s.skipped...) }
 
 // OpenStore opens (or creates) the server directory and replays its journal.
 // A journal whose last frame is half-written is cut back to the last good
@@ -82,6 +87,7 @@ func (s *Store) replay() error {
 		offset int64
 		good   int64
 	)
+frames:
 	for {
 		payload, err := readFrame(f)
 		if errors.Is(err, io.EOF) {
@@ -92,10 +98,16 @@ func (s *Store) replay() error {
 			break
 		}
 		rec, err := decodeRecord(payload)
-		if err != nil {
-			break
+		switch {
+		case errors.Is(err, errUnknownRecord):
+			// A newer build wrote this frame. Cutting it would delete every record after it, so the replay skips it and says so.
+			s.skipped = append(s.skipped, fmt.Sprintf("journal record kind %d at offset %d is unknown to this build and was skipped", rec.kind, good))
+		case err != nil:
+			// The frame is checksummed, so a decode error means a corrupt record.
+			break frames
+		default:
+			s.apply(rec)
 		}
-		s.apply(rec)
 		good += int64(frameHeaderSize + len(payload))
 		offset = good
 	}
