@@ -30,7 +30,8 @@ func newWhyCmd(g *globals) *cobra.Command {
 				return nil
 			}
 			for _, w := range resp.Waits {
-				if w.ID != "" {
+				// The run cap's key is "cap", the same as its kind. Print it once.
+				if w.ID != "" && w.ID != w.Kind {
 					fmt.Printf("%s %s: %s\n", w.Kind, w.ID, w.Detail)
 					continue
 				}
