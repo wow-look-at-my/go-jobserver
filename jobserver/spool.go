@@ -22,16 +22,10 @@ const (
 // to failed/ with the reason.
 func (s *Server) watchSpool() {
 	defer s.wg.Done()
-	sp, err := spool.Open(s.cfg.SpoolDir, spool.Options{
-		KeepDone: true,
-		DirMode:  0o755,
-		Logf:     func(format string, args ...any) { s.cfg.Logf("go-jobserver: "+format, args...) },
-	})
-	if err != nil {
+	if _, err := s.openSpool(); err != nil {
 		s.cfg.Logf("go-jobserver: %v", err)
 		return
 	}
-	s.spool = sp
 	s.cfg.Logf("go-jobserver: spool %s", s.cfg.SpoolDir)
 	s.scanSpool()
 	t := time.NewTicker(s.cfg.SpoolInterval)
@@ -46,9 +40,31 @@ func (s *Server) watchSpool() {
 	}
 }
 
+// openSpool opens the spool directory once, on first use.
+func (s *Server) openSpool() (*spool.Store, error) {
+	if s.spool != nil {
+		return s.spool, nil
+	}
+	sp, err := spool.Open(s.cfg.SpoolDir, spool.Options{
+		KeepDone: true,
+		DirMode:  0o755,
+		Logf:     func(format string, args ...any) { s.cfg.Logf("go-jobserver: "+format, args...) },
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.spool = sp
+	return sp, nil
+}
+
 // scanSpool enqueues every job file that waits.
 func (s *Server) scanSpool() {
-	if _, err := s.spool.Process(func(e spool.Entry) error {
+	sp, err := s.openSpool()
+	if err != nil {
+		s.cfg.Logf("go-jobserver: %v", err)
+		return
+	}
+	if _, err := sp.Process(func(e spool.Entry) error {
 		spec, err := specFromFile(e.Name, e.Body)
 		if err != nil {
 			return err

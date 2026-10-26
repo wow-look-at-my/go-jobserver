@@ -157,7 +157,6 @@ func New(cfg Config) (*Server, error) {
 		wake:     make(chan struct{}, 1),
 		quit:     make(chan struct{}),
 		start:    time.Now(),
-
 	}
 	if cfg.Scheduler != nil {
 		s.sched, s.gov = cfg.Scheduler, cfg.Scheduler.gov

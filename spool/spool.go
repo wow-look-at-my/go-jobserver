@@ -151,7 +151,7 @@ func (s *Store) list() ([]listed, error) {
 	}
 	out := make([]listed, 0, len(ents))
 	for _, e := range ents {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == DoneDir || e.Name() == FailedDir {
 			continue
 		}
 		info, err := e.Info()
