@@ -364,6 +364,7 @@ func (s *Server) tick() {
 		}
 		s.defCore.offer(j)
 	}
+	s.signalTakers()
 }
 
 // leaseFor is what the scheduler admits a job as. The job's own cost comes

@@ -192,7 +192,7 @@ func (ib *Inbox[T, R]) Bind() Consumer {
 // Unbind detaches the consumer. Its checked-out tasks fail with "the consumer went away".
 func (ib *Inbox[T, R]) Unbind(c Consumer) error { return ib.b.unbind(c) }
 
-// Take checks out the next admitted task, with its spec. A wait of -waits with no limit. A wait of no returns at once.
+// Take checks out the queued task that sorts first by Compare, then by arrival, with its spec. It waits for that task's admission. A wait of -waits with no limit. A wait of no returns at once.
 // ok is false when no task was ready in time.
 func (ib *Inbox[T, R]) Take(ctx context.Context, c Consumer, wait time.Duration) (*Task, T, bool, error) {
 	var zero T
@@ -220,6 +220,23 @@ func (ib *Inbox[T, R]) Done(c Consumer, t *Task, result R, err error) error {
 		return fmt.Errorf("jobserver: inbox %s: result: %w", ib.name, merr)
 	}
 	return ib.b.done(c, t.ID, raw, nil)
+}
+
+// Lookup returns the task of this inbox with the ID. It returns ErrNotFound for an ID the server does not know,
+// or for a task of another inbox.
+func (ib *Inbox[T, R]) Lookup(id string) (*Task, error) {
+	j, err := ib.b.job(id)
+	if err != nil {
+		return nil, err
+	}
+	inbox := j.Inbox
+	if inbox == "" {
+		inbox = DefaultInboxName
+	}
+	if inbox != ib.name {
+		return nil, fmt.Errorf("%w: %s is a task of inbox %s", ErrNotFound, id, inbox)
+	}
+	return &Task{ID: id, b: ib.b}, nil
 }
 
 // Spec returns the spec the task was made from. It is the zero value when the task cannot be read.

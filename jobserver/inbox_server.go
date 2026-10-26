@@ -93,6 +93,23 @@ func (s *Server) inbox(name string) *inboxCore {
 	return s.inboxes[name]
 }
 
+// signalTakers wakes each Take that waits, so it picks again from the tasks the store holds now.
+func (s *Server) signalTakers() {
+	s.mu.Lock()
+	cores := make([]*inboxCore, 0, len(s.inboxes))
+	for _, c := range s.inboxes {
+		cores = append(cores, c)
+	}
+	s.mu.Unlock()
+	for _, c := range cores {
+		c.mu.Lock()
+		if c.run == nil {
+			c.signal()
+		}
+		c.mu.Unlock()
+	}
+}
+
 // offerInbox hands a ready task to its inbox. A task of an inbox that is not open waits.
 func (s *Server) offerInbox(j *Job) {
 	if c := s.inbox(j.Inbox); c != nil {
