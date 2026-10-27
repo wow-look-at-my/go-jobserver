@@ -21,6 +21,8 @@ const (
 	OpInboxDone    = "inbox.done"
 	OpInboxStarted = "inbox.started"
 	OpInboxDrain   = "inbox.drain"
+	// OpInboxPriority replaces the priority of a task that is not admitted yet.
+	OpInboxPriority = "inbox.priority"
 	// OpInboxDetail changes the details of a checked-out task.
 	OpInboxDetail = "inbox.detail"
 	// OpInboxTask reads one task, OpInboxTasks the tasks that changed and OpInboxCounts the counts.
@@ -96,7 +98,7 @@ func (s *Server) remoteInbox(name string, keys []PriorityKey) (*inboxCore, error
 	if err != nil {
 		return nil, err
 	}
-	c, err := s.openInbox(name, pk, 0, nil, nil)
+	c, err := s.openInbox(name, pk, 0, nil, nil, inboxHooks{})
 	if errors.Is(err, ErrInboxExists) {
 		if c := s.inbox(name); c != nil {
 			return c, nil
@@ -121,7 +123,7 @@ func (s *Server) backendFor(req Request) (inboxBackend, error) {
 func (s *Server) handleInbox(req Request) (Response, bool) {
 	switch req.Op {
 	case OpInboxAdd, OpInboxBind, OpInboxUnbind, OpInboxTake, OpInboxDone, OpInboxStarted, OpInboxDrain,
-		OpInboxDetail, OpInboxTask, OpInboxTasks, OpInboxCounts:
+		OpInboxPriority, OpInboxDetail, OpInboxTask, OpInboxTasks, OpInboxCounts:
 	case OpInboxWait:
 		ctx, cancel := context.WithTimeout(context.Background(), remoteTakeCap)
 		defer cancel()
@@ -162,6 +164,8 @@ func (s *Server) handleInbox(req Request) (Response, bool) {
 		err = b.unbind(who)
 	case OpInboxDrain:
 		err = b.drain()
+	case OpInboxPriority:
+		err = b.setPriority(req.ID, req.Priority)
 	case OpInboxStarted:
 		err = b.started(who, req.ID, req.PID)
 	case OpInboxDetail:

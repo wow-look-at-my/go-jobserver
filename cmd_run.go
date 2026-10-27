@@ -8,13 +8,15 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/wow-look-at-my/go-jobserver/jobserver"
 	"github.com/wow-look-at-my/go-jobserver/spool"
 )
 
 func init() { register(newRunCmd) }
 
 func newRunCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var monitors string
+	cmd := &cobra.Command{
 		Use:     "run",
 		Aliases: []string{"daemon", "serve", "start"},
 		Short:   "Run the daemon in the foreground",
@@ -22,6 +24,13 @@ func newRunCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := g.config()
 			cfg.Logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
+			if monitors != "" {
+				defs, err := jobserver.LoadMonitorDefs(monitors)
+				if err != nil {
+					return err
+				}
+				cfg.Monitors = &jobserver.MonitorEnv{Defs: defs}
+			}
 			d, err := openDaemon(cfg, g.spoolDir(cfg), spool.DefaultInterval)
 			if err != nil {
 				return err
@@ -33,4 +42,6 @@ func newRunCmd(g *globals) *cobra.Command {
 			return d.Close()
 		},
 	}
+	cmd.Flags().StringVar(&monitors, "monitors", "", "an XML file of monitor definitions; without it the daemon refuses monitor tasks")
+	return cmd
 }

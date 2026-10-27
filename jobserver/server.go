@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"sync"
 	"time"
 )
@@ -43,6 +42,13 @@ type Config struct {
 	StatsURL string
 	// Runner runs the jobs. The zero value runs them as child processes.
 	Runner Runner
+	// Scheduler is a scheduler the host already admits other work through.
+	Scheduler *Scheduler
+	// Monitors runs the tasks of the monitor inbox. Nil means the server knows no monitor kind and opens no monitor inbox.
+	Monitors *MonitorEnv
+	// MonitorPolicy and MonitorBudget go to the scheduler's fields of the same names.
+	MonitorPolicy JobPolicy
+	MonitorBudget float64
 	// Retention is how long the server keeps an ended task, its result and its log. Zero means DefaultRetention.
 	Retention time.Duration
 	// RetainCount is how many ended tasks the server keeps per inbox. Zero means DefaultRetainCount.
@@ -87,6 +93,8 @@ type Server struct {
 	store  *Store
 	runner Runner
 	sched  *Scheduler
+	// sharedSched is true when Config.Scheduler gave the scheduler. Its owner closes it, not Close.
+	sharedSched bool
 	// gov is the scheduler's governor.
 	gov *governor
 
@@ -108,6 +116,10 @@ type Server struct {
 	stopped bool
 	// errs holds the error each failed task ended with in this process.
 	errs map[string]error
+	// watching holds the last status of each running monitor, by task ID, under mu.
+	watching map[string]MonitorStatus
+	// watchMu makes the dedup check and the add of Watch one step.
+	watchMu sync.Mutex
 }
 
 // New opens the server's directory and replays its journal.
@@ -162,21 +174,31 @@ func New(cfg Config) (*Server, error) {
 		start:   time.Now(),
 		inboxes: make(map[string]*inboxCore),
 		errs:    make(map[string]error),
+
+		watching: make(map[string]MonitorStatus),
 	}
-	s.sched = NewScheduler(SchedulerConfig{
-		MaxConcurrent:  cfg.MaxConcurrent,
-		CPUBudget:      cfg.CPUBudget,
-		DefaultCost:    cfg.DefaultCost,
-		SampleInterval: cfg.SampleInterval,
-		DisableCPU:     cfg.DisableCPU,
-		StatsURL:       cfg.StatsURL,
-		HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
-		Logf:           cfg.Logf,
-	})
+	s.sched, s.sharedSched = cfg.Scheduler, cfg.Scheduler != nil
+	if s.sched == nil {
+		s.sched = NewScheduler(SchedulerConfig{
+			MaxConcurrent:  cfg.MaxConcurrent,
+			CPUBudget:      cfg.CPUBudget,
+			DefaultCost:    cfg.DefaultCost,
+			SampleInterval: cfg.SampleInterval,
+			DisableCPU:     cfg.DisableCPU,
+			StatsURL:       cfg.StatsURL,
+			HistoryPath:    filepath.Join(cfg.Dir, classHistoryName),
+			Logf:           cfg.Logf,
+			MonitorPolicy:  cfg.MonitorPolicy,
+			MonitorBudget:  cfg.MonitorBudget,
+		})
+	}
 	s.gov = s.sched.gov
 	s.defCore = newInboxCore(s, DefaultInboxName, defaultKeys, 0, nil)
 	s.defCore.isDefault = true
 	s.def = &Inbox[*CommandSpec, CommandResult]{b: localDefault{s}, name: DefaultInboxName, keys: defaultKeys}
+	if err := s.openMonitorInbox(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -260,7 +282,9 @@ func (s *Server) Close() error {
 	s.closeInboxes()
 	close(s.quit)
 	s.wg.Wait()
-	s.sched.Close()
+	if !s.sharedSched {
+		s.sched.Close()
+	}
 	var err error
 	for _, c := range closes {
 		if cerr := c.Close(); cerr == nil {
@@ -604,80 +628,17 @@ func (s *Server) SetDeps(id string, deps []string) (*Job, error) {
 	return mustJob(s.store, id)
 }
 
-// Pause stops scheduling new jobs. Running jobs finish.
-func (s *Server) Pause() error {
-	if err := s.store.SetPaused(true); err != nil {
-		return err
-	}
-	s.withdrawLeases()
-	return nil
-}
-
-// Resume allows scheduling again.
-func (s *Server) Resume() error {
-	if err := s.store.SetPaused(false); err != nil {
-		return err
-	}
-	s.Wake()
-	return nil
-}
-
-// Paused reports whether scheduling is paused.
-func (s *Server) Paused() bool { return s.store.Paused() }
-
-// Interrupt stops one running job and returns once it has stopped, so the
-// job's state is settled by the time the caller looks at it.
-func (s *Server) Interrupt(id string) error {
-	id = CanonicalID(id)
-	s.mu.Lock()
-	h, ok := s.running[id]
-	s.mu.Unlock()
-	if !ok {
-		j, found := s.store.Job(id)
-		if !found {
-			return fmt.Errorf("%w: %s", ErrNotFound, id)
-		}
-		if j.Inbox != "" && !j.State.Terminal() {
-			return s.cancel(id)
-		}
-		if j.State.Terminal() {
-			return fmt.Errorf("%w: %s is %s", ErrBadState, id, j.State)
-		}
-		// Not running yet: cancel it outright so the scheduler skips it.
-		s.defCore.forget(id)
-		return s.store.Finish(id, StateCancelled, -1, "interrupted", nil, j.LogBytes)
-	}
-	h.cancel()
-	select {
-	case <-h.done:
-		return nil
-	case <-time.After(interruptTimeout):
-		return fmt.Errorf("go-jobserver: %s did not stop within %s", id, interruptTimeout)
-	}
-}
-
-// InterruptAll cancels every running job.
-func (s *Server) InterruptAll() int {
-	s.mu.Lock()
-	ids := make([]string, 0, len(s.running))
-	for id := range s.running {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	sort.Strings(ids)
-	for _, id := range ids {
-		if err := s.Interrupt(id); err != nil {
-			s.cfg.Logf("go-jobserver: interrupt %s: %v", id, err)
-		}
-	}
-	return len(ids)
-}
-
 // List returns every job in creation order.
-func (s *Server) List() []*Job { return s.store.Jobs() }
+func (s *Server) List() []*Job { return s.withStatus(s.store.Jobs()) }
 
 // Get returns one job.
-func (s *Server) Get(id string) (*Job, error) { return mustJob(s.store, id) }
+func (s *Server) Get(id string) (*Job, error) {
+	j, err := mustJob(s.store, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.withStatus([]*Job{j})[0], nil
+}
 
 // Logs returns up to max bytes of a job's output starting at offset.
 func (s *Server) Logs(id string, offset int64, max int) ([]byte, error) {

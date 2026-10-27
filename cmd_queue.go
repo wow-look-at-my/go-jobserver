@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ func newQueueCmd(g *globals) *cobra.Command {
 		wait  bool
 		shell bool
 		pol   policyFlags
+		mon   monitorFlags
 	)
 	cmd := &cobra.Command{
 		Use:     "queue [flags] [--] command [args...]",
@@ -31,6 +33,16 @@ func newQueueCmd(g *globals) *cobra.Command {
 With no command arguments, queue reads one command line from standard input.
 Flags stop at the first argument that is not a flag, so "queue sh -c x" works.`,
 		RunE: func(cmd *cobra.Command, argv []string) error {
+			if mon.kind != "" {
+				if len(argv) > 0 {
+					return errors.New("a monitor task runs no command: drop the command, or drop --monitor")
+				}
+				m, err := mon.spec()
+				if err != nil {
+					return err
+				}
+				return watch(g, m, spec.Name, wait)
+			}
 			if len(argv) == 0 {
 				line, err := readCommandLine(os.Stdin)
 				if err != nil {
@@ -64,7 +76,57 @@ Flags stop at the first argument that is not a flag, so "queue sh -c x" works.`,
 	f.BoolVar(&wait, "wait", false, "wait for the job and report its final state")
 	f.BoolVar(&shell, "shell", false, `run the command through "sh -c"`)
 	pol.bind(f)
+	f.StringVar(&mon.kind, "monitor", "", "add a monitor task of this kind instead of a command (see go-jobserver kinds)")
+	f.Var((*listFlag)(&mon.args), "arg", "a monitor arg as name=value (repeatable)")
+	f.DurationVar(&mon.deadline, "deadline", 0, "end the monitor as failed after this long")
 	return cmd
+}
+
+// monitorFlags are the queue flags that make a monitor task.
+type monitorFlags struct {
+	kind     string
+	args     []string
+	deadline time.Duration
+}
+
+func (m monitorFlags) spec() (jobserver.MonitorSpec, error) {
+	out := jobserver.MonitorSpec{Kind: m.kind, Args: map[string]string{}}
+	for _, kv := range m.args {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return out, fmt.Errorf("--arg %q is not name=value", kv)
+		}
+		out.Args[k] = v
+	}
+	if m.deadline > 0 {
+		out.Deadline = time.Now().Add(m.deadline)
+	}
+	return out, nil
+}
+
+// watch adds a monitor task and prints its id. A monitor that already watches the condition answers instead.
+func watch(g *globals, m jobserver.MonitorSpec, title string, wait bool) error {
+	resp, err := call(g, jobserver.Request{Op: jobserver.OpWatch, Monitor: &m, Title: title})
+	if err != nil {
+		return err
+	}
+	if resp.Job == nil {
+		return errors.New("the daemon returned no task")
+	}
+	fmt.Println(resp.Job.ID)
+	if resp.Existing {
+		fmt.Fprintf(os.Stderr, "%s already watches this (%s); no new task was added\n", resp.Job.ID, resp.Job.State)
+	}
+	if !wait {
+		return nil
+	}
+	c, ctx, cancel, err := client(g)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	defer c.Close()
+	return report(ctx, c, resp.Job.ID)
 }
 
 // queue enqueues one job and prints its id, then waits for it when asked.
@@ -90,7 +152,12 @@ func queue(g *globals, spec jobserver.Spec, wait bool) error {
 	if !wait {
 		return nil
 	}
-	done, err := c.Wait(ctx, j.ID, 50*time.Millisecond)
+	return report(ctx, c, j.ID)
+}
+
+// report waits for a task and reports its final state on stderr.
+func report(ctx context.Context, c *jobserver.Client, id string) error {
+	done, err := c.Wait(ctx, id, 50*time.Millisecond)
 	if err != nil {
 		return err
 	}

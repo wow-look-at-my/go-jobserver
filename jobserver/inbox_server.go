@@ -49,7 +49,7 @@ func (s *Server) DefaultInbox() *Inbox[*CommandSpec, CommandResult] { return s.d
 
 // openInbox opens a named inbox and takes back its tasks from the journal.
 // check says whether a spec still decodes. A task that does not fails.
-func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFunc, check func(json.RawMessage) error) (*inboxCore, error) {
+func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFunc, check func(json.RawMessage) error, hooks inboxHooks) (*inboxCore, error) {
 	if name == "" || name == DefaultInboxName {
 		return nil, fmt.Errorf("%w: %q", ErrInboxExists, name)
 	}
@@ -59,6 +59,7 @@ func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFu
 		return nil, fmt.Errorf("%w: %q", ErrInboxExists, name)
 	}
 	c := newInboxCore(s, name, keys, rank, run)
+	c.hooks = hooks
 	s.inboxes[name] = c
 	s.mu.Unlock()
 	for _, j := range s.store.liveIn(name) {
@@ -208,6 +209,16 @@ func (s *Server) closeInboxes() {
 
 // job reads a task's job.
 func (s *Server) job(id string) (*Job, error) { return mustJob(s.store, id) }
+
+// Task returns a handle to the task with the ID, whatever its inbox, so
+// another task can trigger on it.
+func (s *Server) Task(id string) (*Task, error) {
+	j, err := mustJob(s.store, id)
+	if err != nil {
+		return nil, err
+	}
+	return &Task{ID: j.ID, b: s}, nil
+}
 
 // waitJob blocks until a task's job ends.
 func (s *Server) waitJob(ctx context.Context, id string) (*Job, error) {

@@ -68,6 +68,8 @@ type SchedulerStatus struct {
 	Reserved float64     `json:"reserved"`
 	Holding  []LeaseInfo `json:"holding"`
 	Waiting  []LeaseInfo `json:"waiting"`
+	// Monitors are the monitor leases. They hold no slot, so Holding and Running leave them out.
+	Monitors []LeaseInfo `json:"monitors"`
 	Groups   []GroupInfo `json:"groups"`
 	// Batches are the open batches, sorted by key.
 	Batches []BatchInfo `json:"batches"`
@@ -82,7 +84,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	defer s.mu.Unlock()
 	now := s.now()
 	st := SchedulerStatus{MaxConcurrent: s.capLocked(), MaxConcurrentDeclared: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
+		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
 		PriorityKeys: s.PriorityKeys()}
 	if s.capOverridden {
 		st.MaxConcurrentOverride = new(s.capOverride)
@@ -108,6 +110,10 @@ func (s *Scheduler) Status() SchedulerStatus {
 		batches[key] = b
 	}
 	for _, l := range s.holding {
+		if l.req.Monitor {
+			st.Monitors = append(st.Monitors, l.info(nil))
+			continue
+		}
 		st.Holding = append(st.Holding, l.info(nil))
 		if b := batches[l.req.Batch]; b != nil && l.req.ID != "" {
 			b.Holding = append(b.Holding, l.req.ID)

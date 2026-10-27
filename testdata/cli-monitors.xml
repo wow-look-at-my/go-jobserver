@@ -1,0 +1,6 @@
+<monitors>
+	<monitor name="file-exists" description="a file exists">
+		<arg name="path" required="true"/>
+		<poll every="1s"><argv>test</argv><argv>-e</argv><argv><value name="arg.path"/></argv></poll>
+	</monitor>
+</monitors>

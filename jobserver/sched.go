@@ -56,6 +56,10 @@ type SchedulerConfig struct {
 	RetryInterval time.Duration
 	// ErrorLogf receives the lines that name a configuration error the operator has to fix. Nil sends them to Logf.
 	ErrorLogf func(format string, args ...any)
+	// MonitorPolicy is the policy every monitor lease runs under from its first sample. Zero means the default monitor policy.
+	MonitorPolicy JobPolicy
+	// MonitorBudget is how many CPUs all monitors together may use before the governor freezes the heaviest in turn.
+	MonitorBudget float64
 }
 
 // The defaults for the governor's SchedulerConfig fields.
@@ -231,60 +235,6 @@ func (s *Scheduler) SetMaxConcurrent(n int) {
 	s.planLocked()
 }
 
-// OverrideMaxConcurrent sets the count cap over the declared value. Zero means no cap. A negative value is ErrInvalidLimit.
-func (s *Scheduler) OverrideMaxConcurrent(n int) error {
-	if n < 0 {
-		return fmt.Errorf("%w: count cap %d", ErrInvalidLimit, n)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.capOverride, s.capOverridden = n, true
-	s.planLocked()
-	return nil
-}
-
-// ClearMaxConcurrentOverride removes the cap override, so the declared value applies again.
-func (s *Scheduler) ClearMaxConcurrentOverride() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.capOverride, s.capOverridden = 0, false
-	s.planLocked()
-}
-
-// OverrideGroup sets a group's limit over its declared limit. The scheduler keeps
-// an override for a group that is not declared, and applies it when SetGroups
-// declares the group. A limit below one is ErrInvalidLimit.
-func (s *Scheduler) OverrideGroup(name string, limit int) error {
-	if limit < 1 {
-		return fmt.Errorf("%w: group %q limit %d", ErrInvalidLimit, name, limit)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.groupOverrides[name] = limit
-	s.planLocked()
-	return nil
-}
-
-// ClearGroupOverride removes a group's override, so its declared limit applies again.
-func (s *Scheduler) ClearGroupOverride(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.groupOverrides, name)
-	s.planLocked()
-}
-
-// groupLimitLocked is a declared group's effective limit. Caller holds s.mu.
-func (s *Scheduler) groupLimitLocked(name string) (int, bool) {
-	limit, ok := s.groups[name]
-	if !ok {
-		return 0, false
-	}
-	if ov, set := s.groupOverrides[name]; set {
-		limit = ov
-	}
-	return limit, true
-}
-
 // clampGroups copies limits and raises a limit below one to one.
 func clampGroups(limits map[string]int) map[string]int {
 	next := make(map[string]int, len(limits))
@@ -423,6 +373,10 @@ func (s *Scheduler) enqueue(req LeaseRequest, order *leaseOrder, onQueue func(Qu
 			return nil, err
 		}
 		order = &leaseOrder{keys: s.priority.keys, prio: p}
+	}
+	if req.Monitor {
+		// A monitor runs under the monitor policy and counts against nothing, whatever it asked for.
+		req.Policy, req.Group, req.Limits = s.monitorPolicy(), "", Limits{}
 	}
 	s.seq++
 	l := newLease(s, req, s.seq, s.now().UTC(), onQueue)

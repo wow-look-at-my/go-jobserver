@@ -36,6 +36,8 @@ type LeaseRequest struct {
 	Batch string `json:"batch,omitempty"`
 	// GroupOnly takes only the group slot. The count cap and the CPU budget never hold it back.
 	GroupOnly bool `json:"group_only,omitempty"`
+	// Monitor marks a lease that watches a condition. It always starts and counts against nothing. The governor throttles it.
+	Monitor bool `json:"monitor,omitempty"`
 	// Policy is the lease's CPU cost and the controls the governor may apply while the budget is exceeded.
 	Policy JobPolicy `json:"policy"`
 	// Limits are hard bounds on what the lease may use.

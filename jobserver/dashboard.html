@@ -60,9 +60,26 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
 {{- if .Stats.CPU.HostError}}
 <div class="alert" role="alert"><strong>Configuration error:</strong> the host's CPU load is unknown ({{.Stats.CPU.HostError}}). go-jobserver cannot see work outside its own jobs, and it cannot see how many tasks want a CPU. Under load it keeps starting work, and it can destabilize the system.</div>
 {{- end}}
+<p class="meta">{{.Summary}}</p>
+{{- if .Monitors}}
+<h2 class="meta">monitors</h2>
+<table>
+  <thead><tr><th>id</th><th>state</th><th>status</th><th>waiting tasks</th></tr></thead>
+  <tbody>
+  {{- range .Monitors}}
+    <tr>
+      <td><a href="/job/{{.ID}}">{{.ID}}</a></td>
+      <td><span class="chip s-{{.State}}">{{.State}}</span></td>
+      <td class="deps">{{.Line}}</td>
+      <td class="deps">{{args .Waiting " "}}</td>
+    </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{- end}}
 {{- if .Jobs}}
 <table>
-  <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>started</th><th>took</th><th>exit</th><th></th></tr></thead>
+  <thead><tr><th>id</th><th>state</th><th>depth</th><th>command</th><th>deps</th><th>waiting on</th><th>started</th><th>took</th><th>exit</th><th></th></tr></thead>
   <tbody>
   {{- range .Graph}}
     <tr>
@@ -71,6 +88,7 @@ th { color: #8b949e; font-weight: normal; position: sticky; top: 0; background: 
       <td class="deps">{{.Depth}}</td>
       <td class="cmd">{{args .Job.Command " "}}</td>
       <td class="deps">{{args .Job.Deps " "}}</td>
+      <td class="deps">{{range index $.Waits .Job.ID}}{{.Detail}}<br>{{end}}</td>
       <td class="deps">{{short .Job.Started}}</td>
       <td class="deps">{{elapsed .Job}}</td>
       <td>{{if .Job.ExitCode}}<span class="err">{{.Job.ExitCode}}</span>{{end}}</td>

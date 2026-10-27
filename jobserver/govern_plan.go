@@ -145,7 +145,11 @@ func (g *governor) planThrottleLocked(live []target, reading Reading, now time.T
 func (g *governor) planRevertLocked(now time.Time) []action {
 	var plan []action
 	for l, cs := range g.active {
-		_, _, a := l.snapshot()
+		req, _, a := l.snapshot()
+		// A monitor keeps its controls for its whole life. planMonitorsLocked thaws its freezes.
+		if req.Monitor {
+			continue
+		}
 		for _, c := range cs {
 			if g.mayTryLocked(l, controlKey{m: c.Mechanism, pid: c.PID}, now) {
 				plan = append(plan, action{t: target{l: l, a: a}, kind: doRevert, m: c.Mechanism, c: c})
