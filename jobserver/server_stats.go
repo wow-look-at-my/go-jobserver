@@ -22,20 +22,23 @@ type Stats struct {
 	CPU CPUReport `json:"cpu"`
 	// Controls lists the process controls in effect right now.
 	Controls []Control `json:"controls,omitempty"`
+	// Schedules are the schedules that add tasks on an interval.
+	Schedules []ScheduleInfo `json:"schedules,omitempty"`
 }
 
 // Stats reports the server's current shape.
 func (s *Server) Stats() Stats {
 	jobs := s.store.Jobs()
 	st := Stats{
-		Dir:      s.cfg.Dir,
-		Paused:   s.store.Paused(),
-		Uptime:   time.Since(s.start).Round(time.Second).String(),
-		Total:    len(jobs),
-		ByState:  map[string]int{},
-		PID:      os.Getpid(),
-		Started:  s.start,
-		Revision: Revision,
+		Dir:       s.cfg.Dir,
+		Paused:    s.store.Paused(),
+		Uptime:    time.Since(s.start).Round(time.Second).String(),
+		Total:     len(jobs),
+		ByState:   map[string]int{},
+		PID:       os.Getpid(),
+		Started:   s.start,
+		Revision:  Revision,
+		Schedules: s.Schedules(),
 	}
 	for _, j := range jobs {
 		st.ByState[string(j.State)]++

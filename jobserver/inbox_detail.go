@@ -34,6 +34,8 @@ type TaskDetails struct {
 	LogBytes int64       `json:"log_bytes"`
 	// Outcome is the short label the consumer set with SetOutcome. A reader tells the kind of result from it.
 	Outcome string `json:"outcome,omitempty"`
+	// Schedule names the schedule whose last task this is. It is empty for any other task.
+	Schedule string `json:"schedule,omitempty"`
 }
 
 // TaskPage is the tasks of one inbox that changed after a seq. A new Epoch or a new Pruned means the reader reads again from zero.
@@ -154,7 +156,7 @@ func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
 		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, ConsumerName: j.ConsumerName, Created: j.Created, Started: j.Started,
 		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
 		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
-		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome}
+		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome, Schedule: s.every.lastOf(j.ID)}
 }
 
 // taskDetails reads one task of an inbox.

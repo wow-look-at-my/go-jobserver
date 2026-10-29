@@ -120,6 +120,8 @@ type Server struct {
 	watching map[string]MonitorStatus
 	// watchMu makes the dedup check and the add of Watch one step.
 	watchMu sync.Mutex
+	// every holds the schedules that add tasks on an interval.
+	every *scheduleSet
 }
 
 // New opens the server's directory and replays its journal.
@@ -176,6 +178,7 @@ func New(cfg Config) (*Server, error) {
 		errs:    make(map[string]error),
 
 		watching: make(map[string]MonitorStatus),
+		every:    newScheduleSet(cfg.Logf),
 	}
 	s.sched, s.sharedSched = cfg.Scheduler, cfg.Scheduler != nil
 	if s.sched == nil {
@@ -226,6 +229,8 @@ func (s *Server) Start() error {
 	go s.syncLoop()
 	s.wg.Add(1)
 	go s.pruneLoop()
+	s.wg.Add(1)
+	go s.scheduleLoop()
 	s.sched.Start()
 	if err := s.startUnix(); err != nil {
 		s.Close()
