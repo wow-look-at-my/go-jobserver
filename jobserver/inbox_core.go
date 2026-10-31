@@ -147,12 +147,17 @@ func (c *inboxCore) offer(j *Job) {
 // acquire waits for admission and hands the task to its runner or its consumer.
 func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
-	var notify func(QueueState)
-	if c.hooks.onQueue != nil {
-		notify = func(q QueueState) { c.hooks.onQueue(g.id, q) }
+	// The scheduler calls notify under its lock, so it must not take c.mu.
+	notify := func(q QueueState) {
+		if err := c.s.store.QueueWait(g.id, q); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotRunning) {
+			c.s.cfg.Logf("go-jobserver: ERROR: inbox %s: record the queue wait of %s: %v", c.name, g.id, err)
+		}
+		if c.hooks.onQueue != nil {
+			c.hooks.onQueue(g.id, q)
+		}
 	}
 	l, err := c.s.sched.acquire(ctx, req, order, notify)
-	if err == nil && notify != nil {
+	if err == nil {
 		notify(QueueState{})
 	}
 	c.mu.Lock()

@@ -71,8 +71,8 @@ golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1/go.mod git:665e8c7367d1ecf64
 golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a/go.mod git:bc2c85ada10aa9b6aa9607e9ac9ad0761b95cf1d
 golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f/go.mod git:8c9f86f7a55f5af45a9080f6ed3ac915382d369c
 golang.org/x/sys v0.2.0/go.mod git:fc697a31fa06b616162e34fd66047ab52722ba6c
-golang.org/x/sys v0.45.0 git:397d5f80920585bc27433d878aba498d062f81e1
-golang.org/x/sys v0.45.0/go.mod git:397d5f80920585bc27433d878aba498d062f81e1
+golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
 golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod git:7de9c90e9dd184706b838f536a1cbf40a296ddb7
 golang.org/x/term v0.0.0-20210927222741-03fcf44c2211/go.mod git:03fcf44c2211dcd5eb77510b5f7c1fb02d6ded50
 golang.org/x/term v0.2.0/go.mod git:f72a2d8d642ddf1481474d80c4e12bb68d1702b9

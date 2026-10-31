@@ -38,12 +38,29 @@ type TaskStep struct {
 	Error  string     `json:"error,omitempty"`
 }
 
-// TaskWait is one span where a running task waited instead of worked.
+// TaskWait is one span where a task waited instead of worked.
 type TaskWait struct {
-	ID     int       `json:"id"`
-	Reason string    `json:"reason"`
-	Start  time.Time `json:"start"`
-	End    time.Time `json:"end,omitzero"`
+	ID     int    `json:"id"`
+	Reason string `json:"reason"`
+	// Kind names what the task waits on, such as "lock". Key names the thing of that kind.
+	Kind string `json:"kind,omitempty"`
+	Key  string `json:"key,omitempty"`
+	// Until is when the wait ends at the latest. Zero means no bound.
+	Until time.Time         `json:"until,omitzero"`
+	Attrs map[string]string `json:"attrs,omitempty"`
+	// Queue marks a wait the scheduler records while the task waits for admission. Its Kind is a QueueState kind.
+	Queue bool      `json:"queue,omitempty"`
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end,omitzero"`
+}
+
+// WaitInfo is what a consumer says about a wait it opens or changes.
+type WaitInfo struct {
+	Reason string            `json:"reason,omitempty"`
+	Kind   string            `json:"kind,omitempty"`
+	Key    string            `json:"key,omitempty"`
+	Until  time.Time         `json:"until,omitzero"`
+	Attrs  map[string]string `json:"attrs,omitempty"`
 }
 
 // The bounds of what one task holds. Past a bound, the oldest closed step or wait goes, and the task counts it.
@@ -52,7 +69,37 @@ const (
 	maxTaskWaits    = 1000
 	maxTaskTitleLen = 200
 	maxOutcomeLen   = 64
+	maxWaitAttrs    = 16
+	maxWaitAttrKey  = 64
 )
+
+// cloneWaits copies waits and their attrs.
+func cloneWaits(ws []TaskWait) []TaskWait {
+	out := append([]TaskWait(nil), ws...)
+	for i := range out {
+		out[i].Attrs = maps.Clone(out[i].Attrs)
+	}
+	return out
+}
+
+// apply sets the fields of info on a wait. It checks the bounds of Attrs, and clips each text to maxTaskTitleLen.
+func (info WaitInfo) apply(w *TaskWait) error {
+	if len(info.Attrs) > maxWaitAttrs {
+		return fmt.Errorf("%w: a wait holds at most %d attrs", ErrBadState, maxWaitAttrs)
+	}
+	var attrs map[string]string
+	for k, v := range info.Attrs {
+		if k == "" || len(k) > maxWaitAttrKey {
+			return fmt.Errorf("%w: an attr key is 1 to %d bytes", ErrBadState, maxWaitAttrKey)
+		}
+		if attrs == nil {
+			attrs = make(map[string]string, len(info.Attrs))
+		}
+		attrs[k] = clip(v)
+	}
+	w.Reason, w.Kind, w.Key, w.Until, w.Attrs = clip(info.Reason), clip(info.Kind), clip(info.Key), info.Until, attrs
+	return nil
+}
 
 var (
 	// ErrNoStep is returned for a step or a wait the task does not hold open.
@@ -337,15 +384,31 @@ func (s *Store) SetOutcome(id, outcome string) error {
 	return s.noteDetail(j, detailRec{Outcome: &outcome})
 }
 
-// OpenWait opens a wait in a task and returns its ID.
+// OpenWait opens a wait in a task with only a reason, and returns its ID.
 func (s *Store) OpenWait(id, reason string) (int, error) {
+	return s.OpenWaitInfo(id, WaitInfo{Reason: reason})
+}
+
+// OpenWaitInfo opens a wait in a task and returns its ID.
+func (s *Store) OpenWaitInfo(id string, info WaitInfo) (int, error) {
+	w := TaskWait{Start: time.Now()}
+	if err := info.apply(&w); err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j, err := s.liveJob(id)
 	if err != nil {
 		return 0, err
 	}
-	d := detailRec{Waits: []TaskWait{{ID: len(j.Waits) + j.WaitsDropped + 1, Reason: clip(reason), Start: time.Now()}}}
+	return s.openWaitLocked(j, w, nil)
+}
+
+// openWaitLocked adds w as a new wait of j, along with the changed waits. Caller holds s.mu.
+func (s *Store) openWaitLocked(j *Job, w TaskWait, changed []TaskWait) (int, error) {
+	// Each ID the task gave out is a held wait or a dropped one, so this ID is new.
+	w.ID = len(j.Waits) + j.WaitsDropped + 1
+	d := detailRec{Waits: append(changed, w)}
 	if len(j.Waits) >= s.waitCap {
 		old := oldestClosed(j.Waits, func(w TaskWait) int { return w.ID }, func(w TaskWait) bool { return w.End.IsZero() })
 		if old == 0 {
@@ -353,7 +416,35 @@ func (s *Store) OpenWait(id, reason string) (int, error) {
 		}
 		d.DropWaits = []int{old}
 	}
-	return d.Waits[0].ID, s.noteDetail(j, d)
+	return w.ID, s.noteDetail(j, d)
+}
+
+// openWait returns the index of an open wait of j. Caller holds s.mu.
+func openWait(j *Job, wait int) (int, error) {
+	i := waitAt(j, wait)
+	if i < 0 || !j.Waits[i].End.IsZero() {
+		return -1, fmt.Errorf("%w: wait %d", ErrNoStep, wait)
+	}
+	return i, nil
+}
+
+// UpdateWait replaces what an open wait says. Its ID and its start stay.
+func (s *Store) UpdateWait(id string, wait int, info WaitInfo) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.liveJob(id)
+	if err != nil {
+		return err
+	}
+	i, err := openWait(j, wait)
+	if err != nil {
+		return err
+	}
+	w := j.Waits[i]
+	if err := info.apply(&w); err != nil {
+		return err
+	}
+	return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
 }
 
 // CloseWait ends an open wait.
@@ -364,13 +455,51 @@ func (s *Store) CloseWait(id string, wait int) error {
 	if err != nil {
 		return err
 	}
-	i := waitAt(j, wait)
-	if i < 0 || !j.Waits[i].End.IsZero() {
-		return fmt.Errorf("%w: wait %d", ErrNoStep, wait)
+	i, err := openWait(j, wait)
+	if err != nil {
+		return err
 	}
 	w := j.Waits[i]
 	w.End = time.Now()
 	return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
+}
+
+// QueueWait records where a task waits for admission. The open queue wait goes on while the kind and the key stay.
+// A new kind or key ends it and opens the next. A zero q ends it.
+func (s *Store) QueueWait(id string, q QueueState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.liveJob(id)
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(j.Waits, func(w TaskWait) bool { return w.Queue && w.End.IsZero() })
+	now := time.Now()
+	var changed []TaskWait
+	if i >= 0 {
+		w := j.Waits[i]
+		if q.Kind != "" && w.Kind == q.Kind && w.Key == q.Key {
+			if w.Reason == clip(q.Reason) {
+				return nil
+			}
+			w.Reason = clip(q.Reason)
+			return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
+		}
+		w.End = now
+		changed = []TaskWait{w}
+	}
+	if q.Kind == "" {
+		if changed == nil {
+			return nil
+		}
+		return s.noteDetail(j, detailRec{Waits: changed})
+	}
+	w := TaskWait{Queue: true, Start: now}
+	if err := (WaitInfo{Reason: q.Reason, Kind: q.Kind, Key: q.Key}).apply(&w); err != nil {
+		return err
+	}
+	_, err = s.openWaitLocked(j, w, changed)
+	return err
 }
 
 // AppendLog writes one line to a task's log.

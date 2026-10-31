@@ -730,7 +730,7 @@ func (j *Job) clone() *Job {
 	c.Result = append(json.RawMessage(nil), j.Result...)
 	c.Priority = maps.Clone(j.Priority)
 	c.Steps = append([]TaskStep(nil), j.Steps...)
-	c.Waits = append([]TaskWait(nil), j.Waits...)
+	c.Waits = cloneWaits(j.Waits)
 	return &c
 }
 

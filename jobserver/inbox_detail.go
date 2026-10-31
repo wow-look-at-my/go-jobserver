@@ -34,6 +34,8 @@ type TaskDetails struct {
 	LogBytes int64       `json:"log_bytes"`
 	// Outcome is the short label the consumer set with SetOutcome. A reader tells the kind of result from it.
 	Outcome string `json:"outcome,omitempty"`
+	// Schedule names the schedule whose last task this is. It is empty for any other task.
+	Schedule string `json:"schedule,omitempty"`
 }
 
 // TaskPage is the tasks of one inbox that changed after a seq. A new Epoch or a new Pruned means the reader reads again from zero.
@@ -67,8 +69,10 @@ const (
 	DetailRename  = "rename_step"
 	DetailWait    = "wait"
 	DetailEndWait = "end_wait"
-	DetailLog     = "log"
-	DetailOutcome = "outcome"
+	// DetailUpdateWait changes what the open wait Ref says, from Wait.
+	DetailUpdateWait = "update_wait"
+	DetailLog        = "log"
+	DetailOutcome    = "outcome"
 )
 
 // DetailOp is one change to the details of a checked-out task, as the wire carries it.
@@ -79,6 +83,8 @@ type DetailOp struct {
 	Parent int        `json:"parent,omitempty"`
 	Ref    int        `json:"ref,omitempty"`
 	Status StepStatus `json:"status,omitempty"`
+	// Wait is what a wait or an update_wait sets. A wait without it takes Text as its reason.
+	Wait *WaitInfo `json:"wait,omitempty"`
 }
 
 // applyDetail runs one detail change on a task. It returns the ID of a new step or wait.
@@ -93,7 +99,15 @@ func (s *Server) applyDetail(id string, op DetailOp) (int, error) {
 	case DetailRename:
 		return 0, s.store.RenameStep(id, op.Ref, op.Text)
 	case DetailWait:
-		return s.store.OpenWait(id, op.Text)
+		if op.Wait == nil {
+			return s.store.OpenWait(id, op.Text)
+		}
+		return s.store.OpenWaitInfo(id, *op.Wait)
+	case DetailUpdateWait:
+		if op.Wait == nil {
+			return 0, fmt.Errorf("%w: an update_wait needs a wait", ErrBadState)
+		}
+		return 0, s.store.UpdateWait(id, op.Ref, *op.Wait)
 	case DetailEndWait:
 		return 0, s.store.CloseWait(id, op.Ref)
 	case DetailOutcome:
@@ -142,7 +156,7 @@ func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
 		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, ConsumerName: j.ConsumerName, Created: j.Created, Started: j.Started,
 		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
 		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
-		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome}
+		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome, Schedule: s.every.lastOf(j.ID)}
 }
 
 // taskDetails reads one task of an inbox.
@@ -206,9 +220,20 @@ func (ib *Inbox[T, R]) RenameStep(c Consumer, t *Task, step int, title string) e
 	return err
 }
 
-// OpenWait opens a span where a checked-out task waits, and returns its ID.
+// OpenWait opens a span where a checked-out task waits, with only a reason, and returns its ID.
 func (ib *Inbox[T, R]) OpenWait(c Consumer, t *Task, reason string) (int, error) {
 	return ib.b.detail(c, t.ID, DetailOp{Kind: DetailWait, Text: reason})
+}
+
+// OpenWaitInfo opens a span where a checked-out task waits, with its kind, key, bound and attrs, and returns its ID.
+func (ib *Inbox[T, R]) OpenWaitInfo(c Consumer, t *Task, info WaitInfo) (int, error) {
+	return ib.b.detail(c, t.ID, DetailOp{Kind: DetailWait, Wait: &info})
+}
+
+// UpdateWait replaces what an open wait says. Its ID and its start stay.
+func (ib *Inbox[T, R]) UpdateWait(c Consumer, t *Task, wait int, info WaitInfo) error {
+	_, err := ib.b.detail(c, t.ID, DetailOp{Kind: DetailUpdateWait, Ref: wait, Wait: &info})
+	return err
 }
 
 // CloseWait ends an open wait.
