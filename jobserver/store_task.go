@@ -52,6 +52,29 @@ func (s *Store) applyTask(r record) {
 	}
 }
 
+// liveRecord returns the record of a task, or nil. Read it only through viewRecord, because the store changes it under s.mu.
+func (s *Store) liveRecord(id string) *Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jobs[CanonicalID(id)]
+}
+
+// viewRecord copies a record under s.mu. A pruned record still reads.
+func (s *Store) viewRecord(rec *Job) *Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return rec.clone()
+}
+
+// setErr keeps the error a task failed with on its record.
+func (s *Store) setErr(id string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if j, ok := s.jobs[CanonicalID(id)]; ok {
+		j.err = err
+	}
+}
+
 // bump wakes everything that waits on a change. Caller holds s.mu.
 func (s *Store) bump() {
 	close(s.watch)

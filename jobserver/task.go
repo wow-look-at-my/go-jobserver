@@ -124,15 +124,50 @@ type taskBackend interface {
 	errOf(id string) error
 }
 
+// localRecords is the part of a backend in this process: it hands out a task's record and reads it.
+type localRecords interface {
+	liveRecord(id string) *Job
+	viewRecord(rec *Job) *Job
+	waitRecord(ctx context.Context, rec *Job) (*Job, error)
+	recordDetails(inbox string, rec *Job) (*TaskDetails, error)
+}
+
 // Task is one task in an inbox. It is not generic, so a task from any inbox can trigger a task in any other.
 type Task struct {
 	ID string
 	b  taskBackend
+	// rec is the task's record in this process. A prune drops it from the store, and this pointer keeps it readable.
+	rec *Job
+}
+
+// newTask makes the handle of a task. A local backend gives it the task's record.
+func newTask(b taskBackend, id string) *Task {
+	t := &Task{ID: id, b: b}
+	if l, ok := b.(localRecords); ok {
+		t.rec = l.liveRecord(id)
+	}
+	return t
+}
+
+// job reads a copy of the task's job: through the record when the task has one, else by ID.
+func (t *Task) job() (*Job, error) {
+	if t.rec != nil {
+		return t.b.(localRecords).viewRecord(t.rec), nil
+	}
+	return t.b.job(t.ID)
+}
+
+// waitJob blocks until the task's job ends.
+func (t *Task) waitJob(ctx context.Context) (*Job, error) {
+	if t.rec != nil {
+		return t.b.(localRecords).waitRecord(ctx, t.rec)
+	}
+	return t.b.waitJob(ctx, t.ID)
 }
 
 // State returns the task's state now. A task the backend cannot read is Failed.
 func (t *Task) State() TaskState {
-	j, err := t.b.job(t.ID)
+	j, err := t.job()
 	if err != nil {
 		return Failed
 	}
@@ -144,7 +179,7 @@ func (t *Task) Cancel() error { return t.b.cancel(t.ID) }
 
 // Wait blocks until the task ends. The error is nil on success.
 func (t *Task) Wait(ctx context.Context) *TaskError {
-	j, err := t.b.waitJob(ctx, t.ID)
+	j, err := t.waitJob(ctx)
 	if err != nil {
 		return &TaskError{State: Failed, Message: err.Error(), Err: err}
 	}
@@ -158,7 +193,10 @@ func (t *Task) errorOf(j *Job) *TaskError {
 	case Succeeded:
 		return nil
 	case Failed:
-		err := t.b.errOf(t.ID)
+		err := j.err
+		if err == nil {
+			err = t.b.errOf(t.ID)
+		}
 		if err == nil {
 			err = errors.New(j.Error)
 		}
