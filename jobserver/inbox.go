@@ -312,8 +312,7 @@ func (ib *Inbox[T, R]) Wait(ctx context.Context, t *Task) (R, *TaskError) {
 	return ib.resultOf(t, j)
 }
 
-// on is the handle the inbox reads t through. A task with a record reads through its own backend, which owns the
-// record. Any other task reads by ID through the inbox's backend.
+// on keeps a task with a record on the backend that owns it. Others read by ID here.
 func (ib *Inbox[T, R]) on(t *Task) *Task {
 	if t.rec != nil {
 		return t
