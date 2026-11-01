@@ -221,8 +221,8 @@ func (s *Server) Task(id string) (*Task, error) {
 	return newTask(s, j.ID), nil
 }
 
-func (s *Server) liveRecord(id string) *Job    { return s.store.liveRecord(id) }
-func (s *Server) viewRecord(rec *Job) *Job     { return s.store.viewRecord(rec) }
+func (s *Server) liveRecord(id string) *Job { return s.store.liveRecord(id) }
+func (s *Server) viewRecord(rec *Job) *Job  { return s.store.viewRecord(rec) }
 
 // waitRecord blocks until a record ends. A prune does not stop it, because it reads the record and not the table.
 func (s *Server) waitRecord(ctx context.Context, rec *Job) (*Job, error) {
