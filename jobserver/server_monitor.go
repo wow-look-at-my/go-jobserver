@@ -65,7 +65,7 @@ func (s *Server) Watch(spec MonitorSpec, title string) (*Task, bool, error) {
 	defer s.watchMu.Unlock()
 	for _, j := range s.store.liveIn(MonitorInboxName) {
 		if j.Key == key {
-			return &Task{ID: j.ID, b: localNamed{Server: s, c: c}}, true, nil
+			return newTask(localNamed{Server: s, c: c}, j.ID), true, nil
 		}
 	}
 	raw, err := json.Marshal(monitorTask{TaskSpec: TaskSpec{Title: title}, Monitor: spec.clone()})
@@ -77,7 +77,7 @@ func (s *Server) Watch(spec MonitorSpec, title string) (*Task, bool, error) {
 		return nil, false, err
 	}
 	s.Wake()
-	return &Task{ID: j.ID, b: localNamed{Server: s, c: c}}, false, nil
+	return newTask(localNamed{Server: s, c: c}, j.ID), false, nil
 }
 
 // runMonitor is the run of the monitor inbox. Its result is the last status.

@@ -121,6 +121,7 @@ func (s *Server) settleTask(id string, result json.RawMessage, err error) {
 		s.mu.Lock()
 		s.errs[id] = err
 		s.mu.Unlock()
+		s.store.setErr(id, err)
 		s.finish(id, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
@@ -217,7 +218,26 @@ func (s *Server) Task(id string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Task{ID: j.ID, b: s}, nil
+	return newTask(s, j.ID), nil
+}
+
+func (s *Server) liveRecord(id string) *Job { return s.store.liveRecord(id) }
+func (s *Server) viewRecord(rec *Job) *Job  { return s.store.viewRecord(rec) }
+
+// waitRecord blocks until a record ends. A prune does not stop it, because it reads the record and not the table.
+func (s *Server) waitRecord(ctx context.Context, rec *Job) (*Job, error) {
+	for {
+		ch := s.store.Changed()
+		j := s.store.viewRecord(rec)
+		if j.State.Terminal() {
+			return j, nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // waitJob blocks until a task's job ends.

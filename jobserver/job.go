@@ -120,6 +120,8 @@ type Job struct {
 	Seq uint64 `json:"seq"`
 	// openWaits is how many waits in Waits are open. Each change to Waits keeps it.
 	openWaits int
+	// err is the error the task failed with in this process. The journal keeps only its text, in Error.
+	err error
 }
 
 // AvgCPUs is how many CPUs the job's last run used per second of wall clock.

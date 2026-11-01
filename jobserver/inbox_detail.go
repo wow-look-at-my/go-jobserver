@@ -165,8 +165,18 @@ func (s *Server) taskDetails(inbox, id string) (*TaskDetails, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.jobDetails(inbox, j)
+}
+
+// recordDetails reads one task of an inbox through its record, so a task a prune dropped still reads.
+func (s *Server) recordDetails(inbox string, rec *Job) (*TaskDetails, error) {
+	return s.jobDetails(inbox, s.store.viewRecord(rec))
+}
+
+// jobDetails renders a copy of a task's job, which must be in the inbox.
+func (s *Server) jobDetails(inbox string, j *Job) (*TaskDetails, error) {
 	if inboxKey(inbox) != j.Inbox {
-		return nil, fmt.Errorf("%w: %s is not a task of inbox %s", ErrNotFound, id, inbox)
+		return nil, fmt.Errorf("%w: %s is not a task of inbox %s", ErrNotFound, j.ID, inbox)
 	}
 	var queue map[string]*QueueState
 	if j.State == StateActive {
@@ -255,7 +265,12 @@ func (ib *Inbox[T, R]) Log(c Consumer, t *Task, line string) error {
 }
 
 // Details reads one task of the inbox.
-func (ib *Inbox[T, R]) Details(t *Task) (*TaskDetails, error) { return ib.b.details(t.ID) }
+func (ib *Inbox[T, R]) Details(t *Task) (*TaskDetails, error) {
+	if l, ok := t.b.(localRecords); ok && t.rec != nil {
+		return l.recordDetails(ib.name, t.rec)
+	}
+	return ib.b.details(t.ID)
+}
 
 // Tasks reads the tasks of the inbox that changed after since. Since zero reads every task the server holds.
 func (ib *Inbox[T, R]) Tasks(since uint64) (TaskPage, error) { return ib.b.tasks(since) }

@@ -208,7 +208,7 @@ func (ib *Inbox[T, R]) add(spec T, p priority.MultiPriority, trigger string, on 
 	if err != nil {
 		return nil, err
 	}
-	return &Task{ID: id, b: ib.b}, nil
+	return newTask(ib.b, id), nil
 }
 
 // OnSuccess adds spec to inbox as a task that waits until t succeeds. It is cancelled when t fails or is cancelled.
@@ -253,7 +253,7 @@ func (ib *Inbox[T, R]) Take(ctx context.Context, c Consumer, wait time.Duration)
 	if err != nil {
 		return nil, zero, false, err
 	}
-	return &Task{ID: id, b: ib.b}, spec, true, nil
+	return newTask(ib.b, id), spec, true, nil
 }
 
 // Started names the process a consumer runs a task in, so the governor can measure and control it.
@@ -285,13 +285,13 @@ func (ib *Inbox[T, R]) Lookup(id string) (*Task, error) {
 	if inbox != ib.name {
 		return nil, fmt.Errorf("%w: %s is a task of inbox %s", ErrNotFound, id, inbox)
 	}
-	return &Task{ID: id, b: ib.b}, nil
+	return newTask(ib.b, id), nil
 }
 
 // Spec returns the spec the task was made from. It is the zero value when the task cannot be read.
 func (ib *Inbox[T, R]) Spec(t *Task) T {
 	var zero T
-	j, err := ib.b.job(t.ID)
+	j, err := ib.on(t).job()
 	if err != nil {
 		return zero
 	}
@@ -305,17 +305,25 @@ func (ib *Inbox[T, R]) Spec(t *Task) T {
 // Wait blocks until the task ends. The error is nil on success.
 func (ib *Inbox[T, R]) Wait(ctx context.Context, t *Task) (R, *TaskError) {
 	var zero R
-	j, err := ib.b.waitJob(ctx, t.ID)
+	j, err := ib.on(t).waitJob(ctx)
 	if err != nil {
 		return zero, &TaskError{State: Failed, Message: err.Error(), Err: err}
 	}
 	return ib.resultOf(t, j)
 }
 
+// on keeps a task with a record on the backend that owns it. Others read by ID here.
+func (ib *Inbox[T, R]) on(t *Task) *Task {
+	if t.rec != nil {
+		return t
+	}
+	return &Task{ID: t.ID, b: ib.b}
+}
+
 // TryResult is Wait with no wait. ok is false while the task is Queued or Running.
 func (ib *Inbox[T, R]) TryResult(t *Task) (R, *TaskError, bool) {
 	var zero R
-	j, err := ib.b.job(t.ID)
+	j, err := ib.on(t).job()
 	if err != nil {
 		return zero, &TaskError{State: Failed, Message: err.Error(), Err: err}, true
 	}
@@ -328,8 +336,7 @@ func (ib *Inbox[T, R]) TryResult(t *Task) (R, *TaskError, bool) {
 
 func (ib *Inbox[T, R]) resultOf(t *Task, j *Job) (R, *TaskError) {
 	var r R
-	tk := &Task{ID: t.ID, b: ib.b}
-	if te := tk.errorOf(j); te != nil {
+	if te := ib.on(t).errorOf(j); te != nil {
 		return r, te
 	}
 	if raw := resultOf(j); len(raw) > 0 {

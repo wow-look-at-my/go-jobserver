@@ -211,7 +211,7 @@ func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	c.out[g.id] = g
 	c.runs.Add(1)
 	ctx = context.WithValue(ctx, leaseCtxKey{}, l)
-	go c.runTask(context.WithValue(ctx, taskCtxKey{}, &Task{ID: g.id, b: localNamed{Server: c.s, c: c}}), g)
+	go c.runTask(context.WithValue(ctx, taskCtxKey{}, newTask(localNamed{Server: c.s, c: c}, g.id)), g)
 }
 
 // runTask runs one task through the inbox's Run and records the outcome.
