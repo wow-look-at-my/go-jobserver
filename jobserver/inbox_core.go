@@ -148,7 +148,18 @@ func (c *inboxCore) offer(j *Job) {
 func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
 	// The scheduler calls notify under its lock, so it must not take c.mu.
+	var recorded QueueState
+	var recordedAt time.Time
+	told := false
 	notify := func(q QueueState) {
+		now := time.Now()
+		if told && q.Kind == recorded.Kind && q.Key == recorded.Key && q.Reason == recorded.Reason && now.Sub(recordedAt) < queueReasonRefresh {
+			if c.hooks.onQueue != nil {
+				c.hooks.onQueue(g.id, q)
+			}
+			return
+		}
+		told, recorded, recordedAt = true, q, now
 		if err := c.s.store.QueueWait(g.id, q); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotRunning) {
 			c.s.cfg.Logf("go-jobserver: ERROR: inbox %s: record the queue wait of %s: %v", c.name, g.id, err)
 		}

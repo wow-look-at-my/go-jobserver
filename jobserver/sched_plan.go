@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/wow-look-at-my/go-containers/set"
 	"github.com/wow-look-at-my/go-jobserver/priority"
 )
 
@@ -42,12 +41,28 @@ func (s *Scheduler) planLocked() {
 		l  *Lease
 		st QueueState
 	}
-	var queued []wait
-	for _, l := range s.orderLocked(now) {
-		if st, ok := s.fitLocked(p, l.req, l.cost); !ok {
+	ordered := s.orderLocked(now)
+	queued := make([]wait, 0, len(ordered))
+	// The fit of a lease depends only on p and on these fields, so waiters that
+	// share them share one result until p changes.
+	type fitKey struct {
+		group              string
+		groupOnly, monitor bool
+		cost               float64
+	}
+	refused := map[fitKey]QueueState{}
+	for _, l := range ordered {
+		k := fitKey{l.req.Group, l.req.GroupOnly, l.req.Monitor, l.cost}
+		if st, ok := refused[k]; ok {
 			queued = append(queued, wait{l, st})
 			continue
 		}
+		if st, ok := s.fitLocked(p, l.req, l.cost); !ok {
+			refused[k] = st
+			queued = append(queued, wait{l, st})
+			continue
+		}
+		clear(refused)
 		p.take(l.req, l.cost)
 		l.started = now
 		s.holding = append(s.holding, l)
@@ -57,11 +72,19 @@ func (s *Scheduler) planLocked() {
 
 	s.waiting = s.waiting[:0]
 	positions := map[string]int{}
+	// Every waiter on one constraint waits behind the same holders. The list is built once and shared read-only.
+	holders := map[[2]string][]string{}
 	for _, w := range queued {
 		s.waiting = append(s.waiting, w.l)
 		positions[w.st.Key]++
 		w.st.Position = positions[w.st.Key]
-		w.st.Holders = s.holderIDsLocked(w.st)
+		k := [2]string{w.st.Kind, w.st.Key}
+		hs, ok := holders[k]
+		if !ok {
+			hs = s.holderIDsLocked(w.st)
+			holders[k] = hs
+		}
+		w.st.Holders = hs
 		if w.l.told && w.l.state.equal(w.st) {
 			continue
 		}
@@ -83,6 +106,7 @@ type planState struct {
 
 func (s *Scheduler) planStateLocked() *planState {
 	p := &planState{budget: s.budgetLocked(), inGroup: map[string]int{}}
+	now := s.now()
 	for _, h := range s.holding {
 		if h.req.Monitor {
 			continue
@@ -93,7 +117,7 @@ func (s *Scheduler) planStateLocked() *planState {
 		if !h.req.GroupOnly {
 			p.running++
 			p.reserved += h.cost
-			if !h.Measured() {
+			if s.unmeasuredLocked(h, now) {
 				p.unmeasured += h.cost
 			}
 		}
@@ -135,6 +159,20 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 				runnable, s.host.cpus, fmtCPUs(cost))}, false
 	}
 	return QueueState{}, true
+}
+
+// unmeasuredLocked says whether the host gate adds a holder's cost to the
+// host load. A holder with no process and no actuator never gets a
+// measurement, so it counts only for one host-load window after it starts.
+func (s *Scheduler) unmeasuredLocked(h *Lease, now time.Time) bool {
+	if h.Measured() {
+		return false
+	}
+	_, pid, a := h.snapshot()
+	if pid > 0 || a != nil {
+		return true
+	}
+	return now.Sub(h.started) < hostLoadWindow*s.cfg.SampleInterval
 }
 
 // take counts a granted lease in p.
@@ -306,22 +344,22 @@ func cmpSeq(a, b *Lease) int {
 // groupBatches keeps ls in arrival order, except that each batch's members
 // follow its first member, so a new batch starts as one unit.
 func groupBatches(ls []*Lease) []*Lease {
-	taken := set.New[*Lease]()
+	members := map[string][]*Lease{}
+	for _, l := range ls {
+		if l.req.Batch != "" {
+			members[l.req.Batch] = append(members[l.req.Batch], l)
+		}
+	}
 	out := make([]*Lease, 0, len(ls))
 	for _, l := range ls {
-		if taken.Contains(l) {
-			continue
-		}
-		taken.Add(l)
-		out = append(out, l)
 		if l.req.Batch == "" {
+			out = append(out, l)
 			continue
 		}
-		for _, m := range ls {
-			if !taken.Contains(m) && m.req.Batch == l.req.Batch {
-				taken.Add(m)
-				out = append(out, m)
-			}
+		// The first member of a batch brings the whole batch, in order. The later members are already placed.
+		if ms, ok := members[l.req.Batch]; ok {
+			out = append(out, ms...)
+			delete(members, l.req.Batch)
 		}
 	}
 	return out

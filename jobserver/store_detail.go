@@ -464,8 +464,12 @@ func (s *Store) CloseWait(id string, wait int) error {
 	return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
 }
 
+// queueReasonRefresh is the least time between writes of one open queue wait's reason.
+const queueReasonRefresh = 30 * time.Second
+
 // QueueWait records where a task waits for admission. The open queue wait goes on while the kind and the key stay.
-// A new kind or key ends it and opens the next. A zero q ends it.
+// A new kind or key ends it and opens the next. A zero q ends it. A reason-only change is written at most once per
+// queueReasonRefresh, so a long queue does not journal every waiter on each plan pass.
 func (s *Store) QueueWait(id string, q QueueState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -474,7 +478,7 @@ func (s *Store) QueueWait(id string, q QueueState) error {
 		return err
 	}
 	i := slices.IndexFunc(j.Waits, func(w TaskWait) bool { return w.Queue && w.End.IsZero() })
-	now := time.Now()
+	now := s.now()
 	var changed []TaskWait
 	if i >= 0 {
 		w := j.Waits[i]
@@ -482,12 +486,17 @@ func (s *Store) QueueWait(id string, q QueueState) error {
 			if w.Reason == clip(q.Reason) {
 				return nil
 			}
+			if at, ok := s.reasonAt[j.ID]; ok && now.Sub(at) < queueReasonRefresh {
+				return nil
+			}
+			s.reasonAt[j.ID] = now
 			w.Reason = clip(q.Reason)
 			return s.noteDetail(j, detailRec{Waits: []TaskWait{w}})
 		}
 		w.End = now
 		changed = []TaskWait{w}
 	}
+	delete(s.reasonAt, j.ID)
 	if q.Kind == "" {
 		if changed == nil {
 			return nil
@@ -499,6 +508,9 @@ func (s *Store) QueueWait(id string, q QueueState) error {
 		return err
 	}
 	_, err = s.openWaitLocked(j, w, changed)
+	if err == nil {
+		s.reasonAt[j.ID] = now
+	}
 	return err
 }
 
