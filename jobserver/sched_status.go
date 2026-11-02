@@ -84,7 +84,8 @@ func (s *Scheduler) Status() SchedulerStatus {
 	defer s.mu.Unlock()
 	now := s.now()
 	st := SchedulerStatus{MaxConcurrent: s.capLocked(), MaxConcurrentDeclared: s.maxRuns, Budget: s.budgetLocked(),
-		Holding: []LeaseInfo{}, Waiting: []LeaseInfo{}, Monitors: []LeaseInfo{}, Groups: []GroupInfo{}, Batches: []BatchInfo{},
+		Holding: make([]LeaseInfo, 0, len(s.holding)), Waiting: make([]LeaseInfo, 0, len(s.waiting)), Monitors: []LeaseInfo{},
+		Groups: []GroupInfo{}, Batches: []BatchInfo{},
 		PriorityKeys: s.PriorityKeys()}
 	if s.capOverridden {
 		st.MaxConcurrentOverride = new(s.capOverride)
@@ -126,9 +127,11 @@ func (s *Scheduler) Status() SchedulerStatus {
 			g.Active++
 		}
 	}
-	for _, l := range s.waiting {
-		w := l.state
-		st.Waiting = append(st.Waiting, l.info(&w))
+	// One backing array holds every waiter's wait, so a long queue costs one allocation here, not one per waiter.
+	waits := make([]QueueState, len(s.waiting))
+	for i, l := range s.waiting {
+		waits[i] = l.state
+		st.Waiting = append(st.Waiting, l.info(&waits[i]))
 		if g := groups[l.req.Group]; g != nil {
 			g.Waiting++
 		}
@@ -149,8 +152,8 @@ func (s *Scheduler) Status() SchedulerStatus {
 
 // priorityValues names each value of a lease's priority by its key.
 func priorityValues(o leaseOrder) map[string]float64 {
-	out := map[string]float64{}
-	for name, v := range o.keys.Values(o.prio) {
+	out := make(map[string]float64, o.keys.Len())
+	for name, v := range o.keys.Named(o.prio) {
 		out[name] = float64(v)
 	}
 	return out

@@ -51,6 +51,26 @@ func TestZeroValueIsEveryDefault(t *testing.T) {
 	assert.Equal(t, map[string]int{"infra_priority": 50, "user": 0, "plain": 0}, keys.Values(p))
 }
 
+func TestNamedYieldsTheValuesInKeyOrder(t *testing.T) {
+	var h hookKeys
+	keys, err := FromFields(&h)
+	require.NoError(t, err)
+	p := keys.New()
+	p.Set(&h.User, 7)
+	var names []string
+	got := map[string]int{}
+	for name, v := range keys.Named(p) {
+		names = append(names, name)
+		got[name] = v
+	}
+	assert.Equal(t, keys.Values(p), got, "Named and Values agree")
+	assert.Len(t, names, keys.Len())
+	assert.Equal(t, "infra_priority", names[0], "the top key comes first")
+	for range keys.Named(p) {
+		break
+	}
+}
+
 func TestCompareLowerFirstAndTheFirstDifferenceDecides(t *testing.T) {
 	var h hookKeys
 	keys, err := FromFields(&h)
