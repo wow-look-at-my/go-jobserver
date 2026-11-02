@@ -54,6 +54,10 @@ type Store struct {
 	stepCap, waitCap int
 	// compactHook lets a test stop a compaction at a stage. Nil in production.
 	compactHook func(stage string) error
+	// reasonAt is when QueueWait last wrote the reason of each task's open queue wait.
+	reasonAt map[string]time.Time
+	// now is the store's clock. A test replaces it.
+	now func() time.Time
 }
 
 // OpenStore opens (or creates) the server directory and replays its journal.
@@ -74,6 +78,8 @@ func OpenStore(dir string) (*Store, error) {
 		stepCap: maxTaskSteps,
 		waitCap: maxTaskWaits,
 		epoch:   NewID(func(string) bool { return false }),
+		reasonAt: map[string]time.Time{},
+		now:      time.Now,
 	}
 	// A compaction that did not reach its rename leaves this file. The journal still holds everything.
 	if err := os.Remove(s.compactPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -655,6 +661,7 @@ func (s *Store) Finish(id string, st State, exitCode int, msg string, artifacts 
 	j.Error = msg
 	j.Artifacts = artifacts
 	j.LogBytes = logBytes
+	delete(s.reasonAt, j.ID)
 	closeOpen(j, j.Finished)
 	err := s.commit(record{
 		kind: recFinish, id: j.ID, state: st, exitCode: exitCode,

@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -96,10 +97,13 @@ func TestQueueWaitFollowsTheQueueState(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
 	require.NoError(t, err)
+	at := time.Now()
+	st.now = func() time.Time { return at }
 	id := addQueued(t, st, "n")
 
 	require.NoError(t, st.QueueWait(id, QueueState{Kind: WaitGroup, Key: "g", Reason: "group g: 1 of 1 running"}))
 	require.NoError(t, st.QueueWait(id, QueueState{Kind: WaitGroup, Key: "g", Position: 2, Reason: "group g: 1 of 1 running"}))
+	at = at.Add(queueReasonRefresh)
 	require.NoError(t, st.QueueWait(id, QueueState{Kind: WaitGroup, Key: "g", Reason: "group g: 2 of 2 running"}))
 	j, _ := st.Job(id)
 	require.Len(t, j.Waits, 1, "one wait while the kind and the key stay")
@@ -129,6 +133,38 @@ func TestQueueWaitFollowsTheQueueState(t *testing.T) {
 	require.Len(t, j.Waits, 2)
 	assert.False(t, j.Waits[1].End.IsZero(), "admission ends the wait")
 	require.NoError(t, st.QueueWait(id, QueueState{}), "a zero state with no open wait does nothing")
+}
+
+// A host sample changes the reason of every waiter. Inside the refresh window that writes nothing, so a long queue
+// does not journal every waiter at each sample.
+func TestQueueWaitWritesAReasonChangeAtMostOncePerRefresh(t *testing.T) {
+	st, err := OpenStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { st.Close() })
+	at := time.Now()
+	st.now = func() time.Time { return at }
+	ids := []string{addQueued(t, st, "a"), addQueued(t, st, "b"), addQueued(t, st, "c")}
+	for _, id := range ids {
+		require.NoError(t, st.QueueWait(id, QueueState{Kind: WaitCPU, Key: WaitCPU, Reason: "host load: 14 tasks want a CPU"}))
+	}
+
+	seq := st.seq
+	for n := 15; n < 40; n++ {
+		at = at.Add(time.Second)
+		for _, id := range ids {
+			require.NoError(t, st.QueueWait(id, QueueState{Kind: WaitCPU, Key: WaitCPU, Reason: fmt.Sprintf("host load: %d tasks want a CPU", n)}))
+		}
+	}
+	assert.Equal(t, seq, st.seq, "25 samples inside the refresh window write no record")
+
+	at = at.Add(queueReasonRefresh)
+	require.NoError(t, st.QueueWait(ids[0], QueueState{Kind: WaitCPU, Key: WaitCPU, Reason: "host load: 9 tasks want a CPU"}))
+	j, _ := st.Job(ids[0])
+	assert.Equal(t, "host load: 9 tasks want a CPU", j.Waits[0].Reason, "after the window, the reason is written again")
+
+	require.NoError(t, st.QueueWait(ids[1], QueueState{Kind: WaitCap, Key: WaitCap, Reason: "run cap"}))
+	j, _ = st.Job(ids[1])
+	require.Len(t, j.Waits, 2, "a new constraint is written at once, whatever the window")
 }
 
 // A task that waits for its group shows the wait in its details, and the wait ends when the task is admitted.
