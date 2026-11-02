@@ -4,7 +4,6 @@ package priority
 import (
 	"errors"
 	"fmt"
-	"iter"
 	"reflect"
 	"regexp"
 	"slices"
@@ -148,20 +147,6 @@ func (k *Keys) Compare(a, b MultiPriority) int {
 	}
 	return 0
 }
-
-// Named yields each key name of the list with its value in p, defaults included, top key first. It builds no map.
-func (k *Keys) Named(p MultiPriority) iter.Seq2[string, int] {
-	return func(yield func(string, int) bool) {
-		for _, key := range k.list {
-			if !yield(key.Name, p.Get(key)) {
-				return
-			}
-		}
-	}
-}
-
-// Len is how many keys the list has.
-func (k *Keys) Len() int { return len(k.list) }
 
 // Values names each value of p by its key, defaults included.
 func (k *Keys) Values(p MultiPriority) map[string]int {

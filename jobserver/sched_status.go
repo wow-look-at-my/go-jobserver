@@ -149,8 +149,8 @@ func (s *Scheduler) Status() SchedulerStatus {
 
 // priorityValues names each value of a lease's priority by its key.
 func priorityValues(o leaseOrder) map[string]float64 {
-	out := make(map[string]float64, o.keys.Len())
-	for name, v := range o.keys.Named(o.prio) {
+	out := map[string]float64{}
+	for name, v := range o.keys.Values(o.prio) {
 		out[name] = float64(v)
 	}
 	return out
