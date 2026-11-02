@@ -68,16 +68,16 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		dir:     dir,
-		jobs:    make(map[string]*Job),
-		logs:    make(map[string]*LogWriter),
-		watch:   make(chan struct{}),
-		idx:     newInboxIndex(),
-		waiters: map[string]int{},
-		cache:   map[string]cacheEntry{},
-		stepCap: maxTaskSteps,
-		waitCap: maxTaskWaits,
-		epoch:   NewID(func(string) bool { return false }),
+		dir:      dir,
+		jobs:     make(map[string]*Job),
+		logs:     make(map[string]*LogWriter),
+		watch:    make(chan struct{}),
+		idx:      newInboxIndex(),
+		waiters:  map[string]int{},
+		cache:    map[string]cacheEntry{},
+		stepCap:  maxTaskSteps,
+		waitCap:  maxTaskWaits,
+		epoch:    NewID(func(string) bool { return false }),
 		reasonAt: map[string]time.Time{},
 		now:      time.Now,
 	}
@@ -278,47 +278,6 @@ func (s *Store) touch(j *Job) {
 	j.Seq = s.seq
 	s.idx.put(j)
 	s.remember(j)
-}
-
-// append writes one record and returns after the bytes are in the file.
-func (s *Store) append(r record) error {
-	if s.journal == nil {
-		return errors.New("jobserver: store is closed")
-	}
-	_, err := s.journal.Write(frame(r.encode()))
-	return err
-}
-
-// sync pushes every appended byte to stable storage.
-func (s *Store) sync() error {
-	if s.journal == nil {
-		return nil
-	}
-	return s.journal.Sync()
-}
-
-// commit appends a record and syncs it.
-func (s *Store) commit(r record) error {
-	if err := s.append(r); err != nil {
-		return err
-	}
-	if j, ok := s.jobs[r.id]; ok {
-		s.touch(j)
-	}
-	s.bump()
-	return s.sync()
-}
-
-// note appends a record with no sync. A crash can lose the last notes, and the next commit syncs them.
-func (s *Store) note(r record) error {
-	if err := s.append(r); err != nil {
-		return err
-	}
-	if j, ok := s.jobs[r.id]; ok {
-		s.touch(j)
-	}
-	s.bump()
-	return nil
 }
 
 // Close stops the store and closes every open log file.

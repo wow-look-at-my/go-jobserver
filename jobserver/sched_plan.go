@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/wow-look-at-my/go-containers/set"
 	"github.com/wow-look-at-my/go-jobserver/priority"
 )
 
@@ -42,12 +41,28 @@ func (s *Scheduler) planLocked() {
 		l  *Lease
 		st QueueState
 	}
-	var queued []wait
-	for _, l := range s.orderLocked(now) {
-		if st, ok := s.fitLocked(p, l.req, l.cost); !ok {
+	ordered := s.orderLocked(now)
+	queued := make([]wait, 0, len(ordered))
+	// The fit of a lease depends only on p and on these fields, so waiters that
+	// share them share one result until p changes.
+	type fitKey struct {
+		group              string
+		groupOnly, monitor bool
+		cost               float64
+	}
+	refused := map[fitKey]QueueState{}
+	for _, l := range ordered {
+		k := fitKey{l.req.Group, l.req.GroupOnly, l.req.Monitor, l.cost}
+		if st, ok := refused[k]; ok {
 			queued = append(queued, wait{l, st})
 			continue
 		}
+		if st, ok := s.fitLocked(p, l.req, l.cost); !ok {
+			refused[k] = st
+			queued = append(queued, wait{l, st})
+			continue
+		}
+		clear(refused)
 		p.take(l.req, l.cost)
 		l.started = now
 		s.holding = append(s.holding, l)
@@ -57,11 +72,19 @@ func (s *Scheduler) planLocked() {
 
 	s.waiting = s.waiting[:0]
 	positions := map[string]int{}
+	// Every waiter on one constraint waits behind the same holders. The list is built once and shared read-only.
+	holders := map[[2]string][]string{}
 	for _, w := range queued {
 		s.waiting = append(s.waiting, w.l)
 		positions[w.st.Key]++
 		w.st.Position = positions[w.st.Key]
-		w.st.Holders = s.holderIDsLocked(w.st)
+		k := [2]string{w.st.Kind, w.st.Key}
+		hs, ok := holders[k]
+		if !ok {
+			hs = s.holderIDsLocked(w.st)
+			holders[k] = hs
+		}
+		w.st.Holders = hs
 		if w.l.told && w.l.state.equal(w.st) {
 			continue
 		}
@@ -321,22 +344,22 @@ func cmpSeq(a, b *Lease) int {
 // groupBatches keeps ls in arrival order, except that each batch's members
 // follow its first member, so a new batch starts as one unit.
 func groupBatches(ls []*Lease) []*Lease {
-	taken := set.New[*Lease]()
+	members := map[string][]*Lease{}
+	for _, l := range ls {
+		if l.req.Batch != "" {
+			members[l.req.Batch] = append(members[l.req.Batch], l)
+		}
+	}
 	out := make([]*Lease, 0, len(ls))
 	for _, l := range ls {
-		if taken.Contains(l) {
-			continue
-		}
-		taken.Add(l)
-		out = append(out, l)
 		if l.req.Batch == "" {
+			out = append(out, l)
 			continue
 		}
-		for _, m := range ls {
-			if !taken.Contains(m) && m.req.Batch == l.req.Batch {
-				taken.Add(m)
-				out = append(out, m)
-			}
+		// The first member of a batch brings the whole batch, in order. The later members are already placed.
+		if ms, ok := members[l.req.Batch]; ok {
+			out = append(out, ms...)
+			delete(members, l.req.Batch)
 		}
 	}
 	return out
