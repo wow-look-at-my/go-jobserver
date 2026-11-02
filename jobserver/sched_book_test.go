@@ -2,6 +2,7 @@ package jobserver
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -64,6 +65,45 @@ func TestNoJobStartsWhileMoreTasksWantACPUThanTheHostHasPlusTwo(t *testing.T) {
 	host.setRunning(3)
 	s.gov.tick()
 	require.NotNil(t, startedSoon(t, got), "the next sample finds room")
+}
+
+func TestAHolderWithNoProcessStopsCountingAfterOneHostLoadWindow(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
+	clock := &testClock{at: time.Now()}
+	s.now = clock.now
+	host := &scriptedHost{cpus: 16}
+	s.gov.sampler.Host = hostOf(host)
+	host.setRunning(14)
+	for i := range 16 {
+		admit(t, s, LeaseRequest{ID: fmt.Sprintf("inbox-%d", i), Policy: JobPolicy{Cost: 0.25}})
+	}
+	s.gov.tick()
+
+	_, ok, err := s.TryAcquire(LeaseRequest{ID: "early", Policy: JobPolicy{Cost: 0.25}})
+	require.NoError(t, err)
+	assert.False(t, ok, "inside the window, the new holders count at their cost: 14 + 4 + 0.25 is past 18")
+
+	clock.add(hostLoadWindow * time.Second)
+	s.gov.tick()
+	_, ok, err = s.TryAcquire(LeaseRequest{ID: "late", Policy: JobPolicy{Cost: 0.25}})
+	require.NoError(t, err)
+	assert.True(t, ok, "a holder that nothing can measure must not hold the queue for its whole life")
+}
+
+func TestAHolderWithAProcessCountsUntilItIsMeasured(t *testing.T) {
+	s := newTestScheduler(t, SchedulerConfig{CPUBudget: 16})
+	clock := &testClock{at: time.Now()}
+	s.now = clock.now
+	host := &scriptedHost{cpus: 4}
+	s.gov.sampler.Host = hostOf(host)
+	host.setRunning(5)
+	admit(t, s, LeaseRequest{ID: "a", Policy: JobPolicy{Cost: 1}}).AttachProcess(1 << 30)
+	s.gov.tick()
+	clock.add(10 * hostLoadWindow * time.Second)
+
+	_, ok, err := s.TryAcquire(LeaseRequest{ID: "b", Policy: JobPolicy{Cost: 1}})
+	require.NoError(t, err)
+	assert.False(t, ok, "a holder with a process the governor has not measured yet still counts: 5 + 1 + 1 is past 6")
 }
 
 func TestOneSpikeInTheHostLoadHoldsNoJobBack(t *testing.T) {

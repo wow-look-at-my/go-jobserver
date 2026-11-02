@@ -83,6 +83,7 @@ type planState struct {
 
 func (s *Scheduler) planStateLocked() *planState {
 	p := &planState{budget: s.budgetLocked(), inGroup: map[string]int{}}
+	now := s.now()
 	for _, h := range s.holding {
 		if h.req.Monitor {
 			continue
@@ -93,7 +94,7 @@ func (s *Scheduler) planStateLocked() *planState {
 		if !h.req.GroupOnly {
 			p.running++
 			p.reserved += h.cost
-			if !h.Measured() {
+			if s.unmeasuredLocked(h, now) {
 				p.unmeasured += h.cost
 			}
 		}
@@ -135,6 +136,20 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 				runnable, s.host.cpus, fmtCPUs(cost))}, false
 	}
 	return QueueState{}, true
+}
+
+// unmeasuredLocked says whether the host gate adds a holder's cost to the
+// host load. A holder with no process and no actuator never gets a
+// measurement, so it counts only for one host-load window after it starts.
+func (s *Scheduler) unmeasuredLocked(h *Lease, now time.Time) bool {
+	if h.Measured() {
+		return false
+	}
+	_, pid, a := h.snapshot()
+	if pid > 0 || a != nil {
+		return true
+	}
+	return now.Sub(h.started) < hostLoadWindow*s.cfg.SampleInterval
 }
 
 // take counts a granted lease in p.
