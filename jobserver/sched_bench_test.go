@@ -12,7 +12,8 @@ func fullQueue(b *testing.B) (*Scheduler, *scriptedHost) { return fullQueueOf(b,
 
 // fullQueueOf fills the queue with waiters spread over batches; zero batches leaves batch unset.
 func fullQueueOf(b *testing.B, batches int) (*Scheduler, *scriptedHost) {
-	s := NewScheduler(SchedulerConfig{CPUBudget: 16, DisableCPU: true})
+	keys := []PriorityKey{{Name: "infra-priority", Default: 3}, {Name: "hook-priority"}, {Name: KeyOpenBatch, Default: 1}}
+	s := NewScheduler(SchedulerConfig{CPUBudget: 16, DisableCPU: true, PriorityKeys: keys})
 	b.Cleanup(s.Close)
 	clock := &testClock{at: time.Now()}
 	s.now = clock.now
