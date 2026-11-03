@@ -1,0 +1,10 @@
+<monitors>
+	<monitor name="settled" description="the status settled, whether or not the runs list can be read">
+		<poll every="1s">
+			<request name="status" transport="api"><url><value name="var.base"/>/status</url></request>
+			<request name="runs" transport="api" optional="true"><url><value name="var.base"/>/runs</url></request>
+		</poll>
+		<until>{{ ne .req.status.response.state "pending" }}</until>
+		<describe>status {{ .req.status.response.state }}{{ if .req.runs.error }}, runs unreadable: {{ .req.runs.error }}{{ end }}</describe>
+	</monitor>
+</monitors>

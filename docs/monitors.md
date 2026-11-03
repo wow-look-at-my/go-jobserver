@@ -48,6 +48,7 @@ The loader enforces the separation:
 - `<stream>` takes only `<argv>`, because a request has no output stream.
 - A request or a stream needs `<until>`: nothing else says when the condition holds.
 - Several `<request>` elements in one poll each need a unique `name=`. They run in order, and one that fails is the check's error.
+- `optional="true"` on a named `<request>` keeps its failure out of the check's error. `.req.<name>` then holds only `error`, the failure's text, and `<until>` decides what it means. Use it for a request whose answer only refines a verdict the others already give, such as an endpoint. Some credentials cannot read.
 
 ## Results
 

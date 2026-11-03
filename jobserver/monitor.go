@@ -208,13 +208,16 @@ func (e *MonitorEnv) poll(ctx context.Context, k *MonitorKind, data map[string]a
 }
 
 // requests sends each request in order. One request puts its result at .status, .response and .body. A named one
-// also puts it at .req.<name>. Any failed request is the check's error.
+// also puts it at .req.<name>. A failed request is the check's error, unless it is optional. The failed request
+// then .req.<name> holds only "error", the failure's text, and <until> decides what that means.
 func (e *MonitorEnv) requests(ctx context.Context, k *MonitorKind, data map[string]any) checkResult {
 	named := map[string]any{}
 	var last map[string]any
 	for _, r := range k.requests {
 		res, err := e.request(ctx, r, data)
-		if err != nil {
+		if err != nil && r.optional && ctx.Err() == nil {
+			res = map[string]any{"error": err.Error()}
+		} else if err != nil {
 			if r.name != "" {
 				err = fmt.Errorf("request %q: %w", r.name, err)
 			}
