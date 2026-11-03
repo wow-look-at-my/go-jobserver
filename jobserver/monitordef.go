@@ -64,6 +64,8 @@ type monitorRequest struct {
 	headers   [][2]string
 	body      string
 	transport string
+	// optional: a failure of this request does not fail the check. Its result carries "error" instead.
+	optional bool
 }
 
 // MonitorDefs is a parsed definitions document.
@@ -296,10 +298,14 @@ func (k *MonitorKind) parseCheck(n *apidsl.Node) error {
 }
 
 func parseRequest(n *apidsl.Node) (*monitorRequest, error) {
-	if err := apidsl.CheckAttrs(n, "name", "method", "transport"); err != nil {
+	if err := apidsl.CheckAttrs(n, "name", "method", "transport", "optional"); err != nil {
 		return nil, err
 	}
-	r := &monitorRequest{name: n.Attr("name"), method: strings.ToUpper(n.Attr("method")), transport: n.Attr("transport")}
+	r := &monitorRequest{name: n.Attr("name"), method: strings.ToUpper(n.Attr("method")), transport: n.Attr("transport"),
+		optional: apidsl.IsTruthy(n.Attr("optional"))}
+	if r.optional && r.name == "" {
+		return nil, errors.New(`<request optional="true"> needs name=, so <until> can read its "error"`)
+	}
 	if r.method == "" {
 		r.method = "GET"
 	}

@@ -195,3 +195,64 @@ func TestPollSeveralRequestsAndNow(t *testing.T) {
 	require.Len(t, seen, 3, "pending with no run holds only once .now passes the after arg")
 	assert.Equal(t, "status pending, 0 run(s)", seen[2].LastDetail)
 }
+
+// An optional request that fails leaves its "error" for <until> and <describe>. One unreadable endpoint does not
+// keep a condition the other requests already answer from ever holding.
+func TestPollOptionalRequestFailureStillJudges(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "optional-request.xml"))
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_, _ = w.Write([]byte(`{"state":"success"}`))
+		case "/runs":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	env := testEnv(t, string(raw))
+	env.Vars = map[string]any{"base": srv.URL}
+	env.Transports = map[string]http.RoundTripper{"api": http.DefaultTransport}
+	var seen []MonitorStatus
+	err = env.Watch(context.Background(), MonitorSpec{Kind: "settled"}, &bytes.Buffer{}, nil, func(s MonitorStatus) { seen = append(seen, s) })
+	require.NoError(t, err)
+	require.Len(t, seen, 1, "the status alone settles it")
+	assert.Empty(t, seen[0].LastError)
+	assert.Contains(t, seen[0].LastDetail, "status success, runs unreadable:")
+	assert.Contains(t, seen[0].LastDetail, "answered 403")
+}
+
+// A request that is not optional still fails the check, so the meaning holds
+// for every existing definition.
+func TestPollRequiredRequestFailureIsTheCheckError(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "two-requests.xml"))
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/runs" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte(`{"state":"success"}`))
+	}))
+	defer srv.Close()
+	env := testEnv(t, string(raw))
+	env.Vars = map[string]any{"base": srv.URL}
+	env.Transports = map[string]http.RoundTripper{"api": http.DefaultTransport}
+	ctx, cancel := context.WithCancel(context.Background())
+	var seen []MonitorStatus
+	_ = env.Watch(ctx, MonitorSpec{Kind: "settled", Args: map[string]string{"after": "1"}}, &bytes.Buffer{}, nil, func(s MonitorStatus) {
+		seen = append(seen, s)
+		cancel()
+	})
+	require.Len(t, seen, 1)
+	assert.Contains(t, seen[0].LastError, `request "runs"`)
+}
+
+func TestOptionalRequestNeedsAName(t *testing.T) {
+	_, err := ParseMonitorDefs([]byte(`<monitors><monitor name="m"><poll><request optional="true"><url>http://x</url></request></poll><until>true</until></monitor></monitors>`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "needs name=")
+}
