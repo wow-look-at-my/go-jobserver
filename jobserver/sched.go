@@ -76,6 +76,19 @@ func bookable(budget float64) float64 {
 	return budget + min(budget, 2)
 }
 
+// urgentHeadroom is how far past bookable an urgent lease may book. It keeps the oversubscription bounded.
+func urgentHeadroom(budget float64) float64 {
+	return min(budget, 2)
+}
+
+// limitFor is the CPU limit a lease books against: bookable, plus urgentHeadroom for an urgent one.
+func limitFor(req LeaseRequest, budget float64) float64 {
+	if req.Urgent {
+		return bookable(budget) + urgentHeadroom(budget)
+	}
+	return bookable(budget)
+}
+
 // Scheduler starts leases and governs the ones that run.
 type Scheduler struct {
 	cfg SchedulerConfig
