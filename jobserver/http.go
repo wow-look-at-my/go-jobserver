@@ -201,12 +201,6 @@ func (s *Server) renderPage(w http.ResponseWriter, data pageData) {
 	var buf bytes.Buffer
 	var err error
 	s.store.Read(func() {
-		children := Children(data.Jobs)
-		depths := depthsFrom(data.Jobs, children)
-		data.Graph = make([]GraphRow, 0, len(data.Jobs))
-		for _, j := range data.Jobs {
-			data.Graph = append(data.Graph, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
-		}
 		if data.Job != nil {
 			data.Mechanisms = enabledMechanisms(data.Job.Policy)
 		}
@@ -269,11 +263,20 @@ type GraphRow struct {
 	Children []string
 }
 
-// pageData assembles the dashboard's view of the world. renderPage fills the graph rows under the store lock.
+// pageData assembles the dashboard's view of the world. It reads the dependencies of the jobs under the store lock.
 func (s *Server) pageData(*http.Request) pageData {
 	waits, runs := s.explain()
-	return pageData{Stats: s.Stats(), Jobs: s.List(), Now: time.Now(),
+	data := pageData{Stats: s.Stats(), Jobs: s.List(), Now: time.Now(),
 		Waits: waits, Summary: summarize(runs, waits), Monitors: s.MonitorViews()}
+	s.store.Read(func() {
+		children := Children(data.Jobs)
+		depths := depthsFrom(data.Jobs, children)
+		data.Graph = make([]GraphRow, 0, len(data.Jobs))
+		for _, j := range data.Jobs {
+			data.Graph = append(data.Graph, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
+		}
+	})
+	return data
 }
 
 // apiList answers GET /api/jobs.

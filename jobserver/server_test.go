@@ -325,13 +325,19 @@ func TestServerInterruptOfAFinishedJobIsRefused(t *testing.T) {
 
 func TestServerRunsJobsConcurrentlyUpToTheLimit(t *testing.T) {
 	runner := &fakeRunner{hold: make(chan struct{})}
-	srv := newTestServer(t, func(c *Config) { c.Runner = runner; c.MaxConcurrent = 1 })
+	srv := newTestServer(t, func(c *Config) { c.Runner = runner; c.MaxConcurrent = 1; c.Logf = t.Logf })
 	ids := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
 		j, _, err := srv.Enqueue(Spec{Command: []string{"x", strconv.Itoa(i)}})
 		require.NoError(t, err)
 		ids = append(ids, j.ID)
 	}
+	time.Sleep(time.Second)
+	for _, id := range ids {
+		j, _ := srv.Get(id)
+		t.Logf("DEBUG %s %s %s", id, j.State, j.Created)
+	}
+	t.Logf("DEBUG sched %+v ran %v", srv.SchedulerStatus(), runner.calls)
 	waitState(t, srv, ids[0], StateRunning)
 	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, 1, runner.count(), "more jobs ran than the limit allows")
