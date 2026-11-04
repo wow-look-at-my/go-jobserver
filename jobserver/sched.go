@@ -302,6 +302,11 @@ func (s *Scheduler) acquire(ctx context.Context, req LeaseRequest, order *leaseO
 	if err != nil {
 		return nil, err
 	}
+	return s.wait(ctx, l)
+}
+
+// wait blocks until the scheduler grants an enqueued lease, or ctx ends. A lease that ctx ends leaves the queue.
+func (s *Scheduler) wait(ctx context.Context, l *Lease) (*Lease, error) {
 	// A lease the first plan granted is kept even when ctx is already done.
 	select {
 	case <-l.ready:

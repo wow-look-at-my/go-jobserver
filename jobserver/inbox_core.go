@@ -150,33 +150,43 @@ func (c *inboxCore) offer(j *Job) {
 	if c.run == nil && !c.isDefault {
 		c.signal()
 	}
-	go c.acquire(ctx, g, req)
+	notify := c.queueNotifier(g.id)
+	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
+	// The request joins the queue here, in the order of the offers. A free slot goes to the task offered first.
+	l, err := c.s.sched.enqueue(req, order, notify)
+	go c.acquire(ctx, g, l, err, notify)
 }
 
-// acquire waits for admission and hands the task to its runner or its consumer.
-func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
-	order := &leaseOrder{keys: c.keys, prio: g.prio, rank: c.rank, arrival: g.created.UnixNano()}
-	// The scheduler calls notify under its lock, so it must not take c.mu.
+// queueNotifier returns the function that records where a task waits for admission. The scheduler calls it under its
+// lock, so it must not take c.mu.
+func (c *inboxCore) queueNotifier(id string) func(QueueState) {
 	var recorded QueueState
 	var recordedAt time.Time
 	told := false
-	notify := func(q QueueState) {
+	return func(q QueueState) {
 		now := time.Now()
 		if told && q.Kind == recorded.Kind && q.Key == recorded.Key && q.Reason == recorded.Reason && now.Sub(recordedAt) < queueReasonRefresh {
 			if c.hooks.onQueue != nil {
-				c.hooks.onQueue(g.id, q)
+				c.hooks.onQueue(id, q)
 			}
 			return
 		}
 		told, recorded, recordedAt = true, q, now
-		if err := c.s.store.QueueWait(g.id, q); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotRunning) {
-			c.s.cfg.Logf("go-jobserver: ERROR: inbox %s: record the queue wait of %s: %v", c.name, g.id, err)
+		if err := c.s.store.QueueWait(id, q); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotRunning) {
+			c.s.cfg.Logf("go-jobserver: ERROR: inbox %s: record the queue wait of %s: %v", c.name, id, err)
 		}
 		if c.hooks.onQueue != nil {
-			c.hooks.onQueue(g.id, q)
+			c.hooks.onQueue(id, q)
 		}
 	}
-	l, err := c.s.sched.acquire(ctx, req, order, notify)
+}
+
+// acquire waits for the admission of a lease that offer enqueued, and hands the task to its runner or its consumer.
+// err is the error of the enqueue.
+func (c *inboxCore) acquire(ctx context.Context, g *grant, l *Lease, err error, notify func(QueueState)) {
+	if err == nil {
+		l, err = c.s.sched.wait(ctx, l)
+	}
 	if err == nil {
 		notify(QueueState{})
 	}
