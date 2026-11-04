@@ -3,6 +3,7 @@
 package jobserver
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"

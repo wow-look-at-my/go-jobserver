@@ -3,6 +3,7 @@
 package jobserver
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -284,10 +285,10 @@ func (s *Server) apiList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 	j, err := s.Get(r.PathValue("id"))
 	if err != nil {
-		s.writeJSONStatus(w,http.StatusNotFound, Failure(err))
+		s.writeJSONStatus(w, http.StatusNotFound, Failure(err))
 		return
 	}
-	s.writeJSON(w,Response{OK: true, Job: j})
+	s.writeJSON(w, Response{OK: true, Job: j})
 }
 
 // apiLogs answers GET /api/jobs/{id}/logs, honoring ?offset= and ?max=.
@@ -298,7 +299,7 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(r.URL.Query().Get("max"), "%d", &max)
 	out, err := s.Logs(r.PathValue("id"), offset, max)
 	if err != nil {
-		s.writeJSONStatus(w,http.StatusNotFound, Failure(err))
+		s.writeJSONStatus(w, http.StatusNotFound, Failure(err))
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -308,23 +309,23 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 // apiStats answers GET /api/stats.
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	st := s.Stats()
-	s.writeJSON(w,Response{OK: true, Stats: &st})
+	s.writeJSON(w, Response{OK: true, Stats: &st})
 }
 
 // apiEnqueue answers POST /api/jobs with a job spec in the body.
 func (s *Server) apiEnqueue(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
-		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w, http.StatusBadRequest, Failure(err))
 		return
 	}
 	spec, err := decodeSpec(body)
 	if err != nil {
-		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w, http.StatusBadRequest, Failure(err))
 		return
 	}
 	resp := s.Handle(Request{Op: OpEnqueue, Spec: spec})
-	s.writeJSONStatus(w,statusFor(resp), resp)
+	s.writeJSONStatus(w, statusFor(resp), resp)
 }
 
 // apiCall answers POST /api/<op> with either a request envelope or a spec.
@@ -332,17 +333,17 @@ func (s *Server) apiCall(w http.ResponseWriter, r *http.Request) {
 	op := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
-		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w, http.StatusBadRequest, Failure(err))
 		return
 	}
 	req := Request{Op: op}
 	if len(body) > 0 {
 		if json.Valid(body) && strings.Contains(op, "/") {
-			s.writeJSONStatus(w,http.StatusNotFound, Failure(fmt.Errorf("go-jobserver: no route %s", r.URL.Path)))
+			s.writeJSONStatus(w, http.StatusNotFound, Failure(fmt.Errorf("go-jobserver: no route %s", r.URL.Path)))
 			return
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
+			s.writeJSONStatus(w, http.StatusBadRequest, Failure(err))
 			return
 		}
 	}
@@ -350,7 +351,7 @@ func (s *Server) apiCall(w http.ResponseWriter, r *http.Request) {
 		req.Op = op
 	}
 	resp := s.Handle(req)
-	s.writeJSONStatus(w,statusFor(resp), resp)
+	s.writeJSONStatus(w, statusFor(resp), resp)
 }
 
 // decodeSpec accepts either a full Spec or a bare argv array.

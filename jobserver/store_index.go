@@ -3,6 +3,7 @@
 package jobserver
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"sort"

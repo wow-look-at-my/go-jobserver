@@ -3,6 +3,7 @@ package jobserver
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -107,7 +108,7 @@ func TestPruneKeepsATaskATriggerOrAWaiterNeeds(t *testing.T) {
 	assert.ElementsMatch(t, []string{dep, waited, j.ID}, dropped)
 }
 
-func TestCompactionRebuildsEveryField(t *testing.T) {
+func TestTheDatabaseKeepsEveryFieldAcrossAPrune(t *testing.T) {
 	dir := t.TempDir()
 	st, err := OpenStore(dir)
 	require.NoError(t, err)
@@ -169,27 +170,26 @@ func TestCompactionRebuildsEveryField(t *testing.T) {
 	}
 }
 
-func TestCompactionThatStopsBeforeTheRenameKeepsTheJournal(t *testing.T) {
+func TestMigrationThatStopsBeforeTheRenameRunsAgain(t *testing.T) {
 	dir := t.TempDir()
+	now := time.Now()
+	writeLegacyJournal(t, dir, []*Job{
+		{ID: "gone", Command: []string{"true"}, State: StateCompleted, Created: now, Finished: now},
+		{ID: "kept", Inbox: "a", Spec: []byte(`{"title":"q"}`), State: StateActive, Created: now.Add(time.Second)},
+	})
 	st, err := OpenStore(dir)
 	require.NoError(t, err)
-	gone := addEnded(t, st, "a")
-	kept := addQueued(t, st, "a")
-	st.compactHook = func(string) error { return errors.New("the process died here") }
-	_, err = st.Prune(time.Now().Add(2*time.Hour), keep(time.Hour, 1000))
-	require.ErrorContains(t, err, "the process died here")
-	st.compactHook = nil
-	_, err = os.Stat(st.compactPath())
-	assert.True(t, errors.Is(err, os.ErrNotExist), "the half compaction is removed")
-	later := addQueued(t, st, "a")
 	require.NoError(t, st.Close())
 
-	// A crash leaves a half-written compaction file behind. The next open ignores it.
-	require.NoError(t, os.WriteFile(st.compactPath(), []byte("half a frame"), 0o644))
+	// The process died after the commit and before the rename, and an older release left a half compaction.
+	require.NoError(t, os.Rename(filepath.Join(dir, migratedName), filepath.Join(dir, journalName)))
+	compact := filepath.Join(dir, journalName+".compact")
+	require.NoError(t, os.WriteFile(compact, []byte("half a frame"), 0o644))
 	st, err = OpenStore(dir)
 	require.NoError(t, err)
 	defer st.Close()
-	assert.Equal(t, []string{gone, kept, later}, st.Order(), "the old journal is whole, and appends after the failure stay")
-	_, err = os.Stat(st.compactPath())
-	assert.True(t, errors.Is(err, os.ErrNotExist))
+	assert.Equal(t, []string{"gone", "kept"}, st.Order(), "the second move replaces the first, so no task is there twice")
+	_, err = os.Stat(compact)
+	assert.True(t, errors.Is(err, os.ErrNotExist), "the open removes the half compaction")
+	assert.NoFileExists(t, filepath.Join(dir, journalName))
 }

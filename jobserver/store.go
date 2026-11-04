@@ -145,7 +145,49 @@ func (s *Store) load() error {
 			return err
 		}
 	}
-	return s.recoverLogs(open)
+	if err := s.recoverLogs(open); err != nil {
+		return err
+	}
+	return s.cutEndedLogs()
+}
+
+// cutEndedLogs cuts the log of each ended task back to the size the database recorded. A crash, or a write after the
+// end, can leave more bytes in the file.
+func (s *Store) cutEndedLogs() error {
+	rows, err := s.db.Query(`SELECT id, json_extract(data, '$.log_bytes') FROM tasks WHERE ended IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	sizes := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var n sql.NullInt64
+		if err := rows.Scan(&id, &n); err != nil {
+			rows.Close()
+			return err
+		}
+		if n.Int64 > 0 {
+			sizes[id] = n.Int64
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, n := range sizes {
+		info, err := os.Stat(s.LogPath(id))
+		switch {
+		case err == nil && info.Size() > n:
+			if err := os.Truncate(s.LogPath(id), n); err != nil {
+				return err
+			}
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			return err
+		}
+	}
+	return nil
 }
 
 // Dir is the server directory.
@@ -567,6 +609,13 @@ func (s *Store) setState(id string, st State, msg string) error {
 	j.State = st
 	j.Error = msg
 	return s.save(j, nil)
+}
+
+// SetState records a new lifecycle state for a job.
+func (s *Store) SetState(id string, st State, msg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setState(id, st, msg)
 }
 
 // Activate moves a draft job to active.

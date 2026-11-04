@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,20 +100,14 @@ func TestStoreOpenOnAnEmptyDirectory(t *testing.T) {
 	assert.NoFileExists(t, st.LogPath("nobody"))
 }
 
-func TestOpenStoreCutsATornTail(t *testing.T) {
+func TestMigrationStopsAtATornTail(t *testing.T) {
 	dir := t.TempDir()
-	st, err := OpenStore(dir)
-	require.Nil(t, err)
+	now := time.Now()
+	writeLegacyJournal(t, dir, []*Job{{ID: "j-1", Command: []string{"true"}, State: StateCompleted, Created: now,
+		Started: now, Attempts: 1, Finished: now}})
+	path := filepath.Join(dir, journalName)
 
-	j, err := st.Create(&Spec{Command: []string{"true"}, ID: "j-1"})
-	require.Nil(t, err)
-
-	require.NoError(t, st.Finish(j.ID, StateCompleted, 0, "", nil, 0))
-
-	path := st.journalPath()
-	require.NoError(t, st.Close())
-
-	// The daemon dies in the middle of an append.
+	// The daemon of the older release died in the middle of an append.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
 	require.Nil(t, err)
 
@@ -127,12 +123,9 @@ func TestOpenStoreCutsATornTail(t *testing.T) {
 	got, ok := st2.Job("j-1")
 	require.True(t, ok)
 
-	require.Equal(t, StateCompleted, got.State)
-
-	info, err := os.Stat(path)
-	require.Nil(t, err)
-
-	require.Greater(t, info.Size(), int64(0))
+	require.Equal(t, StateCompleted, got.State, "the torn frame is left out")
+	assert.NoFileExists(t, path, "the move renames the journal")
+	assert.FileExists(t, filepath.Join(dir, migratedName))
 
 	require.NoError(t, st2.SetPaused(true))
 
@@ -383,19 +376,18 @@ func TestIdentityIndexPrefersTheLatestSuccess(t *testing.T) {
 
 }
 
-func TestStoreJobsReturnsCopies(t *testing.T) {
+func TestStoreJobsReturnsTheOneRecord(t *testing.T) {
 	st, err := OpenStore(t.TempDir())
 	require.Nil(t, err)
 
 	defer st.Close()
-	_, err = st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
+	created, err := st.Create(&Spec{ID: "j-1", Command: []string{"true"}})
 	require.Nil(t, err)
 
 	jobs := st.Jobs()
-	jobs[0].Command[0] = "mutated"
 	again, _ := st.Job("j-1")
-	require.Equal(t, "true", again.Command[0])
-
+	assert.Same(t, created, jobs[0], "Create and Jobs hand out one record")
+	assert.Same(t, created, again, "Create and Job hand out one record")
 }
 
 func TestLogWriterAppendsAndSyncs(t *testing.T) {
@@ -462,16 +454,16 @@ func TestJournalRecordsSurviveManyJobs(t *testing.T) {
 }
 
 func TestApplyIgnoresRecordsForUnknownJobs(t *testing.T) {
-	st := &Store{jobs: map[string]*Job{}, logs: map[string]*LogWriter{}}
-	st.apply(record{kind: recStart, id: "ghost"})
-	st.apply(record{kind: recFinish, id: "ghost", state: StateCompleted})
-	st.apply(record{kind: recIdentity, id: "ghost"})
-	st.apply(record{kind: recState, id: "ghost", state: StateFailed})
-	st.apply(record{kind: recDeps, id: "ghost"})
-	require.Equal(t, 0, len(st.jobs))
+	tab := &journalTable{jobs: map[string]*Job{}, cache: map[string]cacheEntry{}}
+	tab.apply(record{kind: recStart, id: "ghost"})
+	tab.apply(record{kind: recFinish, id: "ghost", state: StateCompleted})
+	tab.apply(record{kind: recIdentity, id: "ghost"})
+	tab.apply(record{kind: recState, id: "ghost", state: StateFailed})
+	tab.apply(record{kind: recDeps, id: "ghost"})
+	require.Equal(t, 0, len(tab.jobs))
 
-	st.apply(record{kind: recControl, paused: true})
-	require.True(t, st.Paused())
+	tab.apply(record{kind: recControl, paused: true})
+	require.True(t, tab.paused)
 
 }
 

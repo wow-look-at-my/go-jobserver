@@ -3,7 +3,6 @@
 package jobserver
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wow-look-at-my/go-containers/set"

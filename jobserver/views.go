@@ -116,24 +116,24 @@ func (s *Server) MonitorViews() []MonitorView {
 func (s *Server) viewRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/graph", func(w http.ResponseWriter, r *http.Request) {
 		g := s.Graph()
-		s.writeJSON(w,Response{OK: true, Graph: &g, Summary: g.Summary})
+		s.writeJSON(w, Response{OK: true, Graph: &g, Summary: g.Summary})
 	})
 	mux.HandleFunc("GET /api/monitors", func(w http.ResponseWriter, r *http.Request) {
-		s.writeJSON(w,s.Handle(Request{Op: OpMonitors}))
+		s.writeJSON(w, s.Handle(Request{Op: OpMonitors}))
 	})
 	mux.HandleFunc("GET /api/kinds", func(w http.ResponseWriter, r *http.Request) {
-		s.writeJSON(w,s.Handle(Request{Op: OpKinds}))
+		s.writeJSON(w, s.Handle(Request{Op: OpKinds}))
 	})
 	mux.HandleFunc("GET /api/why/{id}", func(w http.ResponseWriter, r *http.Request) {
 		resp := s.Handle(Request{Op: OpWhy, ID: r.PathValue("id")})
 		if resp.Code == CodeNotFound {
-			s.writeJSONStatus(w,http.StatusNotFound, resp)
+			s.writeJSONStatus(w, http.StatusNotFound, resp)
 			return
 		}
-		s.writeJSON(w,resp)
+		s.writeJSON(w, resp)
 	})
 	mux.HandleFunc("GET /api/scheduler", func(w http.ResponseWriter, r *http.Request) {
-		s.writeJSON(w,s.Handle(Request{Op: OpScheduler}))
+		s.writeJSON(w, s.Handle(Request{Op: OpScheduler}))
 	})
 }
 

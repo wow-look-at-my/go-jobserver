@@ -5,6 +5,7 @@ package jobserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -222,7 +223,7 @@ func (s *Server) Task(id string) (*Task, error) {
 	return newTask(s, j.ID), nil
 }
 
-func (s *Server) liveRecord(id string) *Job                  { return s.store.liveRecord(id) }
+func (s *Server) liveRecord(id string) *Job            { return s.store.liveRecord(id) }
 func (s *Server) readRecord(rec *Job, fn func(j *Job)) { s.store.readRecord(rec, fn) }
 
 // waitRecord blocks until a record ends. A prune does not stop it, because it reads the record and not the table.
