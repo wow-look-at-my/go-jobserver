@@ -235,8 +235,7 @@ func (s *Store) loadWhere(where, order string, args ...any) ([]*Job, error) {
 	if s.db == nil {
 		return nil, errors.New("jobserver: store is closed")
 	}
-	rows, err := s.db.Query(`SELECT t.id, t.inbox, t.state, t.created, t.seq, t.data, sp.spec, r.result FROM tasks t
-		LEFT JOIN task_specs sp ON sp.id = t.id LEFT JOIN task_results r ON r.id = t.id WHERE `+where+` ORDER BY `+order, args...)
+	rows, err := s.db.Query(`SELECT t.id, t.inbox, t.state, t.created, t.seq, t.data FROM tasks t WHERE `+where+` ORDER BY `+order, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -246,9 +245,9 @@ func (s *Store) loadWhere(where, order string, args ...any) ([]*Job, error) {
 		var (
 			id, inbox, state string
 			created, seq     int64
-			data, spec, res  sql.RawBytes
+			data             sql.RawBytes
 		)
-		if err := rows.Scan(&id, &inbox, &state, &created, &seq, &data, &spec, &res); err != nil {
+		if err := rows.Scan(&id, &inbox, &state, &created, &seq, &data); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -263,13 +262,6 @@ func (s *Store) loadWhere(where, order string, args ...any) ([]*Job, error) {
 		}
 		j := &Job{ID: id, Inbox: inbox, State: State(state), Created: fromUnixNano(created), Seq: uint64(seq)}
 		d.applyTo(j)
-		if len(spec) > 0 {
-			j.Spec = append(json.RawMessage(nil), spec...)
-		}
-		if len(res) > 0 {
-			j.Result = append(json.RawMessage(nil), res...)
-		}
-		j.Monitor = monitorOf(j)
 		fresh[id] = j
 		out = append(out, j)
 	}
@@ -282,57 +274,83 @@ func (s *Store) loadWhere(where, order string, args ...any) ([]*Job, error) {
 	if len(fresh) == 0 {
 		return out, nil
 	}
-	if err := s.loadDetail(fresh, where, args); err != nil {
+	if err := s.loadParts(fresh, where, args); err != nil {
 		return nil, err
 	}
 	for i, j := range out {
 		if fresh[j.ID] == j {
+			j.Monitor = monitorOf(j)
 			out[i] = s.register(j)
 		}
 	}
 	return out, nil
 }
 
-// loadDetail reads the steps and the waits of the fresh tasks, which match where.
-func (s *Store) loadDetail(fresh map[string]*Job, where string, args []any) error {
-	for _, part := range []string{"steps", "waits"} {
-		col := "step"
-		if part == "waits" {
-			col = "wait"
+// taskPart is a table that holds one part of a task, and how one of its rows fills a record.
+type taskPart struct {
+	table, col, order string
+	fill              func(j *Job, b []byte) error
+}
+
+var taskParts = []taskPart{
+	{"task_specs", "spec", "x.id", func(j *Job, b []byte) error { j.Spec = append(json.RawMessage(nil), b...); return nil }},
+	{"task_results", "result", "x.id", func(j *Job, b []byte) error { j.Result = append(json.RawMessage(nil), b...); return nil }},
+	{"task_steps", "data", "x.id, x.step", func(j *Job, b []byte) error {
+		var st TaskStep
+		if err := json.Unmarshal(b, &st); err != nil {
+			return err
 		}
-		rows, err := s.db.Query(`SELECT x.id, x.data FROM task_`+part+` x WHERE x.id IN (SELECT t.id FROM tasks t WHERE `+where+`) ORDER BY x.id, x.`+col, args...)
+		j.Steps = append(j.Steps, st)
+		return nil
+	}},
+	{"task_waits", "data", "x.id, x.wait", func(j *Job, b []byte) error {
+		var w TaskWait
+		if err := json.Unmarshal(b, &w); err != nil {
+			return err
+		}
+		if w.End.IsZero() {
+			j.openWaits++
+		}
+		j.Waits = append(j.Waits, w)
+		return nil
+	}},
+}
+
+// maxListedIDs is the most IDs a part query names one by one. Past it, the query selects the tasks by where again.
+const maxListedIDs = 500
+
+// loadParts reads the spec, the result, the steps and the waits of the fresh tasks, which match where. It reads the
+// parts of only the fresh tasks when they are few.
+func (s *Store) loadParts(fresh map[string]*Job, where string, args []any) error {
+	in, inArgs := "SELECT t.id FROM tasks t WHERE "+where, args
+	if len(fresh) <= maxListedIDs {
+		in, inArgs = "", make([]any, 0, len(fresh))
+		for id := range fresh {
+			if in != "" {
+				in += ", "
+			}
+			in += "?"
+			inArgs = append(inArgs, id)
+		}
+	}
+	for _, p := range taskParts {
+		rows, err := s.db.Query(`SELECT x.id, x.`+p.col+` FROM `+p.table+` x WHERE x.id IN (`+in+`) ORDER BY `+p.order, inArgs...)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var id string
-			var data sql.RawBytes
-			if err := rows.Scan(&id, &data); err != nil {
+			var b sql.RawBytes
+			if err := rows.Scan(&id, &b); err != nil {
 				rows.Close()
 				return err
 			}
-			j := fresh[id]
-			if j == nil {
-				continue
-			}
-			if part == "steps" {
-				var st TaskStep
-				if err := json.Unmarshal(data, &st); err != nil {
+			if j := fresh[id]; j != nil {
+				if err := p.fill(j, b); err != nil {
 					rows.Close()
-					return err
+					return fmt.Errorf("jobserver: task %s: %s: %w", id, p.table, err)
 				}
-				j.Steps = append(j.Steps, st)
-				continue
 			}
-			var w TaskWait
-			if err := json.Unmarshal(data, &w); err != nil {
-				rows.Close()
-				return err
-			}
-			if w.End.IsZero() {
-				j.openWaits++
-			}
-			j.Waits = append(j.Waits, w)
 		}
 		if err := rows.Close(); err != nil {
 			return err
