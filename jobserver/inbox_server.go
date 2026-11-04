@@ -5,6 +5,7 @@ package jobserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,23 +63,23 @@ func (s *Server) openInbox(name string, keys *priority.Keys, rank int, run runFu
 	c.hooks = hooks
 	s.inboxes[name] = c
 	s.mu.Unlock()
-	for _, j := range s.store.liveIn(name) {
+	for _, t := range s.store.liveIn(name) {
 		if check != nil {
-			if err := check(j.Spec); err != nil {
-				s.finish(j.ID, StateFailed, -1, "the spec does not decode: "+err.Error(), nil, 0)
+			if err := check(t.spec); err != nil {
+				s.finish(t.id, StateFailed, -1, "the spec does not decode: "+err.Error(), nil, 0)
 				continue
 			}
 		}
-		if j.State != StateRunning {
+		if t.state != StateRunning {
 			continue
 		}
 		if run != nil {
-			if err := s.store.requeue(j.ID, "resumed after a restart"); err != nil {
-				s.cfg.Logf("go-jobserver: inbox %s: requeue %s: %v", name, j.ID, err)
+			if err := s.store.requeue(t.id, "resumed after a restart"); err != nil {
+				s.cfg.Logf("go-jobserver: inbox %s: requeue %s: %v", name, t.id, err)
 			}
 			continue
 		}
-		s.finish(j.ID, StateFailed, -1, msgConsumerGone, nil, 0)
+		s.finish(t.id, StateFailed, -1, msgConsumerGone, nil, 0)
 	}
 	s.Wake()
 	return c, nil
@@ -135,8 +136,8 @@ func (s *Server) settleTask(id string, result json.RawMessage, err error) {
 
 // finishIfLive ends a task that has not ended yet.
 func (s *Server) finishIfLive(id string, st State, msg string) {
-	if j, ok := s.store.Job(id); ok && !j.State.Terminal() {
-		s.finish(id, st, -1, msg, nil, j.LogBytes)
+	if _, err := s.store.finishIfLive(id, st, msg); err != nil && !errors.Is(err, ErrNotFound) {
+		s.cfg.Logf("go-jobserver: finish %s: %v", id, err)
 	}
 }
 
@@ -146,7 +147,8 @@ func (s *Server) cancel(id string) error {
 	if err != nil {
 		return err
 	}
-	if j.State.Terminal() {
+	st, _ := s.store.stateOf(j.ID)
+	if st.Terminal() {
 		return nil
 	}
 	if j.Inbox == "" {
@@ -166,14 +168,14 @@ func (s *Server) drain(name string) {
 	if name == DefaultInboxName {
 		c = s.defCore
 	}
-	for _, j := range s.store.liveIn(name) {
-		if j.State == StateRunning {
+	for _, t := range s.store.liveIn(name) {
+		if t.state == StateRunning {
 			continue
 		}
-		if c != nil && c.forget(j.ID) {
+		if c != nil && c.forget(t.id) {
 			continue
 		}
-		s.finishIfLive(j.ID, StateCancelled, msgDrained)
+		s.finishIfLive(t.id, StateCancelled, msgDrained)
 	}
 	s.Wake()
 }
@@ -221,16 +223,17 @@ func (s *Server) Task(id string) (*Task, error) {
 	return newTask(s, j.ID), nil
 }
 
-func (s *Server) liveRecord(id string) *Job { return s.store.liveRecord(id) }
-func (s *Server) viewRecord(rec *Job) *Job  { return s.store.viewRecord(rec) }
+func (s *Server) liveRecord(id string) *Job            { return s.store.liveRecord(id) }
+func (s *Server) readRecord(rec *Job, fn func(j *Job)) { s.store.readRecord(rec, fn) }
 
 // waitRecord blocks until a record ends. A prune does not stop it, because it reads the record and not the table.
 func (s *Server) waitRecord(ctx context.Context, rec *Job) (*Job, error) {
 	for {
 		ch := s.store.Changed()
-		j := s.store.viewRecord(rec)
-		if j.State.Terminal() {
-			return j, nil
+		var ended bool
+		s.store.readRecord(rec, func(j *Job) { ended = j.State.Terminal() })
+		if ended {
+			return rec, nil
 		}
 		select {
 		case <-ch:
@@ -252,7 +255,9 @@ func (s *Server) waitJob(ctx context.Context, id string) (*Job, error) {
 		if err != nil {
 			return nil, err
 		}
-		if j.State.Terminal() {
+		var ended bool
+		s.store.readRecord(j, func(j *Job) { ended = j.State.Terminal() })
+		if ended {
 			return j, nil
 		}
 		select {

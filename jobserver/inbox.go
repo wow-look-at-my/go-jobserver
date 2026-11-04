@@ -278,6 +278,7 @@ func (ib *Inbox[T, R]) Lookup(id string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The inbox of a task is fixed, so it reads with no lock.
 	inbox := j.Inbox
 	if inbox == "" {
 		inbox = DefaultInboxName
@@ -291,11 +292,14 @@ func (ib *Inbox[T, R]) Lookup(id string) (*Task, error) {
 // Spec returns the spec the task was made from. It is the zero value when the task cannot be read.
 func (ib *Inbox[T, R]) Spec(t *Task) T {
 	var zero T
-	j, err := ib.on(t).job()
+	on := ib.on(t)
+	j, err := on.job()
 	if err != nil {
 		return zero
 	}
-	spec, err := newSpec[T](specOf(j))
+	var raw json.RawMessage
+	on.read(j, func(j *Job) { raw = specOf(j) })
+	spec, err := newSpec[T](raw)
 	if err != nil {
 		return zero
 	}
@@ -323,11 +327,14 @@ func (ib *Inbox[T, R]) on(t *Task) *Task {
 // TryResult is Wait with no wait. ok is false while the task is Queued or Running.
 func (ib *Inbox[T, R]) TryResult(t *Task) (R, *TaskError, bool) {
 	var zero R
-	j, err := ib.on(t).job()
+	on := ib.on(t)
+	j, err := on.job()
 	if err != nil {
 		return zero, &TaskError{State: Failed, Message: err.Error(), Err: err}, true
 	}
-	if !j.State.Terminal() {
+	var ended bool
+	on.read(j, func(j *Job) { ended = j.State.Terminal() })
+	if !ended {
 		return zero, nil, false
 	}
 	r, te := ib.resultOf(t, j)
@@ -336,10 +343,13 @@ func (ib *Inbox[T, R]) TryResult(t *Task) (R, *TaskError, bool) {
 
 func (ib *Inbox[T, R]) resultOf(t *Task, j *Job) (R, *TaskError) {
 	var r R
-	if te := ib.on(t).errorOf(j); te != nil {
+	on := ib.on(t)
+	if te := on.errorOf(j); te != nil {
 		return r, te
 	}
-	if raw := resultOf(j); len(raw) > 0 {
+	var raw json.RawMessage
+	on.read(j, func(j *Job) { raw = resultOf(j) })
+	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &r); err != nil {
 			return r, &TaskError{State: Failed, Message: "the result does not decode: " + err.Error(), Err: err}
 		}

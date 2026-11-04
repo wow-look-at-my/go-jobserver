@@ -38,7 +38,7 @@ func (s *Server) ipcCall(_ *ipc.Session, typ uint32, payload []byte) (uint32, []
 		return 0, nil, fmt.Errorf("go-jobserver: bad request: %w", err)
 	}
 	resp := s.Handle(req)
-	body, err := json.Marshal(resp)
+	body, err := s.encode(resp)
 	if err != nil {
 		return 0, nil, err
 	}

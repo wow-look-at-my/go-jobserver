@@ -37,34 +37,50 @@ type JobGraph struct {
 }
 
 // Graph returns the whole job graph with each node's waits.
-func (s *Server) Graph() JobGraph {
-	jobs := SortedJobs(s.List())
-	waits := s.Explain()
-	byID := Index(jobs)
-	g := JobGraph{Summary: Summary(jobs, waits), Nodes: []GraphNode{}, Edges: []GraphEdge{}}
-	for _, j := range jobs {
-		n := GraphNode{ID: j.ID, Label: jobLabel(j), Kind: "job", State: j.State}
-		switch {
-		case j.Monitor != nil:
-			n.Kind, n.Label, n.Status = "monitor", j.Monitor.Key(), monitorLine(j)
-		case j.Inbox != "":
-			n.Kind = j.Inbox
-		}
-		for _, w := range waits[j.ID] {
-			n.Waiting = append(n.Waiting, w.Detail)
-		}
-		g.Nodes = append(g.Nodes, n)
-		for _, d := range j.Deps {
-			label := "before"
-			switch dep, ok := byID[d]; {
-			case ok && dep.Monitor != nil:
-				label = "gates"
-			case j.Trigger != "":
-				label = "on " + j.Trigger
+func (s *Server) Graph() JobGraph { return s.graph((*Store).jobsLocked) }
+
+// OpenGraph is Graph over the tasks memory holds: the open tasks, the ended
+// tasks they depend on, and the tasks a caller waits on.
+func (s *Server) OpenGraph() JobGraph {
+	return s.graph(func(st *Store) []*Job { return SortedJobs(st.memJobs()) })
+}
+
+func (s *Server) graph(read func(*Store) []*Job) JobGraph {
+	in := s.waitInputs()
+	var ex explained
+	g := JobGraph{Nodes: []GraphNode{}, Edges: []GraphEdge{}}
+	s.store.Read(func() {
+		ex = s.explainLocked(in)
+		jobs := SortedJobs(read(s.store))
+		byID := Index(jobs)
+		for _, j := range jobs {
+			n := GraphNode{ID: j.ID, Label: jobLabel(j), Kind: "job", State: j.State}
+			switch {
+			case j.Monitor != nil:
+				n.Kind, n.Label, n.Status = "monitor", j.Monitor.Key(), monitorLine(j)
+			case j.Inbox != "":
+				n.Kind = j.Inbox
 			}
-			g.Edges = append(g.Edges, GraphEdge{From: d, To: j.ID, Label: label})
+			g.Nodes = append(g.Nodes, n)
+			for _, d := range j.Deps {
+				label := "before"
+				switch dep, ok := byID[d]; {
+				case ok && dep.Monitor != nil:
+					label = "gates"
+				case j.Trigger != "":
+					label = "on " + j.Trigger
+				}
+				g.Edges = append(g.Edges, GraphEdge{From: d, To: j.ID, Label: label})
+			}
+		}
+	})
+	waits := ex.finish()
+	for i := range g.Nodes {
+		for _, w := range waits[g.Nodes[i].ID] {
+			g.Nodes[i].Waiting = append(g.Nodes[i].Waiting, w.Detail)
 		}
 	}
+	g.Summary = summarize(ex.running, waits)
 	return g
 }
 
@@ -77,26 +93,28 @@ type MonitorView struct {
 	Line string `json:"line"`
 }
 
-// MonitorViews returns every monitor, watching ones first, each with the jobs that wait on it.
+// MonitorViews returns every monitor, watching ones first, each with the jobs that wait on it. It reads the monitor
+// tasks and the open tasks in one pass under the store lock. Job is the store's record: read it inside Read.
 func (s *Server) MonitorViews() []MonitorView {
-	jobs := s.List()
-	children := Children(jobs)
-	byID := Index(jobs)
 	var out []MonitorView
-	for _, j := range jobs {
-		if j.Monitor == nil {
-			continue
-		}
-		v := MonitorView{Job: j, Line: monitorLine(j), Waiting: []string{}}
-		for _, c := range children[j.ID] {
-			if child, ok := byID[c]; ok && !child.State.Terminal() {
-				v.Waiting = append(v.Waiting, c)
+	s.store.Read(func() {
+		// A task that waits on a monitor has not ended, so memory holds it.
+		children := Children(SortedJobs(s.store.memJobs()))
+		for _, j := range s.store.inboxLocked(MonitorInboxName, 0) {
+			if j.Monitor == nil {
+				continue
 			}
+			v := MonitorView{Job: j, Line: monitorLine(j), Waiting: []string{}}
+			for _, c := range children[j.ID] {
+				if child := s.store.jobs[c]; child != nil && !child.State.Terminal() {
+					v.Waiting = append(v.Waiting, c)
+				}
+			}
+			out = append(out, v)
 		}
-		out = append(out, v)
-	}
-	sort.SliceStable(out, func(i, k int) bool {
-		return !out[i].State.Terminal() && out[k].State.Terminal()
+		sort.SliceStable(out, func(i, k int) bool {
+			return !out[i].State.Terminal() && out[k].State.Terminal()
+		})
 	})
 	return out
 }
@@ -105,24 +123,24 @@ func (s *Server) MonitorViews() []MonitorView {
 func (s *Server) viewRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/graph", func(w http.ResponseWriter, r *http.Request) {
 		g := s.Graph()
-		writeJSON(w, Response{OK: true, Graph: &g, Summary: g.Summary})
+		s.writeJSON(w, Response{OK: true, Graph: &g, Summary: g.Summary})
 	})
 	mux.HandleFunc("GET /api/monitors", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, s.Handle(Request{Op: OpMonitors}))
+		s.writeJSON(w, s.Handle(Request{Op: OpMonitors}))
 	})
 	mux.HandleFunc("GET /api/kinds", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, s.Handle(Request{Op: OpKinds}))
+		s.writeJSON(w, s.Handle(Request{Op: OpKinds}))
 	})
 	mux.HandleFunc("GET /api/why/{id}", func(w http.ResponseWriter, r *http.Request) {
 		resp := s.Handle(Request{Op: OpWhy, ID: r.PathValue("id")})
 		if resp.Code == CodeNotFound {
-			writeJSONStatus(w, http.StatusNotFound, resp)
+			s.writeJSONStatus(w, http.StatusNotFound, resp)
 			return
 		}
-		writeJSON(w, resp)
+		s.writeJSON(w, resp)
 	})
 	mux.HandleFunc("GET /api/scheduler", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, s.Handle(Request{Op: OpScheduler}))
+		s.writeJSON(w, s.Handle(Request{Op: OpScheduler}))
 	})
 }
 
@@ -143,8 +161,8 @@ func (s *Server) watchResponse(spec MonitorSpec, title string) Response {
 func (s *Server) handleView(req Request) (Response, bool) {
 	switch req.Op {
 	case OpMonitors:
-		jobs := s.List()
-		return Response{OK: true, Monitors: s.MonitorViews(), Summary: Summary(jobs, s.Explain())}, true
+		waits, runs := s.explain()
+		return Response{OK: true, Monitors: s.MonitorViews(), Summary: summarize(runs, waits)}, true
 	case OpKinds:
 		return Response{OK: true, Kinds: s.MonitorKinds()}, true
 	case OpWhy:

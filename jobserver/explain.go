@@ -32,20 +32,74 @@ type Wait struct {
 	Detail string `json:"detail"`
 }
 
-// Explain lists what each waiting task waits on. A running task that waits for a scheduler lease under its own ID
-// counts as waiting. A task that runs, or will never run, is left out.
+// Explain lists what each waiting task waits on. A running task that waits
+// for a scheduler lease under its own ID counts as waiting.
 func (s *Server) Explain() map[string][]Wait {
-	jobs := s.List()
-	byID := Index(jobs)
-	paused := s.store.Paused()
-	queued := s.queued()
-	out := map[string][]Wait{}
-	for _, j := range jobs {
-		if w := s.waitsOf(j, byID, paused, queued); len(w) > 0 {
-			out[j.ID] = w
+	waits, _ := s.explain()
+	return waits
+}
+
+// waitInputs are what the waits read from outside the store.
+type waitInputs struct {
+	paused bool
+	queued map[string]QueueState
+	cores  map[string]*inboxCore
+}
+
+func (s *Server) waitInputs() waitInputs {
+	in := waitInputs{paused: s.store.Paused(), queued: s.queued(), cores: map[string]*inboxCore{}}
+	s.mu.Lock()
+	for name, c := range s.inboxes {
+		in.cores[name] = c
+	}
+	s.mu.Unlock()
+	return in
+}
+
+// explain returns the waits of the open tasks and the running tasks. It reads only memory.
+func (s *Server) explain() (map[string][]Wait, map[string]bool) {
+	in := s.waitInputs()
+	var ex explained
+	s.store.Read(func() { ex = s.explainLocked(in) })
+	return ex.finish(), ex.running
+}
+
+// explained is what explainLocked found: the waits it knows, the waits to finish after the lock, and the running tasks.
+type explained struct {
+	waits   map[string][]Wait
+	later   map[string]func() []Wait
+	running map[string]bool
+}
+
+// explainLocked computes the waits of each task memory holds. Caller holds the store's read lock.
+func (s *Server) explainLocked(in waitInputs) explained {
+	ex := explained{waits: map[string][]Wait{}, later: map[string]func() []Wait{}, running: map[string]bool{}}
+	byID := s.store.jobs
+	for id, j := range byID {
+		if j.State.Terminal() {
+			continue
+		}
+		w, fin := s.waitsOf(j, byID, in)
+		switch {
+		case fin != nil:
+			ex.later[id] = fin
+		case len(w) > 0:
+			ex.waits[id] = w
+		case j.State == StateRunning:
+			ex.running[id] = j.Monitor != nil
 		}
 	}
-	return out
+	return ex
+}
+
+// finish runs the waits that the scheduler or an inbox answers, with no store lock, and returns every wait.
+func (ex explained) finish() map[string][]Wait {
+	for id, fin := range ex.later {
+		if w := fin(); len(w) > 0 {
+			ex.waits[id] = w
+		}
+	}
+	return ex.waits
 }
 
 // queued maps each lease that waits on the scheduler to where it stands.
@@ -71,23 +125,36 @@ func (s *Server) Why(id string) ([]Wait, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.waitsOf(j, Index(s.List()), s.store.Paused(), s.queued()), nil
+	in := s.waitInputs()
+	var (
+		w   []Wait
+		fin func() []Wait
+	)
+	s.store.Read(func() { w, fin = s.waitsOf(j, s.store.jobs, in) })
+	if fin != nil {
+		w = fin()
+	}
+	return w, nil
 }
 
 // triggerWords says what a trigger waits for.
 var triggerWords = map[string]string{triggerSuccess: "succeeds", triggerFail: "fails", triggerEnded: "ends"}
 
-func (s *Server) waitsOf(j *Job, byID map[string]*Job, paused bool, queued map[string]QueueState) []Wait {
+// waitsOf lists what one task waits on. A wait that the scheduler or an inbox must answer comes back as fin. Which
+// the caller runs after it lets go of the store lock. fin copies what it needs, and reads no record. Caller holds the
+// store's read lock.
+func (s *Server) waitsOf(j *Job, byID map[string]*Job, in waitInputs) ([]Wait, func() []Wait) {
+	paused, queued := in.paused, in.queued
 	switch {
 	case j.State.Terminal():
-		return nil
+		return nil, nil
 	case j.State == StateRunning:
 		if q, ok := queued[j.ID]; ok {
-			return queueWait(q, j)
+			return queueWait(q, j), nil
 		}
-		return nil
+		return nil, nil
 	case j.State == StateDraft:
-		return []Wait{{Kind: WaitDraft, Detail: "a draft: it runs only after go-jobserver activate " + j.ID}}
+		return []Wait{{Kind: WaitDraft, Detail: "a draft: it runs only after go-jobserver activate " + j.ID}}, nil
 	}
 	var out []Wait
 	for _, d := range j.Deps {
@@ -106,29 +173,33 @@ func (s *Server) waitsOf(j *Job, byID map[string]*Job, paused bool, queued map[s
 		}
 	}
 	if len(out) > 0 {
-		return out
+		return out, nil
 	}
 	if paused {
-		return []Wait{{Kind: WaitPaused, Detail: "the server is paused: go-jobserver resume starts it again"}}
+		return []Wait{{Kind: WaitPaused, Detail: "the server is paused: go-jobserver resume starts it again"}}, nil
 	}
 	if q, ok := queued[j.ID]; ok {
-		return queueWait(q, j)
+		return queueWait(q, j), nil
 	}
 	if j.Inbox == "" {
-		a, err := s.sched.Admits(s.leaseFor(j))
-		switch {
-		case err != nil:
-			return []Wait{{Kind: WaitCap, Detail: err.Error()}}
-		case a.Starts:
-			return []Wait{{Kind: WaitCap, Detail: "ready: it starts at the next scheduling pass"}}
+		req := s.leaseFor(j)
+		return nil, func() []Wait {
+			a, err := s.sched.Admits(req)
+			switch {
+			case err != nil:
+				return []Wait{{Kind: WaitCap, Detail: err.Error()}}
+			case a.Starts:
+				return []Wait{{Kind: WaitCap, Detail: "ready: it starts at the next scheduling pass"}}
+			}
+			return []Wait{{Kind: a.Wait.Kind, ID: a.Wait.Key, Detail: a.Wait.Reason}}
 		}
-		return []Wait{{Kind: a.Wait.Kind, ID: a.Wait.Key, Detail: a.Wait.Reason}}
 	}
-	c := s.inbox(j.Inbox)
+	c := in.cores[j.Inbox]
 	if c == nil {
-		return []Wait{{Kind: WaitConsumer, ID: j.Inbox, Detail: "inbox " + j.Inbox + " is not open in this process"}}
+		return []Wait{{Kind: WaitConsumer, ID: j.Inbox, Detail: "inbox " + j.Inbox + " is not open in this process"}}, nil
 	}
-	return []Wait{c.idleWait(j.ID)}
+	id := j.ID
+	return nil, func() []Wait { return []Wait{c.idleWait(id)} }
 }
 
 // idleWait is the wait of a ready task that holds no place in the scheduler's queue.
@@ -168,15 +239,27 @@ func jobLabel(j *Job) string {
 	return j.ID
 }
 
-// Summary is the line that leads every view. It says what the waiting jobs wait on, so an empty run table explains itself.
+// Summary is the line that leads every view. It says what the waiting jobs wait on, so an empty run table explains
+// itself. For records of this process, the caller holds the store's read lock.
 func Summary(jobs []*Job, waits map[string][]Wait) string {
-	watching, running := 0, 0
+	runs := map[string]bool{}
 	for _, j := range jobs {
+		if j.State == StateRunning {
+			runs[j.ID] = j.Monitor != nil
+		}
+	}
+	return summarize(runs, waits)
+}
+
+// summarize is Summary from the running tasks, each true for a monitor, and the waits.
+func summarize(runs map[string]bool, waits map[string][]Wait) string {
+	watching, running := 0, 0
+	for id, monitor := range runs {
 		// A running task that waits for its lease counts as waiting, not as running.
-		if _, waits := waits[j.ID]; j.State != StateRunning || waits {
+		if _, waits := waits[id]; waits {
 			continue
 		}
-		if j.Monitor != nil {
+		if monitor {
 			watching++
 		} else {
 			running++

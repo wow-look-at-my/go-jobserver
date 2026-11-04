@@ -131,19 +131,15 @@ func TestTheJournalKeepsTheWaitingCountAndTheOutcome(t *testing.T) {
 
 	st, err = OpenStore(dir)
 	require.NoError(t, err)
-	assert.Equal(t, want, st.Counts("n"), "a replay counts the same waits")
-	st.mu.Lock()
-	err = st.compactLocked()
-	st.mu.Unlock()
-	require.NoError(t, err)
+	assert.Equal(t, want, st.Counts("n"), "a second open counts the same waits")
 	require.NoError(t, st.Close())
 
 	st, err = OpenStore(dir)
 	require.NoError(t, err)
 	defer st.Close()
-	assert.Equal(t, want, st.Counts("n"), "a compaction keeps the open waits")
+	assert.Equal(t, want, st.Counts("n"), "a third open keeps the open waits")
 	j, _ := st.Job(free)
-	assert.Equal(t, "partial", j.Outcome, "a compaction keeps the outcome")
+	assert.Equal(t, "partial", j.Outcome, "the database keeps the outcome")
 
 	require.NoError(t, st.requeue(held, "resumed"))
 	assert.Equal(t, TaskCounts{Queued: 1, Running: 1}, st.Counts("n"))

@@ -253,11 +253,7 @@ func TestABoundDropsTheOldestClosedStepsAndWaits(t *testing.T) {
 	st, err = OpenStore(dir)
 	require.NoError(t, err)
 	j, _ = st.Job(id)
-	assert.Equal(t, 3, j.StepsDropped, "the journal replays the drops")
-	st.mu.Lock()
-	err = st.compactLocked()
-	st.mu.Unlock()
-	require.NoError(t, err)
+	assert.Equal(t, 3, j.StepsDropped, "the database keeps the drops")
 	require.NoError(t, st.Close())
 
 	st, err = OpenStore(dir)
@@ -266,7 +262,7 @@ func TestABoundDropsTheOldestClosedStepsAndWaits(t *testing.T) {
 	j2, _ := st.Job(id)
 	assert.Equal(t, j.Steps, j2.Steps)
 	assert.Equal(t, j.Waits, j2.Waits)
-	assert.Equal(t, 3, j2.StepsDropped, "a compaction keeps the counts")
+	assert.Equal(t, 3, j2.StepsDropped, "a second open keeps the counts")
 	assert.Equal(t, 3, j2.WaitsDropped)
 }
 

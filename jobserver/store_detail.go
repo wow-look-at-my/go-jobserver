@@ -3,7 +3,6 @@
 package jobserver
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/wow-look-at-my/go-containers/set"
@@ -211,38 +210,37 @@ func oldestClosed[E any](list []E, id func(E) int, open func(E) bool) int {
 	return 0
 }
 
-// applyDetail folds a detail record into the table. A blob that does not decode is left out.
-func (s *Store) applyDetail(r record) {
-	j, ok := s.jobs[r.id]
-	if !ok {
-		return
-	}
+// openEnded is the change that ends each open step and wait of a task at the time at. It does not change j.
+func openEnded(j *Job, at time.Time) detailRec {
 	var d detailRec
-	if json.Unmarshal([]byte(r.blob), &d) == nil {
-		d.merge(j)
+	for _, st := range j.Steps {
+		if st.End.IsZero() {
+			st.End, st.Status = at, StepAbandoned
+			d.Steps = append(d.Steps, st)
+		}
 	}
+	for _, w := range j.Waits {
+		if w.End.IsZero() {
+			w.End = at
+			d.Waits = append(d.Waits, w)
+		}
+	}
+	return d
 }
 
-// closeOpen ends each open step and wait of a task that ended.
-func closeOpen(j *Job, at time.Time) {
-	for i := range j.Steps {
-		if j.Steps[i].End.IsZero() {
-			j.Steps[i].End, j.Steps[i].Status = at, StepAbandoned
-		}
-	}
-	for i := range j.Waits {
-		if j.Waits[i].End.IsZero() {
-			j.Waits[i].End = at
-		}
-	}
+// closeOpen ends each open step and wait of a task that ended, and returns the change.
+func closeOpen(j *Job, at time.Time) detailRec {
+	d := openEnded(j, at)
+	d.merge(j)
 	j.openWaits = 0
+	return d
 }
 
 // liveJob returns a job that has not ended. Caller holds s.mu.
 func (s *Store) liveJob(id string) (*Job, error) {
-	j, ok := s.jobs[CanonicalID(id)]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
+	j, err := s.rec(id)
+	if err != nil {
+		return nil, err
 	}
 	if j.State.Terminal() {
 		return nil, fmt.Errorf("%w: %s is %s", ErrNotRunning, j.ID, j.State)
@@ -250,14 +248,10 @@ func (s *Store) liveJob(id string) (*Job, error) {
 	return j, nil
 }
 
-// noteDetail applies a detail change and appends it to the journal. Caller holds s.mu.
+// noteDetail applies a detail change and records it. Caller holds s.mu for writing.
 func (s *Store) noteDetail(j *Job, d detailRec) error {
-	blob, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
 	d.merge(j)
-	return s.note(record{kind: recDetail, id: j.ID, blob: string(blob)})
+	return s.save(j, &d)
 }
 
 // clip cuts a title to its bound.
@@ -516,9 +510,9 @@ func (s *Store) QueueWait(id string, q QueueState) error {
 
 // AppendLog writes one line to a task's log.
 func (s *Store) AppendLog(id, line string) error {
-	s.mu.Lock()
+	s.mu.RLock()
 	j, err := s.liveJob(id)
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if err != nil {
 		return err
 	}

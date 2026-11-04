@@ -20,8 +20,8 @@ import (
 // waitDelay bounds how long a child may hold the output pipe open after the job ends. Tests shorten it.
 var waitDelay = 5 * time.Second
 
-// A Runner runs one job's command into out and reports its exit code.
-// started receives the child's process id once it is running.
+// A Runner runs one job's command into out and reports its exit code. started
+// receives the child's process id once it is running.
 type Runner interface {
 	Run(ctx context.Context, j *Job, out io.Writer, started func(pid int)) (int, error)
 }

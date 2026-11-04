@@ -3,8 +3,9 @@
 package jobserver
 
 import (
+	"database/sql"
 	"encoding/json"
-	"sort"
+	"errors"
 	"time"
 )
 
@@ -16,73 +17,68 @@ type cacheEntry struct {
 	At        time.Time  `json:"at"`
 }
 
-// remember records a task that succeeded with an identity in the cache. Caller holds s.mu.
-func (s *Store) remember(j *Job) {
-	if j.Identity == "" || !j.State.succeeded() {
-		return
+// putCache writes one cache entry.
+func putCache(tx execer, e cacheEntry) error {
+	blob, err := json.Marshal(e)
+	if err != nil {
+		return err
 	}
-	if old, ok := s.cache[j.Identity]; ok && old.ID != j.ID && old.At.After(endedAt(j)) {
-		return
-	}
-	s.cache[j.Identity] = cacheEntry{Identity: j.Identity, ID: j.ID, Artifacts: append([]Artifact(nil), j.Artifacts...), At: endedAt(j)}
+	_, err = tx.Exec(`INSERT OR REPLACE INTO cache (identity, id, at, data) VALUES (?, ?, ?, ?)`, e.Identity, e.ID, e.At.UnixNano(), string(blob))
+	return err
 }
 
-// applyCache folds a cache record into the cache. A blob that does not decode is left out.
-func (s *Store) applyCache(r record) {
-	var e cacheEntry
-	if json.Unmarshal([]byte(r.blob), &e) == nil && e.Identity != "" {
-		s.cache[e.Identity] = e
+// remember records a task that succeeded with an identity in the cache. A newer entry of another task stays.
+// Caller holds s.mu for writing.
+func remember(tx *sql.Tx, j *Job) error {
+	if j.Identity == "" || !j.State.succeeded() {
+		return nil
 	}
+	var id string
+	var at int64
+	err := tx.QueryRow(`SELECT id, at FROM cache WHERE identity = ?`, j.Identity).Scan(&id, &at)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	case id != j.ID && at > endedAt(j).UnixNano():
+		return nil
+	}
+	return putCache(tx, cacheEntry{Identity: j.Identity, ID: j.ID, Artifacts: j.Artifacts, At: endedAt(j)})
 }
 
 // cacheEntry returns the cache entry of an identity.
-func (s *Store) cacheEntry(identity string) (cacheEntry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.cache[identity]
-	e.Artifacts = append([]Artifact(nil), e.Artifacts...)
-	return e, ok
+func (s *Store) cacheEntry(identity string) (cacheEntry, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return cacheEntry{}, false, errors.New("jobserver: store is closed")
+	}
+	var blob string
+	err := s.db.QueryRow(`SELECT data FROM cache WHERE identity = ?`, identity).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return cacheEntry{}, false, nil
+	}
+	if err != nil {
+		return cacheEntry{}, false, err
+	}
+	var e cacheEntry
+	if err := json.Unmarshal([]byte(blob), &e); err != nil {
+		return cacheEntry{}, false, err
+	}
+	return e, true, nil
 }
 
 // pruneCache drops cache entries older than age, and past count, oldest first. A zero bound is no bound.
-// It reports whether it dropped any. Caller holds s.mu.
-func (s *Store) pruneCache(now time.Time, age time.Duration, count int) bool {
-	entries := make([]cacheEntry, 0, len(s.cache))
-	for _, e := range s.cache {
-		entries = append(entries, e)
-	}
-	sort.Slice(entries, func(a, b int) bool {
-		if !entries[a].At.Equal(entries[b].At) {
-			return entries[a].At.Before(entries[b].At)
-		}
-		return entries[a].Identity < entries[b].Identity
-	})
-	left := len(entries)
-	dropped := false
-	for _, e := range entries {
-		if (count > 0 && left > count) || (age > 0 && now.Sub(e.At) > age) {
-			delete(s.cache, e.Identity)
-			left--
-			dropped = true
+func pruneCache(tx execer, now time.Time, age time.Duration, count int) error {
+	if age > 0 {
+		if _, err := tx.Exec(`DELETE FROM cache WHERE at < ?`, now.Add(-age).UnixNano()); err != nil {
+			return err
 		}
 	}
-	return dropped
-}
-
-// cacheRecords are the records that rebuild the cache, oldest first. Caller holds s.mu.
-func (s *Store) cacheRecords() ([]record, error) {
-	entries := make([]cacheEntry, 0, len(s.cache))
-	for _, e := range s.cache {
-		entries = append(entries, e)
-	}
-	sort.Slice(entries, func(a, b int) bool { return entries[a].Identity < entries[b].Identity })
-	recs := make([]record, 0, len(entries))
-	for _, e := range entries {
-		blob, err := json.Marshal(e)
-		if err != nil {
-			return nil, err
+	if count > 0 {
+		if _, err := tx.Exec(`DELETE FROM cache WHERE identity IN (SELECT identity FROM cache ORDER BY at DESC, identity DESC LIMIT -1 OFFSET ?)`, count); err != nil {
+			return err
 		}
-		recs = append(recs, record{kind: recCache, blob: string(blob)})
 	}
-	return recs, nil
+	return nil
 }

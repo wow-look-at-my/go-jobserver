@@ -56,7 +56,10 @@ type Artifact struct {
 	SHA256 string `json:"sha256"`
 }
 
-// Job is one unit of work and everything known about it.
+// Job is one unit of work and everything known about it. A process holds one record per task, and every accessor
+// returns it. The store changes the record in place under its lock. Read a field inside Store.Read or Server.Read.
+// These fields never change after the task is made. A read needs no lock: ID, Command, Inputs, Outputs, Env, Dir,
+// Key, Force, Created, Inbox, Trigger, Description, Timeout, Spec and Monitor.
 type Job struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
