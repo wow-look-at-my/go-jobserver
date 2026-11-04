@@ -1,6 +1,6 @@
 # go-jobserver
 
-A dependency-ordered job queue that runs as a daemon. Jobs have unique IDs, declare their inputs and outputs, wait for the jobs they depend on, and are skipped when same work has. Already been done. Every state change is journaled, so a start resumes exactly where the daemon stopped.
+A dependency-ordered job queue that runs as a daemon. Jobs have unique IDs, declare their inputs and outputs, wait for the jobs they depend on, and are skipped when same work has. Already been done. Every state change goes to a SQLite database, so a start resumes exactly where the daemon stopped.
 
 ```
 go-jobserver queue --output app -- make app
@@ -121,7 +121,7 @@ A client has several seconds to send its request headers. The client also has a 
 
 Pause takes effect between jobs: a request to pause stops new jobs from starting, and jobs already running finish. Resume starts scheduling again. Interruption is per job: `interrupt <id>` kills the job's process group, so a job that spawns helpers leaves none of them behind. The job becomes `cancelled` with the output it produced up to that moment.
 
-The paused flag is part of the journal, so a daemon that restarts stays paused.
+The database keeps the paused flag, so a daemon that restarts stays paused.
 
 ## CPU oversubscription
 
@@ -338,12 +338,13 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 - **Why.** `Server.Why(id)` says what a task waits on. This covers a trigger or dependency, a monitor's last check, the run cap, a group, CPU, a consumer, a draft or a pause. `Explain`, `Summary`, `Graph` and `MonitorViews` give the same for every task. HTTP serves them at `/api/why/{id}`, `/api/graph`, `/api/monitors`, `/api/kinds` and `/api/scheduler`.
 - **Schedules.** `inbox.Every(name, every, build)` adds the task `build` makes every interval. `Server.SetSchedule(name, Schedule{Every, Add, OnSkip})` takes any add function. A tick skips, and `OnSkip` hears it, while the last task of the schedule has not ended. `RemoveSchedule` drops one, and `Schedules`, `Stats` and `Details` show them.
 - **Consumers.** `Bind` attaches one consumer. `Bind(name)` gives it a name. Each task it takes keeps that name in `ConsumerName`, through a restart and a compaction, after the consumer is gone. A new `Bind` or an `Unbind` fails its checked-out tasks with "the consumer went away". A stale handle gets `ErrNotConsumer`. `Take` returns the queued task that sorts first by `Compare`, then by arrival, and waits for the admission of that task. An admitted task that sorts after it gives back its slot until it is taken. The task holds its slot until `Done`. `Lookup(id)` returns a task of the inbox, or `ErrNotFound`.
-- **Start.** The journal holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
+- **Start.** The database holds each task's spec and result as JSON. `NewInbox` with the same name takes them back. A task a consumer held fails, and a task of an inbox with `Run` runs again.
 - **Task details.** A consumer reports on a task it holds through the inbox. `SetTitle(c, t, title)`, `Step(c, t, parent, title)`, `EndStep(c, t, step, status, msg)` and `RenameStep(c, t, step, title)` for named steps that nest, `OpenWait(c, t, reason)`, `OpenWaitInfo(c, t, info)`, `UpdateWait(c, t, wait, info)` and `CloseWait(c, t, wait)` for spans where the task waits. `Log(c, t, line)` for its log. `SetOutcome(c, t, label)` sets a short label for the result, such as `skipped`, so a reader of `Tasks` tells the kind of result without the result. A `Run` method gets its task from `TaskFromContext(ctx)` and passes the empty `Consumer`. `EndStep` takes `succeeded`, `failed`, `skipped` or `abandoned`. A step that ends first ends each sub-step still open under it as `abandoned`, with the message "its parent step ended first". A step still open when the task ends becomes `abandoned`. Past its bound, a task drops its oldest closed step or wait, and `StepsDropped` and `WaitsDropped` count the drops. An open one never goes. A task whose held steps or waits are all open gets `ErrAllOpen`.
-- **Waits.** A `WaitInfo` gives a wait its `Reason`, `Kind`, `Key`, `Until` bound and up to 16 `Attrs`. `UpdateWait` replaces what an open wait says and keeps its ID and start. While a task waits for admission, the scheduler records a wait with `Queue` set, its `Kind`, `Key` and `Reason` taken from the `QueueState`. A new kind or key ends it and opens the next, and admission ends it. The journal keeps every wait, so a queued task shows its wait after a restart.
+- **Waits.** A `WaitInfo` gives a wait its `Reason`, `Kind`, `Key`, `Until` bound and up to 16 `Attrs`. `UpdateWait` replaces what an open wait says and keeps its ID and start. While a task waits for admission, the scheduler records a wait with `Queue` set, its `Kind`, `Key` and `Reason` taken from the `QueueState`. A new kind or key ends it and opens the next, and admission ends it. The database keeps every wait, so a queued task shows its wait after a restart.
 - **Reading tasks.** `Details(t)` reads one task: title, state, timings, steps, waits, log size, and `Queue`, what a queued task waits on in the scheduler. `Tasks(since)` lists the tasks of the inbox that changed after a `Seq`. A new `Epoch` or `Pruned` in the page means the reader reads again from zero. `ReadLog(t, offset, max)` reads the log. `Counts()` gives the queued, running and ended tasks, and `Waiting`: the running tasks that hold at least one open wait. Take reads only the tasks of its own inbox, and `Counts` reads only the index of its inbox.
-- **Retention.** The server drops an ended task, its result and its log after `Config.Retention` (`DefaultRetention`), and beyond `Config.RetainCount` ended tasks per inbox (`DefaultRetainCount`), oldest first. It checks every `Config.PruneInterval`. It keeps a task that a task which has not ended still waits on, and a task a `Wait` blocks on. The dedup cache does not follow the tasks. A prune keeps the identity and the artifacts of each piece of work that succeeded. An same command reuses them after its source task is gone. `Config.CacheRetention` and `Config.CacheCount` bound the cache on its own, and by default it has no bound. A prune compacts the journal: it writes a new file, syncs it, and renames it over the old one. A queued task stays across a start. The next consumer takes it. A named inbox that the process does not open again within `Config.Retention` of its start loses its tasks. Each queued or running task of it ends as cancelled. A later prune drops it as an ended task.
-- **A held task outlives a prune.** A `*Task` that this process handed out points at its record. A prune drops the task from the store, the listings and the journal, and deletes its log. `State`, `Wait`, `Details`, `Spec`, `TryResult` and the error a task failed with still read through the handle, until the last holder lets it go. A `*Task` from a `Client` reads by ID. `Server.Task(id)` returns the handle of a task the store still holds, journal-loaded tasks included.
+- **Retention.** The server drops an ended task, its result and its log after `Config.Retention` (`DefaultRetention`), and beyond `Config.RetainCount` ended tasks per inbox (`DefaultRetainCount`), oldest first. It checks every `Config.PruneInterval`. It keeps a task that a task which has not ended still waits on, and a task a `Wait` blocks on. The dedup cache does not follow the tasks. A prune keeps the identity and the artifacts of each piece of work that succeeded. An same command reuses them after its source task is gone. `Config.CacheRetention` and `Config.CacheCount` bound the cache on its own, and by default it has no bound. A prune deletes the rows of the tasks it drops. A queued task stays across a start. The next consumer takes it. A named inbox that the process does not open again within `Config.Retention` of its start loses its tasks. Each queued or running task of it ends as cancelled. A later prune drops it as an ended task.
+- **One record per task.** Every accessor (`List`, `Get`, `InboxJobs`, the views, a `*Task`) returns the one record of a task, not a copy. The store changes it in place, so read its fields inside `Server.Read`, except the fixed fields `Job` lists. A function passed to `Read` must not call into the server.
+- **A held task outlives a prune.** A `*Task` that this process handed out points at its record. A prune drops the task from the store, the listings and the database, and deletes its log. `State`, `Wait`, `Details`, `Spec`, `TryResult` and the error a task failed with still read through the handle, until the last holder lets it go. A `*Task` from a `Client` reads by ID. `Server.Task(id)` returns the handle of a task the store still holds, tasks of an earlier process included.
 - **Over the wire.** The ops `inbox.add`, `inbox.bind`, `inbox.unbind`, `inbox.take`, `inbox.started`, `inbox.done`, `inbox.drain`, `inbox.priority`, `inbox.detail`, `inbox.task`, `inbox.tasks`, `inbox.counts` and `inbox.wait` name their inbox. `ClientInbox` gives the same `*Inbox` methods over a `Client`.
 
 `Spec`, `Server.Enqueue` and the `enqueue` op are deprecated. Each adds the task to the default inbox.
@@ -353,16 +354,16 @@ build, err := jobserver.OnSuccess(fetch, server.DefaultInbox(), &jobserver.Comma
 Everything lives under the server directory.
 
 ```
-journal.log          every state change, append-only
+tasks.sqlite         every task, in SQLite (WAL mode)
 classes.json         measured CPU cost per job name
 logs/<id>.log        one job's captured output
 go-jobserver.sock    the file socket
 spool/               jobs dropped in as files
 ```
 
-A journal record is a length and a CRC32C checksum around a compact binary payload. Consider a record whose length or checksum. That record does not fit is the tail of an append the process died in the middle of: the reader stops there. The reader cuts the file back to the last good record. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept.
+Each change of a task is one SQLite transaction. Memory holds only the tasks that have not ended, the ended tasks they depend on, and the records a caller still holds. A read of an ended task goes to the database. A job that was `running` when the process died becomes `failed` with `interrupted by daemon restart`, and the output it wrote is kept. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
 
-The journal is flushed to disk after every record, except the details a task reports, which the next record flushes. Job output is flushed as it is written and synced at every task boundary and once a second while a job runs.
+An older release kept a `journal.log`. The first open moves it into the database in one transaction and renames it to `journal.log.migrated`. A torn last record is left out.
 
 ## Command line
 
@@ -404,8 +405,8 @@ go-toolchain
 | --- | --- |
 | `main.go`, `root.go`, `cmd_*.go` | the command line: cobra, one file per command |
 | `jobserver/job.go` | the job model, states and the dedup identity |
-| `jobserver/journal.go` | the record codec and frame format |
-| `jobserver/store.go` | the job table, the journal and the log files |
+| `jobserver/journal.go` | the codec of the older journal, which `store_migrate.go` reads once |
+| `jobserver/store.go`, `store_db.go`, `store_mem.go` | the job table, the database, what memory holds, and the log files |
 | `jobserver/scheduler.go` | readiness, blocking, cycles and cache lookup, as pure functions |
 | `jobserver/executor.go` | running a command and hashing what it produced |
 | `jobserver/process_unix.go` | the process group a job runs in, and killing all of it |

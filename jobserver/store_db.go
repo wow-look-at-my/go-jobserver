@@ -18,8 +18,6 @@ import (
 // dbName is the database file under a server directory.
 const dbName = "tasks.sqlite"
 
-// schema is the tables. A step change writes no spec.
-//
 //go:embed store_schema.sql
 var schema string
 
