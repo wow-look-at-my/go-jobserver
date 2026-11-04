@@ -372,8 +372,8 @@ func (s *Server) tick() {
 	if s.store.Paused() {
 		return
 	}
-	jobs := s.store.Jobs()
-	for _, id := range Blocked(jobs) {
+	blocked, ready, byID := s.store.schedule()
+	for _, id := range blocked {
 		j, ok := s.store.Job(id)
 		if !ok || j.State != StateActive {
 			continue
@@ -386,9 +386,11 @@ func (s *Server) tick() {
 			s.cfg.Logf("go-jobserver: block %s: %v", id, err)
 		}
 	}
-	jobs = s.store.Jobs()
-	byID := Index(jobs)
-	for _, id := range Ready(jobs) {
+	// A blocked task ends, and that can fire a dependant's "ended" trigger.
+	if len(blocked) > 0 {
+		_, ready, byID = s.store.schedule()
+	}
+	for _, id := range ready {
 		j, ok := s.store.Job(id)
 		if !ok {
 			continue

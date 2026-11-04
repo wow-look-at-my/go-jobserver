@@ -173,6 +173,21 @@ func (s *Store) liveIn(inbox string) []*Job {
 	return s.sortedLocked(s.idx.live[inboxKey(inbox)])
 }
 
+// RunningIn returns the IDs of the running tasks of one inbox, in creation order. It reads the index and copies no task.
+func (s *Store) RunningIn(inbox string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := slices.Collect(each(s.idx.running[inboxKey(inbox)]))
+	sort.Slice(ids, func(a, b int) bool {
+		ja, jb := s.jobs[ids[a]], s.jobs[ids[b]]
+		if !ja.Created.Equal(jb.Created) {
+			return ja.Created.Before(jb.Created)
+		}
+		return ids[a] < ids[b]
+	})
+	return ids
+}
+
 // InboxJobs returns a copy of each task the store holds for one inbox, in creation order.
 func (s *Store) InboxJobs(inbox string) []*Job {
 	s.mu.Lock()
