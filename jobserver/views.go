@@ -36,15 +36,22 @@ type JobGraph struct {
 	Edges   []GraphEdge `json:"edges"`
 }
 
-// Graph returns the whole job graph with each node's waits. It reads every task the store holds, the ended ones from
-// the database, in one pass under the store lock.
-func (s *Server) Graph() JobGraph {
+// Graph returns the whole job graph with each node's waits.
+func (s *Server) Graph() JobGraph { return s.graph((*Store).jobsLocked) }
+
+// OpenGraph is Graph over the tasks memory holds: the open tasks, the ended
+// tasks they depend on, and the tasks a caller waits on.
+func (s *Server) OpenGraph() JobGraph {
+	return s.graph(func(st *Store) []*Job { return SortedJobs(st.memJobs()) })
+}
+
+func (s *Server) graph(read func(*Store) []*Job) JobGraph {
 	in := s.waitInputs()
 	var ex explained
 	g := JobGraph{Nodes: []GraphNode{}, Edges: []GraphEdge{}}
 	s.store.Read(func() {
 		ex = s.explainLocked(in)
-		jobs := SortedJobs(s.store.jobsLocked())
+		jobs := SortedJobs(read(s.store))
 		byID := Index(jobs)
 		for _, j := range jobs {
 			n := GraphNode{ID: j.ID, Label: jobLabel(j), Kind: "job", State: j.State}
