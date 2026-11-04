@@ -36,8 +36,9 @@ func (s *Server) openMonitorInbox() error {
 		var m monitorTask
 		return json.Unmarshal(raw, &m)
 	}
-	hooks := inboxHooks{leaseFor: func(j *Job) (LeaseRequest, error) {
-		return LeaseRequest{Class: j.Name, Fallback: []string{"inbox:" + MonitorInboxName}, Monitor: true}, nil
+	// An empty class takes the task's title, which offer reads under the store lock.
+	hooks := inboxHooks{leaseFor: func(*Job) (LeaseRequest, error) {
+		return LeaseRequest{Fallback: []string{"inbox:" + MonitorInboxName}, Monitor: true}, nil
 	}}
 	_, err := s.openInbox(MonitorInboxName, monitorKeys, 0, s.runMonitor, check, hooks)
 	return err
@@ -63,9 +64,9 @@ func (s *Server) Watch(spec MonitorSpec, title string) (*Task, bool, error) {
 	}
 	s.watchMu.Lock()
 	defer s.watchMu.Unlock()
-	for _, j := range s.store.liveIn(MonitorInboxName) {
-		if j.Key == key {
-			return newTask(localNamed{Server: s, c: c}, j.ID), true, nil
+	for _, t := range s.store.liveIn(MonitorInboxName) {
+		if t.key == key {
+			return newTask(localNamed{Server: s, c: c}, t.id), true, nil
 		}
 	}
 	raw, err := json.Marshal(monitorTask{TaskSpec: TaskSpec{Title: title}, Monitor: spec.clone()})
@@ -101,16 +102,11 @@ func (s *Server) runMonitor(ctx context.Context, raw json.RawMessage) (json.RawM
 		}
 	}
 	var last MonitorStatus
-	defer func() {
-		s.mu.Lock()
-		delete(s.watching, t.ID)
-		s.mu.Unlock()
-	}()
+	defer s.store.setMonitorStatus(t.ID, nil)
 	err = s.cfg.Monitors.Watch(ctx, m.Monitor, w, started, func(st MonitorStatus) {
 		last = st
-		s.mu.Lock()
-		s.watching[t.ID] = st
-		s.mu.Unlock()
+		// Each report is a new value, so a reader that holds the last pointer keeps a status that does not change.
+		s.store.setMonitorStatus(t.ID, &st)
 		if st.LastError != "" {
 			s.cfg.Logf("go-jobserver: ERROR: monitor %s (%s) check %d failed, retrying: %s", t.ID, m.Monitor.Key(), st.Checks, st.LastError)
 		}
@@ -124,7 +120,8 @@ func (s *Server) runMonitor(ctx context.Context, raw json.RawMessage) (json.RawM
 	return json.Marshal(last)
 }
 
-// monitorOf decodes the monitor spec of a task in the monitor inbox. It is nil for any other task.
+// monitorOf decodes the monitor spec of a task in the monitor inbox. It is nil for any other task. The spec does not
+// change, so the store decodes it once, when it makes the record.
 func monitorOf(j *Job) *MonitorSpec {
 	if j.Inbox != MonitorInboxName {
 		return nil
@@ -136,24 +133,10 @@ func monitorOf(j *Job) *MonitorSpec {
 	return &m.Monitor
 }
 
-// withStatus fills the monitor spec of each monitor task, and the last status of each running one.
-func (s *Server) withStatus(jobs []*Job) []*Job {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, j := range jobs {
-		j.Monitor = monitorOf(j)
-		if st, ok := s.watching[j.ID]; ok {
-			c := st
-			j.MonitorStatus = &c
-		}
-	}
-	return jobs
-}
-
-// Monitors returns every monitor job, oldest first, each with its last status.
+// Monitors returns the record of every monitor task, oldest first. Read the status of each inside Read.
 func (s *Server) Monitors() []*Job {
 	var out []*Job
-	for _, j := range s.List() {
+	for _, j := range s.store.InboxJobs(MonitorInboxName) {
 		if j.Monitor != nil {
 			out = append(out, j)
 		}

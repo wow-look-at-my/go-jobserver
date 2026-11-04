@@ -116,8 +116,6 @@ type Server struct {
 	stopped bool
 	// errs holds the error each failed task ended with in this process.
 	errs map[string]error
-	// watching holds the last status of each running monitor, by task ID, under mu.
-	watching map[string]MonitorStatus
 	// watchMu makes the dedup check and the add of Watch one step.
 	watchMu sync.Mutex
 	// every holds the schedules that add tasks on an interval.
@@ -141,6 +139,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.SyncInterval <= 0 {
 		cfg.SyncInterval = time.Second
 	}
+	ownLogf := cfg.Logf
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
@@ -166,6 +165,9 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ownLogf != nil {
+		st.SetLogf(ownLogf)
+	}
 	s := &Server{
 		cfg:     cfg,
 		store:   st,
@@ -176,9 +178,7 @@ func New(cfg Config) (*Server, error) {
 		start:   time.Now(),
 		inboxes: make(map[string]*inboxCore),
 		errs:    make(map[string]error),
-
-		watching: make(map[string]MonitorStatus),
-		every:    newScheduleSet(cfg.Logf),
+		every:   newScheduleSet(cfg.Logf),
 	}
 	s.sched, s.sharedSched = cfg.Scheduler, cfg.Scheduler != nil
 	if s.sched == nil {
@@ -374,15 +374,19 @@ func (s *Server) tick() {
 	}
 	blocked, ready, byID := s.store.schedule()
 	for _, id := range blocked {
-		j, ok := s.store.Job(id)
-		if !ok || j.State != StateActive {
+		var (
+			st       State
+			trigger  string
+			logBytes int64
+		)
+		if !s.store.view(id, func(j *Job) { st, trigger, logBytes = j.State, j.Trigger, j.LogBytes }) || st != StateActive {
 			continue
 		}
-		if j.Trigger != "" {
-			s.finish(id, StateCancelled, -1, msgNeverFires, nil, j.LogBytes)
+		if trigger != "" {
+			s.finish(id, StateCancelled, -1, msgNeverFires, nil, logBytes)
 			continue
 		}
-		if err := s.store.setState(id, StateBlocked, "a dependency failed"); err != nil {
+		if err := s.store.SetState(id, StateBlocked, "a dependency failed"); err != nil {
 			s.cfg.Logf("go-jobserver: block %s: %v", id, err)
 		}
 	}
@@ -402,18 +406,13 @@ func (s *Server) tick() {
 		if s.defCore.pending(j.ID) {
 			continue
 		}
-		identity, err := s.identityOf(j, byID)
-		if err != nil {
-			s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
-		}
+		identity := s.identityOf(j, byID)
 		if identity != "" {
 			if err := s.store.SetIdentity(id, identity, ""); err != nil {
 				s.cfg.Logf("go-jobserver: identity %s: %v", id, err)
 			}
-			if !j.Force {
-				if src := CacheHit(identity, s.store.IdentityIndex(), j.ID); src != "" && s.reuse(j, src, identity) {
-					continue
-				}
+			if !j.Force && s.reuse(j, identity) {
+				continue
 			}
 		}
 		s.defCore.offer(j)
@@ -422,31 +421,40 @@ func (s *Server) tick() {
 }
 
 // leaseFor is what the scheduler admits a job as. The job's own cost comes
-// first: what it declared, then what its last attempt measured.
+// first: what it declared, then what its last attempt measured. Caller holds the store's read lock.
 func (s *Server) leaseFor(j *Job) LeaseRequest {
 	policy := j.Policy.clone()
 	policy.Cost = j.ExpectedCost(0)
 	return LeaseRequest{ID: j.ID, Class: j.Name, Policy: policy}
 }
 
-// identityOf computes a job's dedup identity, hashing its declared inputs.
-func (s *Server) identityOf(j *Job, byID map[string]*Job) (string, error) {
-	resolved := *j
-	resolved.Inputs = hashInputs(j.Dir, j.Inputs)
-	return JobIdentity(&resolved, byID), nil
+// identityOf computes a job's dedup identity, hashing its declared inputs. The inputs and the directory are fixed, so
+// it hashes them outside the store lock.
+func (s *Server) identityOf(j *Job, byID map[string]*Job) string {
+	inputs := hashInputs(j.Dir, j.Inputs)
+	var identity string
+	s.store.Read(func() {
+		identity = JobIdentity(&Job{Key: j.Key, Command: j.Command, Dir: j.Dir, Env: j.Env, Outputs: j.Outputs,
+			Inputs: inputs, Deps: j.Deps}, byID)
+	})
+	return identity
 }
 
 // reuse records that a job's work was already done by another, from the dedup cache. The source task can be pruned.
-// It reports false when the cache no longer names that task, so the job runs after all.
-func (s *Server) reuse(j *Job, srcID, identity string) bool {
-	src, ok := s.store.cacheEntry(identity)
-	if !ok || src.ID != srcID {
+// It reports false when the cache names no other task, so the job runs.
+func (s *Server) reuse(j *Job, identity string) bool {
+	src, ok, err := s.store.cacheEntry(identity)
+	if err != nil {
+		s.cfg.Logf("go-jobserver: ERROR: cache %s: read the cache entry: %v. The task runs.", j.ID, err)
 		return false
 	}
-	if err := s.store.SetIdentity(j.ID, identity, srcID); err != nil {
+	if !ok || src.ID == j.ID {
+		return false
+	}
+	if err := s.store.SetIdentity(j.ID, identity, src.ID); err != nil {
 		s.cfg.Logf("go-jobserver: cache %s: %v", j.ID, err)
 	}
-	if err := s.store.Finish(j.ID, StateCached, 0, "reused "+srcID, src.Artifacts, 0); err != nil {
+	if err := s.store.Finish(j.ID, StateCached, 0, "reused "+src.ID, src.Artifacts, 0); err != nil {
 		s.cfg.Logf("go-jobserver: cache %s: %v", j.ID, err)
 	}
 	s.Wake()
@@ -594,8 +602,11 @@ func (s *Server) enqueue(spec Spec, meta *taskMeta) (*Job, bool, error) {
 		return nil, false, ErrStopped
 	}
 	if spec.Key != "" && !spec.Force {
-		for _, j := range s.store.liveIn(DefaultInboxName) {
-			if j.Key == spec.Key {
+		for _, t := range s.store.liveIn(DefaultInboxName) {
+			if t.key != spec.Key {
+				continue
+			}
+			if j, ok := s.store.Job(t.id); ok {
 				return j, true, nil
 			}
 		}
@@ -635,17 +646,14 @@ func (s *Server) SetDeps(id string, deps []string) (*Job, error) {
 	return mustJob(s.store, id)
 }
 
-// List returns every job in creation order.
-func (s *Server) List() []*Job { return s.withStatus(s.store.Jobs()) }
+// List returns the record of every task in creation order. It reads the ended tasks from the database.
+func (s *Server) List() []*Job { return s.store.Jobs() }
 
-// Get returns one job.
-func (s *Server) Get(id string) (*Job, error) {
-	j, err := mustJob(s.store, id)
-	if err != nil {
-		return nil, err
-	}
-	return s.withStatus([]*Job{j})[0], nil
-}
+// Get returns the record of one task. Read its fields inside Read.
+func (s *Server) Get(id string) (*Job, error) { return mustJob(s.store, id) }
+
+// Read runs fn with the store's read lock held, so fn reads the fields of the records that List.
+func (s *Server) Read(fn func()) { s.store.Read(fn) }
 
 // Logs returns up to max bytes of a job's output starting at offset.
 func (s *Server) Logs(id string, offset int64, max int) ([]byte, error) {

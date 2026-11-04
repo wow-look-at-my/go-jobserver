@@ -124,10 +124,10 @@ type taskBackend interface {
 	errOf(id string) error
 }
 
-// localRecords is the part of a backend in this process: it hands out a task's record and reads it.
+// localRecords is the part of a backend in this process: it hands out a task's record and reads it under the store lock.
 type localRecords interface {
 	liveRecord(id string) *Job
-	viewRecord(rec *Job) *Job
+	readRecord(rec *Job, fn func(j *Job))
 	waitRecord(ctx context.Context, rec *Job) (*Job, error)
 	recordDetails(inbox string, rec *Job) (*TaskDetails, error)
 }
@@ -149,12 +149,21 @@ func newTask(b taskBackend, id string) *Task {
 	return t
 }
 
-// job reads a copy of the task's job: through the record when the task has one, else by ID.
+// job returns the task's job: the record when the task has one, else the job the backend reads by ID.
 func (t *Task) job() (*Job, error) {
 	if t.rec != nil {
-		return t.b.(localRecords).viewRecord(t.rec), nil
+		return t.rec, nil
 	}
 	return t.b.job(t.ID)
+}
+
+// read runs fn on j. A record of this process is read under the store lock. A job a client decoded is its own.
+func (t *Task) read(j *Job, fn func(j *Job)) {
+	if l, ok := t.b.(localRecords); ok {
+		l.readRecord(j, fn)
+		return
+	}
+	fn(j)
 }
 
 // waitJob blocks until the task's job ends.
@@ -171,7 +180,9 @@ func (t *Task) State() TaskState {
 	if err != nil {
 		return Failed
 	}
-	return taskStateOf(j.State)
+	var st State
+	t.read(j, func(j *Job) { st = j.State })
+	return taskStateOf(st)
 }
 
 // Cancel cancels the task, queued or running.
@@ -188,21 +199,26 @@ func (t *Task) Wait(ctx context.Context) *TaskError {
 
 // errorOf is the TaskError of an ended job, or nil when it succeeded.
 func (t *Task) errorOf(j *Job) *TaskError {
-	st := taskStateOf(j.State)
+	var (
+		state State
+		msg   string
+		err   error
+	)
+	t.read(j, func(j *Job) { state, msg, err = j.State, j.Error, j.err })
+	st := taskStateOf(state)
 	switch st {
 	case Succeeded:
 		return nil
 	case Failed:
-		err := j.err
 		if err == nil {
 			err = t.b.errOf(t.ID)
 		}
 		if err == nil {
-			err = errors.New(j.Error)
+			err = errors.New(msg)
 		}
-		return &TaskError{State: st, Message: j.Error, Err: err}
+		return &TaskError{State: st, Message: msg, Err: err}
 	}
-	return &TaskError{State: st, Message: j.Error}
+	return &TaskError{State: st, Message: msg}
 }
 
 // CommandSpec is a task of the default inbox: a command the Runner runs.
@@ -266,7 +282,7 @@ func (c *CommandSpec) toSpec() Spec {
 		Env: c.Env, Dir: c.Dir, Key: c.Key, Draft: c.Draft, Force: c.Force, Policy: c.Policy}
 }
 
-// commandSpecOf rebuilds the command spec of a default task.
+// commandSpecOf rebuilds the command spec of a default task. For a record of this process, the caller holds the store's read lock.
 func commandSpecOf(j *Job) *CommandSpec {
 	return &CommandSpec{TaskSpec: TaskSpec{Title: j.Name, Description: j.Description, Timeout: j.Timeout},
 		ID: j.ID, Command: j.Command, Deps: j.Deps, Inputs: j.Inputs, Outputs: j.Outputs, Env: j.Env,

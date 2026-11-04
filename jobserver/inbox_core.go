@@ -111,15 +111,24 @@ func (c *inboxCore) offer(j *Job) {
 	if c.admitted[j.ID] != nil || c.out[j.ID] != nil || c.held[j.ID] {
 		return
 	}
-	prio, err := c.keys.FromValues(j.Priority)
+	var (
+		values map[string]int
+		req    LeaseRequest
+	)
+	c.s.store.Read(func() {
+		values = j.Priority
+		req = LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
+		if c.isDefault {
+			req = c.s.leaseFor(j)
+		}
+	})
+	prio, err := c.keys.FromValues(values)
 	if err != nil {
 		c.s.finish(j.ID, StateFailed, -1, err.Error(), nil, 0)
 		return
 	}
-	req := LeaseRequest{ID: j.ID, Class: j.Name, Fallback: []string{"inbox:" + c.name}, Policy: j.Policy.clone()}
 	switch {
 	case c.isDefault:
-		req = c.s.leaseFor(j)
 	case c.hooks.leaseFor != nil:
 		shaped, err := c.hooks.leaseFor(j)
 		if err != nil {
@@ -195,7 +204,7 @@ func (c *inboxCore) acquire(ctx context.Context, g *grant, req LeaseRequest) {
 		return
 	}
 	g.lease = l
-	if j, ok := c.s.store.Job(g.id); !ok || j.State != StateActive || c.s.store.Paused() {
+	if st, ok := c.s.store.stateOf(g.id); !ok || st != StateActive || c.s.store.Paused() {
 		cancel()
 		l.Release()
 		c.s.Wake()

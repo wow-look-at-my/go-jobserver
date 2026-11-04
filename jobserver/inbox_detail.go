@@ -147,16 +147,23 @@ func (s *Server) queueStates() map[string]*QueueState {
 	return out
 }
 
-func (s *Server) detailsOf(j *Job, queue map[string]*QueueState) *TaskDetails {
+// detailsLocked renders a task's details. It copies the steps and the waits, because the store changes them in
+// place. Caller holds the store's read lock. finishDetails fills the parts that other locks guard.
+func detailsLocked(j *Job, queue map[string]*QueueState) *TaskDetails {
 	inbox := j.Inbox
 	if inbox == "" {
 		inbox = DefaultInboxName
 	}
 	return &TaskDetails{ID: j.ID, Inbox: inbox, Seq: j.Seq, Title: j.Name, Description: j.Description,
 		State: taskStateOf(j.State), Error: j.Error, Consumer: j.Consumer, ConsumerName: j.ConsumerName, Created: j.Created, Started: j.Started,
-		Finished: j.Finished, Attempts: j.Attempts, Steps: j.Steps, Waits: j.Waits, Queue: queue[j.ID],
-		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped,
-		LogBytes: s.store.LogBytes(j.ID), Outcome: j.Outcome, Schedule: s.every.lastOf(j.ID)}
+		Finished: j.Finished, Attempts: j.Attempts, Steps: slices.Clone(j.Steps), Waits: cloneWaits(j.Waits), Queue: queue[j.ID],
+		StepsDropped: j.StepsDropped, WaitsDropped: j.WaitsDropped, Outcome: j.Outcome}
+}
+
+// finishDetails fills the log size and the schedule of details, with no store lock.
+func (s *Server) finishDetails(d *TaskDetails) {
+	d.LogBytes = s.store.LogBytes(d.ID)
+	d.Schedule = s.every.lastOf(d.ID)
 }
 
 // taskDetails reads one task of an inbox.
@@ -170,29 +177,40 @@ func (s *Server) taskDetails(inbox, id string) (*TaskDetails, error) {
 
 // recordDetails reads one task of an inbox through its record, so a task a prune dropped still reads.
 func (s *Server) recordDetails(inbox string, rec *Job) (*TaskDetails, error) {
-	return s.jobDetails(inbox, s.store.viewRecord(rec))
+	return s.jobDetails(inbox, rec)
 }
 
-// jobDetails renders a copy of a task's job, which must be in the inbox.
+// jobDetails renders a task's record, which must be in the inbox.
 func (s *Server) jobDetails(inbox string, j *Job) (*TaskDetails, error) {
 	if inboxKey(inbox) != j.Inbox {
 		return nil, fmt.Errorf("%w: %s is not a task of inbox %s", ErrNotFound, j.ID, inbox)
 	}
+	var active bool
+	s.store.readRecord(j, func(j *Job) { active = j.State == StateActive })
 	var queue map[string]*QueueState
-	if j.State == StateActive {
+	if active {
 		queue = s.queueStates()
 	}
-	return s.detailsOf(j, queue), nil
+	var d *TaskDetails
+	s.store.readRecord(j, func(j *Job) { d = detailsLocked(j, queue) })
+	s.finishDetails(d)
+	return d, nil
 }
 
 // taskPage reads the tasks of an inbox that changed after since, oldest first.
 func (s *Server) taskPage(inbox string, since uint64) TaskPage {
-	jobs, page := s.store.inboxSince(inbox, since)
 	queue := s.queueStates()
-	page.Tasks = make([]*TaskDetails, 0, len(jobs))
-	for _, j := range jobs {
-		page.Tasks = append(page.Tasks, s.detailsOf(j, queue))
+	var tasks []*TaskDetails
+	page := s.store.inboxSince(inbox, since, func(jobs []*Job) {
+		tasks = make([]*TaskDetails, 0, len(jobs))
+		for _, j := range jobs {
+			tasks = append(tasks, detailsLocked(j, queue))
+		}
+	})
+	for _, d := range tasks {
+		s.finishDetails(d)
 	}
+	page.Tasks = tasks
 	return page
 }
 

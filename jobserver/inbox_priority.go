@@ -22,25 +22,26 @@ func (c *inboxCore) setPriority(id string, values map[string]int) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	j, ok := c.s.store.Job(id)
-	if !ok {
+	var inbox string
+	var st State
+	if !c.s.store.view(id, func(j *Job) { id, inbox, st = j.ID, j.Inbox, j.State }) {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	if j.Inbox != c.name && !(c.isDefault && j.Inbox == "") {
+	if inbox != c.name && !(c.isDefault && inbox == "") {
 		return fmt.Errorf("%w: task %s is not in inbox %s", ErrNotFound, id, c.name)
 	}
-	if j.State.Terminal() || j.State == StateRunning || c.admitted[j.ID] != nil || c.out[j.ID] != nil {
-		return fmt.Errorf("%w: task %s is %s and was admitted already", ErrBadState, j.ID, j.State)
+	if st.Terminal() || st == StateRunning || c.admitted[id] != nil || c.out[id] != nil {
+		return fmt.Errorf("%w: task %s is %s and was admitted already", ErrBadState, id, st)
 	}
-	if err := c.s.store.SetPriority(j.ID, values); err != nil {
+	if err := c.s.store.SetPriority(id, values); err != nil {
 		return err
 	}
-	cancel, ok := c.leasing[j.ID]
-	if !ok || c.s.sched.reorder(j.ID, prio) {
+	cancel, ok := c.leasing[id]
+	if !ok || c.s.sched.reorder(id, prio) {
 		return nil
 	}
 	// The lease is not in the queue yet, so its order is still the one. Offer the task again.
-	delete(c.leasing, j.ID)
+	delete(c.leasing, id)
 	cancel()
 	c.s.Wake()
 	return nil

@@ -175,11 +175,7 @@ func (u *unixServer) Close() error {
 
 // pageDashboard renders the job table.
 func (s *Server) pageDashboard(w http.ResponseWriter, r *http.Request) {
-	data := s.pageData(r)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pages.Execute(w, data); err != nil {
-		s.cfg.Logf("go-jobserver: dashboard: %v", err)
-	}
+	s.renderPage(w, s.pageData(r))
 }
 
 // pageJob renders one job with its output.
@@ -195,10 +191,34 @@ func (s *Server) pageJob(w http.ResponseWriter, r *http.Request) {
 	data.Job = j
 	data.Output = string(out)
 	data.Truncated = len(out) >= pageLogLimit
-	data.Mechanisms = enabledMechanisms(j.Policy)
+	s.renderPage(w, data)
+}
+
+// renderPage fills the parts of data that read records, and renders the page, under the store's read lock. It writes
+// the bytes after the lock, so a slow client holds no lock.
+func (s *Server) renderPage(w http.ResponseWriter, data pageData) {
+	var buf bytes.Buffer
+	var err error
+	s.store.Read(func() {
+		children := Children(data.Jobs)
+		depths := depthsFrom(data.Jobs, children)
+		data.Graph = make([]GraphRow, 0, len(data.Jobs))
+		for _, j := range data.Jobs {
+			data.Graph = append(data.Graph, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
+		}
+		if data.Job != nil {
+			data.Mechanisms = enabledMechanisms(data.Job.Policy)
+		}
+		err = pages.ExecuteTemplate(&buf, "dashboard.html", data)
+	})
+	if err != nil {
+		s.cfg.Logf("go-jobserver: ERROR: render the page: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pages.ExecuteTemplate(w, "dashboard.html", data); err != nil {
-		s.cfg.Logf("go-jobserver: job page: %v", err)
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		s.cfg.Logf("go-jobserver: write the page: %v", err)
 	}
 }
 
@@ -248,33 +268,26 @@ type GraphRow struct {
 	Children []string
 }
 
-// pageData assembles the dashboard's view of the world.
+// pageData assembles the dashboard's view of the world. renderPage fills the graph rows under the store lock.
 func (s *Server) pageData(*http.Request) pageData {
-	jobs := SortedJobs(s.List())
-	children := Children(jobs)
-	depths := depthsFrom(jobs, children)
-	rows := make([]GraphRow, 0, len(jobs))
-	for _, j := range jobs {
-		rows = append(rows, GraphRow{Job: j, Depth: depths[j.ID], Children: children[j.ID]})
-	}
-	waits := s.Explain()
-	return pageData{Stats: s.Stats(), Jobs: jobs, Graph: rows, Now: time.Now(),
-		Waits: waits, Summary: Summary(jobs, waits), Monitors: s.MonitorViews()}
+	waits, runs := s.explain()
+	return pageData{Stats: s.Stats(), Jobs: s.List(), Now: time.Now(),
+		Waits: waits, Summary: summarize(runs, waits), Monitors: s.MonitorViews()}
 }
 
 // apiList answers GET /api/jobs.
 func (s *Server) apiList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, Response{OK: true, Jobs: SortedJobs(s.List())})
+	s.writeJSON(w, Response{OK: true, Jobs: s.List()})
 }
 
 // apiGet answers GET /api/jobs/{id}.
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 	j, err := s.Get(r.PathValue("id"))
 	if err != nil {
-		writeJSONStatus(w, http.StatusNotFound, Failure(err))
+		s.writeJSONStatus(w,http.StatusNotFound, Failure(err))
 		return
 	}
-	writeJSON(w, Response{OK: true, Job: j})
+	s.writeJSON(w,Response{OK: true, Job: j})
 }
 
 // apiLogs answers GET /api/jobs/{id}/logs, honoring ?offset= and ?max=.
@@ -285,7 +298,7 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 	fmt.Sscanf(r.URL.Query().Get("max"), "%d", &max)
 	out, err := s.Logs(r.PathValue("id"), offset, max)
 	if err != nil {
-		writeJSONStatus(w, http.StatusNotFound, Failure(err))
+		s.writeJSONStatus(w,http.StatusNotFound, Failure(err))
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -295,23 +308,23 @@ func (s *Server) apiLogs(w http.ResponseWriter, r *http.Request) {
 // apiStats answers GET /api/stats.
 func (s *Server) apiStats(w http.ResponseWriter, r *http.Request) {
 	st := s.Stats()
-	writeJSON(w, Response{OK: true, Stats: &st})
+	s.writeJSON(w,Response{OK: true, Stats: &st})
 }
 
 // apiEnqueue answers POST /api/jobs with a job spec in the body.
 func (s *Server) apiEnqueue(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
 		return
 	}
 	spec, err := decodeSpec(body)
 	if err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
 		return
 	}
 	resp := s.Handle(Request{Op: OpEnqueue, Spec: spec})
-	writeJSONStatus(w, statusFor(resp), resp)
+	s.writeJSONStatus(w,statusFor(resp), resp)
 }
 
 // apiCall answers POST /api/<op> with either a request envelope or a spec.
@@ -319,17 +332,17 @@ func (s *Server) apiCall(w http.ResponseWriter, r *http.Request) {
 	op := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, Failure(err))
+		s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
 		return
 	}
 	req := Request{Op: op}
 	if len(body) > 0 {
 		if json.Valid(body) && strings.Contains(op, "/") {
-			writeJSONStatus(w, http.StatusNotFound, Failure(fmt.Errorf("go-jobserver: no route %s", r.URL.Path)))
+			s.writeJSONStatus(w,http.StatusNotFound, Failure(fmt.Errorf("go-jobserver: no route %s", r.URL.Path)))
 			return
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSONStatus(w, http.StatusBadRequest, Failure(err))
+			s.writeJSONStatus(w,http.StatusBadRequest, Failure(err))
 			return
 		}
 	}
@@ -337,7 +350,7 @@ func (s *Server) apiCall(w http.ResponseWriter, r *http.Request) {
 		req.Op = op
 	}
 	resp := s.Handle(req)
-	writeJSONStatus(w, statusFor(resp), resp)
+	s.writeJSONStatus(w,statusFor(resp), resp)
 }
 
 // decodeSpec accepts either a full Spec or a bare argv array.
@@ -379,19 +392,33 @@ func statusFor(resp Response) int {
 	return http.StatusInternalServerError
 }
 
-func writeJSON(w http.ResponseWriter, resp Response) {
-	writeJSONStatus(w, statusFor(resp), resp)
+func (s *Server) writeJSON(w http.ResponseWriter, resp Response) {
+	s.writeJSONStatus(w, statusFor(resp), resp)
 }
 
-func writeJSONStatus(w http.ResponseWriter, status int, resp Response) {
+// writeJSONStatus encodes resp under the store's read lock, because its jobs are the store's records. It writes the
+// bytes after the lock, so a slow client holds no lock.
+func (s *Server) writeJSONStatus(w http.ResponseWriter, status int, resp Response) {
+	body, err := s.encode(resp)
+	if err != nil {
+		status = http.StatusInternalServerError
+		body, _ = json.Marshal(Failure(err))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(resp); err != nil {
-		// The status line is already sent; the log is the only place left.
-		_ = err
+	if _, err := w.Write(body); err != nil {
+		s.cfg.Logf("go-jobserver: write a response: %v", err)
 	}
+}
+
+// encode renders a response as JSON under the store's read lock.
+func (s *Server) encode(resp Response) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	var err error
+	s.store.Read(func() { err = enc.Encode(resp) })
+	return buf.Bytes(), err
 }
 
 func shortTime(t time.Time) string {

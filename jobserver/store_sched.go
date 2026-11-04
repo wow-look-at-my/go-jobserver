@@ -8,8 +8,8 @@ import "github.com/wow-look-at-my/go-containers/set"
 // dependencies. It reads the store's own records under s.mu and copies no task. deps holds the ID, state and
 // identity of each dependency of a ready task, for identityOf after the lock is released.
 func (s *Store) schedule() (blocked, ready []string, deps map[string]*Job) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	seen := set.New[string]()
 	var jobs []*Job
 	add := func(id string) {

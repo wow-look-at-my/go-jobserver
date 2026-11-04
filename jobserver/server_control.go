@@ -37,19 +37,23 @@ func (s *Server) Interrupt(id string) error {
 	h, ok := s.running[id]
 	s.mu.Unlock()
 	if !ok {
-		j, found := s.store.Job(id)
-		if !found {
+		var inbox string
+		var st State
+		if !s.store.view(id, func(j *Job) { inbox, st = j.Inbox, j.State }) {
 			return fmt.Errorf("%w: %s", ErrNotFound, id)
 		}
-		if j.Inbox != "" && !j.State.Terminal() {
+		if inbox != "" && !st.Terminal() {
 			return s.cancel(id)
 		}
-		if j.State.Terminal() {
-			return fmt.Errorf("%w: %s is %s", ErrBadState, id, j.State)
+		if st.Terminal() {
+			return fmt.Errorf("%w: %s is %s", ErrBadState, id, st)
 		}
 		// Not running yet: cancel it outright so the scheduler skips it.
 		s.defCore.forget(id)
-		return s.store.Finish(id, StateCancelled, -1, "interrupted", nil, j.LogBytes)
+		if _, err := s.store.finishIfLive(id, StateCancelled, "interrupted"); err != nil {
+			return err
+		}
+		return nil
 	}
 	h.cancel()
 	select {

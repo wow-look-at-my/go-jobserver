@@ -13,6 +13,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/wow-look-at-my/api-dsl v0.0.0
+	modernc.org/sqlite v1.56.0
 )
 
 require (

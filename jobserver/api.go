@@ -156,9 +156,8 @@ func (s *Server) Handle(req Request) Response {
 		return Response{OK: true, Job: j}
 
 	case OpList:
-		jobs := s.List()
-		waits := s.Explain()
-		return Response{OK: true, Jobs: jobs, JobWaits: waits, Summary: Summary(jobs, waits)}
+		waits, runs := s.explain()
+		return Response{OK: true, Jobs: s.List(), JobWaits: waits, Summary: summarize(runs, waits)}
 
 	case OpGet:
 		j, err := s.Get(req.ID)

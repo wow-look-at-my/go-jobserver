@@ -40,8 +40,8 @@ func (s *Server) endOrphans(now time.Time) {
 		if key == "" || s.inboxes[key] != nil {
 			continue
 		}
-		for _, j := range s.store.liveIn(key) {
-			s.finishIfLive(j.ID, StateCancelled, msgInboxGone)
+		for _, t := range s.store.liveIn(key) {
+			s.finishIfLive(t.id, StateCancelled, msgInboxGone)
 			ended = true
 		}
 	}
