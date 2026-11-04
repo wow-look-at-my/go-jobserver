@@ -192,6 +192,14 @@ func (s *Store) liveIn(inbox string) []liveTask {
 	return out
 }
 
+// OpenIn returns the record of each task of one inbox that has not ended, in
+// creation order.
+func (s *Store) OpenIn(inbox string) []*Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sortedLocked(s.idx.live[inboxKey(inbox)])
+}
+
 // RunningIn returns the IDs of the running tasks of one inbox, in creation order. It reads the index and copies no task.
 func (s *Store) RunningIn(inbox string) []string {
 	s.mu.RLock()

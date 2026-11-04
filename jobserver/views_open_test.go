@@ -15,6 +15,19 @@ func nodeIDs(g JobGraph) []string {
 	return out
 }
 
+func TestOpenInReturnsTheOpenRecordsOfAnInbox(t *testing.T) {
+	srv := newTestServer(t, nil)
+	require.NoError(t, srv.store.SetPaused(true))
+	addEnded(t, srv.store, "x")
+	open := addQueued(t, srv.store, "x")
+	addQueued(t, srv.store, "y")
+	got := srv.store.OpenIn("x")
+	require.Len(t, got, 1)
+	rec, ok := srv.store.Job(open)
+	require.True(t, ok)
+	assert.Same(t, rec, got[0], "OpenIn returns the one record of the task")
+}
+
 func TestOpenGraphShowsOpenTasksAndTheirEndedDepsOnly(t *testing.T) {
 	srv := newTestServer(t, nil)
 	require.NoError(t, srv.store.SetPaused(true))
