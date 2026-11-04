@@ -41,18 +41,18 @@ func (s *Scheduler) planLocked() {
 		l  *Lease
 		st QueueState
 	}
-	ordered := s.orderLocked(now)
+	ordered := urgentFirst(s.orderLocked(now))
 	queued := make([]wait, 0, len(ordered))
 	// The fit of a lease depends only on p and on these fields, so waiters that
 	// share them share one result until p changes.
 	type fitKey struct {
-		group              string
-		groupOnly, monitor bool
-		cost               float64
+		group                      string
+		groupOnly, monitor, urgent bool
+		cost                       float64
 	}
 	refused := map[fitKey]QueueState{}
 	for _, l := range ordered {
-		k := fitKey{l.req.Group, l.req.GroupOnly, l.req.Monitor, l.cost}
+		k := fitKey{l.req.Group, l.req.GroupOnly, l.req.Monitor, l.req.Urgent, l.cost}
 		if st, ok := refused[k]; ok {
 			queued = append(queued, wait{l, st})
 			continue
@@ -145,7 +145,7 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 		return QueueState{Kind: WaitCap, Key: WaitCap,
 			Reason: fmt.Sprintf("run cap: %d of %d running", p.running, limit)}, false
 	}
-	if p.reserved > 0 && p.reserved+cost > bookable(p.budget) {
+	if p.reserved > 0 && p.reserved+cost > limitFor(req, p.budget) {
 		return QueueState{Kind: WaitCPU, Key: WaitCPU,
 			Reason: fmt.Sprintf("cpu budget: %s of %s CPUs reserved, this run needs %s",
 				fmtCPUs(p.reserved), fmtCPUs(p.budget), fmtCPUs(cost))}, false
@@ -153,7 +153,7 @@ func (s *Scheduler) fitLocked(p *planState, req LeaseRequest, cost float64) (Que
 	if cost <= freeCost {
 		return QueueState{}, true
 	}
-	if runnable := s.host.runnable(); p.running > 0 && s.host.cpus > 0 && float64(runnable)+p.unmeasured+cost > bookable(float64(s.host.cpus)) {
+	if runnable := s.host.runnable(); p.running > 0 && s.host.cpus > 0 && float64(runnable)+p.unmeasured+cost > limitFor(req, float64(s.host.cpus)) {
 		return QueueState{Kind: WaitCPU, Key: WaitCPU,
 			Reason: fmt.Sprintf("host load: %d tasks want a CPU on %d CPUs, this run needs %s",
 				runnable, s.host.cpus, fmtCPUs(cost))}, false
@@ -291,6 +291,20 @@ func (s *Scheduler) orderLocked(now time.Time) []*Lease {
 		out = append(out, sorted[best][0])
 		sorted[best] = sorted[best][1:]
 	}
+}
+
+// urgentFirst moves the urgent leases ahead of the rest, and keeps the order within each.
+func urgentFirst(ls []*Lease) []*Lease {
+	slices.SortStableFunc(ls, func(a, b *Lease) int {
+		switch {
+		case a.req.Urgent == b.req.Urgent:
+			return 0
+		case a.req.Urgent:
+			return -1
+		}
+		return 1
+	})
+	return ls
 }
 
 // orderOneList sorts the leases of one key list by priority, then arrival, with each new batch kept together.

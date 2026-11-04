@@ -97,7 +97,7 @@ func inboxHooksOf[T iSpec](self any) (inboxHooks, error) {
 			}
 			r := l.LeaseFor(spec)
 			return LeaseRequest{Class: r.Class, Fallback: r.Fallback, Group: r.Group, Batch: r.Batch,
-				GroupOnly: r.GroupOnly, Policy: r.Policy, Limits: r.Limits}, nil
+				GroupOnly: r.GroupOnly, Urgent: r.Urgent, Policy: r.Policy, Limits: r.Limits}, nil
 		}
 	}
 	if _, has := t.MethodByName("OnQueue"); has {
