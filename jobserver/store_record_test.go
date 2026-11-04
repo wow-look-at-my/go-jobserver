@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,7 +68,14 @@ func TestEveryAccessorReturnsTheOneRecordOfATask(t *testing.T) {
 
 // bigSpec is a spec of about size bytes.
 func bigSpec(size int) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"title":"t","pad":%q}`, make([]byte, size)))
+	b, err := json.Marshal(struct {
+		Title string `json:"title"`
+		Pad   string `json:"pad"`
+	}{"t", strings.Repeat("x", size)})
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 func TestAReadOfTheTasksCopiesNoSpec(t *testing.T) {

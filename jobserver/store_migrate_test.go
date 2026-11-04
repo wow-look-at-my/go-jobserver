@@ -135,7 +135,7 @@ func TestOpenMovesAJournalOfTheReleaseBeforeIntoTheDatabase(t *testing.T) {
 func TestALargeJournalMovesWhole(t *testing.T) {
 	dir := t.TempDir()
 	const n = 3000
-	spec := json.RawMessage(fmt.Sprintf(`{"title":"t","pad":%q}`, make([]byte, 4096)))
+	spec := bigSpec(4096)
 	start := time.Now().Add(-time.Hour)
 	jobs := make([]*Job, 0, n)
 	for i := range n {

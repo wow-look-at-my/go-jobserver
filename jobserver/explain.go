@@ -56,8 +56,7 @@ func (s *Server) waitInputs() waitInputs {
 	return in
 }
 
-// explain computes the waits of each task that has not ended, and which of them run. Are monitors, in one pass
-// under the store lock. It reads memory only: a task that waits has not ended, and memory holds its dependencies.
+// explain returns the waits of the open tasks and the running tasks. It reads only memory.
 func (s *Server) explain() (map[string][]Wait, map[string]bool) {
 	in := s.waitInputs()
 	var ex explained

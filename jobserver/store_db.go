@@ -18,8 +18,7 @@ import (
 // dbName is the database file under a server directory.
 const dbName = "tasks.sqlite"
 
-// schema is every table and index of the database. A task is one row of tasks. Its spec, its result, its steps and
-// its waits each have their own table. A change of one step writes that step and not the task's spec.
+// schema is the tables. A step change writes no spec.
 //
 //go:embed store_schema.sql
 var schema string
